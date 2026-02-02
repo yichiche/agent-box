@@ -3,6 +3,7 @@
 Analyzes torch profiler trace files (.trace.json.gz) and provides breakdowns by:
 - Stage: prefill vs decode
 - Kernel type: attention, MoE, quantization, communication, linear, memory, other
+- Layer-level analysis with per-layer kernel sequences
 """
 
 import argparse
@@ -39,6 +40,14 @@ class KernelType(Enum):
     OTHER = "other"
 
 
+class LayerType(Enum):
+    """Type of transformer layer."""
+
+    MLA_FC = "MLA+FC"  # MLA attention + fully connected
+    MLA_MOE = "MLA+MoE"  # MLA attention + MoE
+    UNKNOWN = "unknown"
+
+
 @dataclass
 class KernelEvent:
     """Single kernel execution event from the trace."""
@@ -50,6 +59,7 @@ class KernelEvent:
     kernel_type: KernelType
     grid: Optional[Tuple[int, int, int]] = None
     block: Optional[Tuple[int, int, int]] = None
+    simplified_name: str = ""  # Short name for display
 
     @property
     def duration_ms(self) -> float:
@@ -93,10 +103,71 @@ class KernelStats:
 
 
 @dataclass
+class LayerEvent:
+    """Single layer's execution with all its kernels."""
+
+    layer_idx: int
+    layer_type: LayerType
+    stage: Stage
+    kernels: List[KernelEvent] = field(default_factory=list)
+
+    @property
+    def total_time_us(self) -> float:
+        return sum(k.duration_us for k in self.kernels)
+
+    @property
+    def total_time_ms(self) -> float:
+        return self.total_time_us / 1000.0
+
+    @property
+    def attention_time_us(self) -> float:
+        return sum(
+            k.duration_us for k in self.kernels if k.kernel_type == KernelType.ATTENTION
+        )
+
+    @property
+    def moe_time_us(self) -> float:
+        return sum(
+            k.duration_us for k in self.kernels if k.kernel_type == KernelType.MOE
+        )
+
+    @property
+    def linear_time_us(self) -> float:
+        return sum(
+            k.duration_us for k in self.kernels if k.kernel_type == KernelType.LINEAR
+        )
+
+    @property
+    def communication_time_us(self) -> float:
+        return sum(
+            k.duration_us
+            for k in self.kernels
+            if k.kernel_type == KernelType.COMMUNICATION
+        )
+
+    @property
+    def quantization_time_us(self) -> float:
+        return sum(
+            k.duration_us
+            for k in self.kernels
+            if k.kernel_type == KernelType.QUANTIZATION
+        )
+
+    def get_breakdown(self) -> Dict[KernelType, float]:
+        """Get time breakdown by kernel type."""
+        breakdown = {}
+        for k in self.kernels:
+            if k.kernel_type not in breakdown:
+                breakdown[k.kernel_type] = 0.0
+            breakdown[k.kernel_type] += k.duration_us
+        return breakdown
+
+
+@dataclass
 class AnalysisResult:
     """Complete analysis result with all breakdowns."""
 
-    # All kernel events
+    # All kernel events (time-ordered)
     events: List[KernelEvent] = field(default_factory=list)
 
     # Per-kernel stats (keyed by kernel name)
@@ -118,6 +189,9 @@ class AnalysisResult:
         default_factory=dict
     )
 
+    # Layer-level analysis
+    layers: List[LayerEvent] = field(default_factory=list)
+
     @property
     def total_time_us(self) -> float:
         return sum(e.duration_us for e in self.events)
@@ -132,19 +206,12 @@ class AnalysisResult:
 
 
 class KernelClassifier:
-    """Classifies kernels by stage and type using pattern matching."""
+    """Classifies kernels by stage, type, and provides simplified names."""
 
     def __init__(self, grid_threshold: int = 10000):
-        """
-        Args:
-            grid_threshold: Grid[0] threshold for decode heuristic.
-                           Grid[0] > threshold suggests decode (large batch).
-        """
         self.grid_threshold = grid_threshold
 
         # Stage detection patterns (priority order)
-        # qseqlen1 -> decode (single query token)
-        # qseqlen[2-9] or qseqlen\d{2,} -> prefill (multi-token)
         self._stage_patterns = [
             (re.compile(r"qseqlen1[^0-9]|qseqlen1$", re.IGNORECASE), Stage.DECODE),
             (re.compile(r"qseqlen[2-9]|qseqlen\d{2,}", re.IGNORECASE), Stage.PREFILL),
@@ -157,6 +224,12 @@ class KernelClassifier:
                 re.compile(r"generate_draft_decode|create_extend_after_decode"),
                 Stage.DECODE,
             ),
+            # Quantization format patterns for stage detection
+            (
+                re.compile(r"_fused_rms_mxfp4|_gemm_afp4wfp4|_batched_gemm_a16wfp4"),
+                Stage.PREFILL,
+            ),
+            (re.compile(r"_fused_rms_fp8|_gemm_a8w8|_batched_gemm_a8w8"), Stage.DECODE),
         ]
 
         # Kernel type patterns
@@ -166,7 +239,8 @@ class KernelClassifier:
                 re.compile(
                     r"aiter::mla_|decode_attention|flash_attn|attention|softmax|"
                     r"fmha_|mla_reduce|kv_cache|flashinfer|set_mla_kv|"
-                    r"kn_entry_2c_sbhd|kn_get_mla_metadata|qk_rope",
+                    r"kn_entry_2c_sbhd|kn_get_mla_metadata|qk_rope|"
+                    r"concat_and_cast_mha|kn_mla_reduce",
                     re.IGNORECASE,
                 ),
                 KernelType.ATTENTION,
@@ -175,7 +249,8 @@ class KernelClassifier:
             (
                 re.compile(
                     r"fused_moe|moe_align|topk|expert|MoeFlatmm|MoeSorting|"
-                    r"moe_gemm|shared_experts|grouped_topk",
+                    r"kernel_moe_gemm|kernel_moe_mxgemm|shared_experts|grouped_topk|"
+                    r"moe_fused_gate|_moe_mxfp4_sort",
                     re.IGNORECASE,
                 ),
                 KernelType.MOE,
@@ -185,7 +260,8 @@ class KernelClassifier:
                 re.compile(
                     r"mxfp4|fp8|quant|_gemm_afp4wfp4|_fused_rms_mxfp4|"
                     r"_batched_gemm_a16wfp4|dynamic_per_group_scaled_quant|"
-                    r"_dynamic_mxfp4|_fused_flatten_mxfp4|fp4x2",
+                    r"_dynamic_mxfp4|_fused_flatten|fp4x2|_gemm_a8w8|"
+                    r"_batched_gemm_a8w8|_fused_rms_fp8",
                     re.IGNORECASE,
                 ),
                 KernelType.QUANTIZATION,
@@ -202,8 +278,7 @@ class KernelClassifier:
             # Linear/GEMM patterns (after quant to avoid overlap)
             (
                 re.compile(
-                    r"gemm|gemv|matmul|cublas|cutlass|hipblas|rocblas|"
-                    r"Cijk_Alik_Bljk|_gemm_a16_w16",
+                    r"Cijk_Alik_Bljk|_gemm_a16_w16|Custom_Cijk",
                     re.IGNORECASE,
                 ),
                 KernelType.LINEAR,
@@ -211,35 +286,65 @@ class KernelClassifier:
             # Memory patterns
             (
                 re.compile(
-                    r"memcpy|memset|copy|__amd_rocclr_copyBuffer|"
-                    r"vectorized_elementwise_kernel.*copy",
+                    r"memcpy|memset|__amd_rocclr_copyBuffer|"
+                    r"bfloat16_copy|float8_copy",
                     re.IGNORECASE,
                 ),
                 KernelType.MEMORY,
             ),
         ]
 
+        # Simplified name patterns for display
+        self._simplify_patterns = [
+            (re.compile(r"rcclGenericKernel|cross_device_reduce"), "ALLREDUCE"),
+            (re.compile(r"fmha_fwd"), "FMHA"),
+            (re.compile(r"mla_a8w8.*qseqlen1"), "MLA_DECODE"),
+            (
+                re.compile(r"mla_a8w8.*qseqlen[2-9]|mla_a8w8.*qseqlen\d{2,}"),
+                "MLA_PREFILL",
+            ),
+            (re.compile(r"kn_mla_reduce"), "MLA_REDUCE"),
+            (re.compile(r"_fused_rms_mxfp4_quant"), "RMS_MXFP4"),
+            (re.compile(r"_fused_rms_fp8"), "RMS_FP8"),
+            (re.compile(r"_gemm_afp4wfp4.*reduce"), "GEMM_FP4_RED"),
+            (re.compile(r"_gemm_afp4wfp4"), "GEMM_FP4"),
+            (re.compile(r"_gemm_a8w8_blockscale.*reduce"), "GEMM_FP8_RED"),
+            (re.compile(r"_gemm_a8w8_blockscale"), "GEMM_FP8"),
+            (re.compile(r"Rmsnorm2dFwd"), "RMSNORM"),
+            (re.compile(r"kn_entry_2c_sbhd"), "KV_CACHE"),
+            (re.compile(r"set_mla_kv_buffer"), "MLA_KV_SET"),
+            (re.compile(r"_dynamic_mxfp4_quant"), "DYN_MXFP4"),
+            (re.compile(r"concat_and_cast_mha"), "MHA_CONCAT"),
+            (re.compile(r"kernel_moe_mxgemm|kernel_moe_gemm"), "MOE_GEMM"),
+            (re.compile(r"MoeSorting|moe_fused_gate|_moe_mxfp4_sort"), "MOE_SORT"),
+            (re.compile(r"dynamic_per_group_scaled_quant"), "DYN_QUANT"),
+            (re.compile(r"fused_append_shared_experts"), "SHARED_EXP"),
+            (re.compile(r"act_and_mul_kernel"), "ACT_MUL"),
+            (re.compile(r"Cijk_Alik|Custom_Cijk"), "HIPBLAS_GEMM"),
+            (re.compile(r"grouped_topk"), "TOPK"),
+            (re.compile(r"bfloat16_copy"), "BF16_COPY"),
+            (re.compile(r"float8_copy"), "FP8_COPY"),
+            (re.compile(r"create_flashinfer|generate_draft"), "SPEC_INDEX"),
+            (re.compile(r"qk_rope_cat_and_cache"), "ROPE_CACHE"),
+            (re.compile(r"_batched_gemm_a16wfp4"), "BATCH_GEMM_FP4"),
+            (re.compile(r"_batched_gemm_a8w8"), "BATCH_GEMM_FP8"),
+            (re.compile(r"_gemm_a16_w16"), "GEMM_A16W16"),
+            (re.compile(r"_fused_flatten"), "FLATTEN_QUANT"),
+            (re.compile(r"MoeFlatmm"), "MOE_FLATMM"),
+        ]
+
     def classify_stage(
         self, name: str, grid: Optional[Tuple[int, int, int]] = None
     ) -> Stage:
-        """Classify kernel stage based on name and grid dimensions.
-
-        Priority:
-        1. Kernel name patterns (most reliable)
-        2. Grid dimension heuristics (fallback)
-        """
-        # Try name patterns first
+        """Classify kernel stage based on name and grid dimensions."""
         for pattern, stage in self._stage_patterns:
             if pattern.search(name):
                 return stage
 
-        # Fallback to grid heuristics if available
         if grid is not None and len(grid) >= 1:
             grid_0 = grid[0]
-            # Large grid[0] suggests decode (many sequences in batch)
             if grid_0 > self.grid_threshold:
                 return Stage.DECODE
-            # Small grid[0] suggests prefill (fewer sequences, longer context)
             elif grid_0 < 200:
                 return Stage.PREFILL
 
@@ -252,12 +357,165 @@ class KernelClassifier:
                 return kernel_type
         return KernelType.OTHER
 
+    def simplify_name(self, name: str) -> str:
+        """Get simplified kernel name for display."""
+        for pattern, simple_name in self._simplify_patterns:
+            if pattern.search(name):
+                return simple_name
+        # Truncate unknown names
+        return name[:25] if len(name) > 25 else name
+
+
+class LayerDetector:
+    """Detects layer boundaries in kernel sequences."""
+
+    def __init__(self):
+        # Layer start markers (after ALLREDUCE)
+        self._layer_start_patterns = [
+            re.compile(
+                r"_fused_rms_mxfp4_quant|_fused_rms_fp8"
+            ),  # Prefill/decode layernorm
+        ]
+
+        # MoE block markers
+        self._moe_markers = [
+            re.compile(
+                r"MoeSorting|moe_fused_gate|kernel_moe_gemm|kernel_moe_mxgemm|_moe_mxfp4_sort"
+            ),
+        ]
+
+        # FC block markers (activation function after linear)
+        self._fc_markers = [
+            re.compile(r"act_and_mul_kernel|silu_kernel"),
+        ]
+
+    def detect_layers(self, events: List[KernelEvent]) -> List[LayerEvent]:
+        """Detect layer boundaries and classify layers.
+
+        Layer stage is determined by the dominant stage of kernels within each layer.
+        """
+        if not events:
+            return []
+
+        layers = []
+        current_layer_kernels: List[KernelEvent] = []
+        layer_idx = 0
+        in_layer = False
+        saw_attention = False
+        saw_moe = False
+        saw_fc = False
+
+        for i, event in enumerate(events):
+            name = event.name
+            simplified = event.simplified_name
+
+            # Detect layer start: ALLREDUCE followed by RMS layernorm
+            is_allreduce = (
+                simplified == "ALLREDUCE"
+                or "rcclGenericKernel" in name
+                or "cross_device_reduce" in name
+            )
+            is_layer_start = any(p.search(name) for p in self._layer_start_patterns)
+
+            # Check if this is a MoE or FC marker
+            is_moe = any(p.search(name) for p in self._moe_markers)
+            is_fc = any(p.search(name) for p in self._fc_markers)
+            is_attention = event.kernel_type == KernelType.ATTENTION
+
+            # Start a new layer on layer_start after allreduce or at very beginning
+            if is_layer_start and (
+                not in_layer
+                or (
+                    len(current_layer_kernels) > 0
+                    and current_layer_kernels[-1].simplified_name == "ALLREDUCE"
+                )
+            ):
+                # Save previous layer if exists
+                if current_layer_kernels and saw_attention:
+                    layer_type = (
+                        LayerType.MLA_MOE
+                        if saw_moe
+                        else (LayerType.MLA_FC if saw_fc else LayerType.UNKNOWN)
+                    )
+                    # Determine stage from kernels
+                    stage = self._determine_layer_stage(current_layer_kernels)
+                    layers.append(
+                        LayerEvent(
+                            layer_idx=layer_idx,
+                            layer_type=layer_type,
+                            stage=stage,
+                            kernels=current_layer_kernels.copy(),
+                        )
+                    )
+                    layer_idx += 1
+
+                # Start new layer (include the preceding ALLREDUCE if present)
+                if (
+                    current_layer_kernels
+                    and current_layer_kernels[-1].simplified_name == "ALLREDUCE"
+                ):
+                    current_layer_kernels = [current_layer_kernels[-1], event]
+                else:
+                    current_layer_kernels = [event]
+                in_layer = True
+                saw_attention = False
+                saw_moe = False
+                saw_fc = False
+            else:
+                current_layer_kernels.append(event)
+
+            # Track what we've seen in this layer
+            if is_attention:
+                saw_attention = True
+            if is_moe:
+                saw_moe = True
+            if is_fc:
+                saw_fc = True
+
+        # Save last layer
+        if current_layer_kernels and saw_attention:
+            layer_type = (
+                LayerType.MLA_MOE
+                if saw_moe
+                else (LayerType.MLA_FC if saw_fc else LayerType.UNKNOWN)
+            )
+            stage = self._determine_layer_stage(current_layer_kernels)
+            layers.append(
+                LayerEvent(
+                    layer_idx=layer_idx,
+                    layer_type=layer_type,
+                    stage=stage,
+                    kernels=current_layer_kernels,
+                )
+            )
+
+        return layers
+
+    def _determine_layer_stage(self, kernels: List[KernelEvent]) -> Stage:
+        """Determine layer stage based on dominant stage of its kernels."""
+        prefill_count = sum(1 for k in kernels if k.stage == Stage.PREFILL)
+        decode_count = sum(1 for k in kernels if k.stage == Stage.DECODE)
+
+        if prefill_count > decode_count:
+            return Stage.PREFILL
+        elif decode_count > prefill_count:
+            return Stage.DECODE
+        else:
+            # If tied or all unknown, check for stage-specific patterns
+            for k in kernels:
+                if "mxfp4" in k.name.lower() or "afp4" in k.name.lower():
+                    return Stage.PREFILL
+                if "fp8" in k.name.lower() or "a8w8" in k.name.lower():
+                    return Stage.DECODE
+            return Stage.UNKNOWN
+
 
 class TraceAnalyzer:
     """Main analyzer that loads and processes trace files."""
 
     def __init__(self, grid_threshold: int = 10000):
         self.classifier = KernelClassifier(grid_threshold=grid_threshold)
+        self.layer_detector = LayerDetector()
 
     def load_trace(self, path: str) -> Dict[str, Any]:
         """Load trace file (supports .json.gz and .json)."""
@@ -275,11 +533,9 @@ class TraceAnalyzer:
         if grid_data is None:
             return None
 
-        # Handle list format [x, y, z]
         if isinstance(grid_data, list) and len(grid_data) >= 3:
             return (int(grid_data[0]), int(grid_data[1]), int(grid_data[2]))
 
-        # Handle string format "[x, y, z]"
         if isinstance(grid_data, str):
             try:
                 parsed = json.loads(grid_data)
@@ -290,27 +546,27 @@ class TraceAnalyzer:
 
         return None
 
-    def analyze(self, trace_data: Dict[str, Any]) -> AnalysisResult:
+    def analyze(
+        self, trace_data: Dict[str, Any], detect_layers: bool = False
+    ) -> AnalysisResult:
         """Analyze trace data and compute statistics."""
         result = AnalysisResult()
 
         events = trace_data.get("traceEvents", [])
         logger.info(f"Total events in trace: {len(events)}")
 
-        # Filter kernel events (ph="X" means complete event, cat="kernel" means GPU kernel)
+        # Filter kernel events
         kernel_events = [
             e for e in events if e.get("ph") == "X" and e.get("cat") == "kernel"
         ]
         logger.info(f"Kernel events found: {len(kernel_events)}")
 
+        # Sort by timestamp
+        kernel_events.sort(key=lambda x: x.get("ts", 0))
+
         # Process each kernel event
         for event in kernel_events:
             name = event.get("name", "")
-            # Timestamps in trace are in microseconds (or nanoseconds, need to check)
-            # Looking at the sample data, ts and dur appear to be in nanoseconds actually
-            # ts: 2845311300552.151, dur: 54.679
-            # The dur values are small, suggesting milliseconds or microseconds
-            # Let's treat dur as microseconds based on the scale
             timestamp_us = event.get("ts", 0)
             duration_us = event.get("dur", 0)
 
@@ -321,6 +577,7 @@ class TraceAnalyzer:
             # Classify
             stage = self.classifier.classify_stage(name, grid)
             kernel_type = self.classifier.classify_type(name)
+            simplified_name = self.classifier.simplify_name(name)
 
             # Create event
             kernel_event = KernelEvent(
@@ -331,35 +588,47 @@ class TraceAnalyzer:
                 kernel_type=kernel_type,
                 grid=grid,
                 block=block,
+                simplified_name=simplified_name,
             )
             result.events.append(kernel_event)
 
-            # Update per-kernel stats
+            # Update stats
             if name not in result.per_kernel_stats:
                 result.per_kernel_stats[name] = KernelStats()
             result.per_kernel_stats[name].add(duration_us)
 
-            # Update per-stage stats
             if stage not in result.per_stage_stats:
                 result.per_stage_stats[stage] = KernelStats()
             result.per_stage_stats[stage].add(duration_us)
 
-            # Update per-type stats
             if kernel_type not in result.per_type_stats:
                 result.per_type_stats[kernel_type] = KernelStats()
             result.per_type_stats[kernel_type].add(duration_us)
 
-            # Update per-stage-type stats
             stage_type_key = (stage, kernel_type)
             if stage_type_key not in result.per_stage_type_stats:
                 result.per_stage_type_stats[stage_type_key] = KernelStats()
             result.per_stage_type_stats[stage_type_key].add(duration_us)
 
-            # Update per-stage-kernel stats
             stage_kernel_key = (stage, name)
             if stage_kernel_key not in result.per_stage_kernel_stats:
                 result.per_stage_kernel_stats[stage_kernel_key] = KernelStats()
             result.per_stage_kernel_stats[stage_kernel_key].add(duration_us)
+
+        # Detect layers if requested
+        if detect_layers:
+            # Detect layers from ALL events (don't filter by stage)
+            # Layer stage is determined by dominant stage within each layer
+            all_layers = self.layer_detector.detect_layers(result.events)
+
+            # Count layers by stage
+            prefill_count = sum(1 for l in all_layers if l.stage == Stage.PREFILL)
+            decode_count = sum(1 for l in all_layers if l.stage == Stage.DECODE)
+
+            result.layers = all_layers
+            logger.info(
+                f"Detected {prefill_count} prefill layers, {decode_count} decode layers"
+            )
 
         return result
 
@@ -379,6 +648,10 @@ class ReportFormatter:
         else:
             return f"{time_ms * 1000:.3f} us"
 
+    def format_time_us(self, time_us: float) -> str:
+        """Format time in microseconds with appropriate unit."""
+        return self.format_time(time_us / 1000.0)
+
     def format_percentage(self, part: float, total: float) -> str:
         """Format percentage."""
         if total == 0:
@@ -395,7 +668,6 @@ class ReportFormatter:
         total_time_ms = self.result.total_time_ms
         print(f"Total Kernel Time:   {self.format_time(total_time_ms)}")
 
-        # Stage breakdown
         for stage in [Stage.PREFILL, Stage.DECODE, Stage.UNKNOWN]:
             stats = self.result.per_stage_stats.get(stage, KernelStats())
             stage_time_ms = stats.total_time_ms
@@ -417,7 +689,6 @@ class ReportFormatter:
 
         total_time_ms = self.result.total_time_ms
 
-        # Sort by total time descending
         sorted_types = sorted(
             self.result.per_type_stats.items(),
             key=lambda x: x[1].total_time_us,
@@ -445,7 +716,6 @@ class ReportFormatter:
         stage_stats = self.result.per_stage_stats.get(stage, KernelStats())
         stage_total_ms = stage_stats.total_time_ms
 
-        # Filter and sort by total time descending
         stage_type_items = [
             (kt, stats)
             for (s, kt), stats in self.result.per_stage_type_stats.items()
@@ -468,7 +738,6 @@ class ReportFormatter:
         """Print top kernels by total time."""
         if stage is not None:
             title = f"TOP {top_n} KERNELS ({stage.value.upper()})"
-            # Filter by stage
             kernel_items = [
                 (name, stats)
                 for (s, name), stats in self.result.per_stage_kernel_stats.items()
@@ -490,19 +759,123 @@ class ReportFormatter:
         )
         print("-" * 80)
 
-        # Sort by total time descending
         sorted_kernels = sorted(
             kernel_items, key=lambda x: x[1].total_time_us, reverse=True
         )
 
         for i, (name, stats) in enumerate(sorted_kernels[:top_n], 1):
             pct = self.format_percentage(stats.total_time_ms, total_time_ms)
-            # Truncate name if too long
             display_name = name[:60] + "..." if len(name) > 63 else name
             print(
                 f"{i:<4} {stats.count:>10,} {self.format_time(stats.total_time_ms):>14} "
                 f"{self.format_time(stats.avg_time_ms):>12} {pct:>8}  {display_name}"
             )
+
+        print()
+
+    def print_layer_summary(self, stage: Optional[Stage] = None) -> None:
+        """Print layer-level summary."""
+        if not self.result.layers:
+            print("No layer analysis available. Use --layer-analysis to enable.")
+            return
+
+        # Filter layers by stage if specified
+        layers = self.result.layers
+        if stage is not None:
+            layers = [l for l in layers if l.stage == stage]
+
+        if not layers:
+            return
+
+        stage_name = stage.value.upper() if stage else "ALL"
+        print("-" * 100)
+        print(f"LAYER ANALYSIS ({stage_name})")
+        print("-" * 100)
+        print()
+        print(
+            f"{'Layer':<8} {'Type':<10} {'Total':>12} {'Attn':>12} {'MoE/FC':>12} {'Comm':>12} {'Quant':>12} {'#Kern':>8}"
+        )
+        print("-" * 100)
+
+        for layer in layers:
+            moe_fc_time = (
+                layer.moe_time_us
+                if layer.layer_type == LayerType.MLA_MOE
+                else layer.linear_time_us
+            )
+            print(
+                f"{layer.layer_idx:<8} {layer.layer_type.value:<10} "
+                f"{self.format_time_us(layer.total_time_us):>12} "
+                f"{self.format_time_us(layer.attention_time_us):>12} "
+                f"{self.format_time_us(moe_fc_time):>12} "
+                f"{self.format_time_us(layer.communication_time_us):>12} "
+                f"{self.format_time_us(layer.quantization_time_us):>12} "
+                f"{len(layer.kernels):>8}"
+            )
+
+        print()
+
+    def print_layer_detail(self, layer_idx: int, stage: Optional[Stage] = None) -> None:
+        """Print detailed kernel sequence for a specific layer."""
+        if not self.result.layers:
+            print("No layer analysis available. Use --layer-analysis to enable.")
+            return
+
+        # Find the layer
+        layer = None
+        for l in self.result.layers:
+            if l.layer_idx == layer_idx and (stage is None or l.stage == stage):
+                layer = l
+                break
+
+        if layer is None:
+            print(f"Layer {layer_idx} not found.")
+            return
+
+        # Filter out trailing ALLREDUCE (belongs to next layer)
+        kernels = layer.kernels
+        if kernels and kernels[-1].simplified_name == "ALLREDUCE":
+            kernels = kernels[:-1]
+
+        # Recalculate total time without trailing ALLREDUCE
+        total_time = sum(k.duration_us for k in kernels)
+
+        print("-" * 180)
+        print(
+            f"LAYER {layer.layer_idx} DETAIL ({layer.layer_type.value}, {layer.stage.value.upper()})"
+        )
+        print("-" * 180)
+        print()
+        print(
+            f"{'#':<4} {'Duration (us)':>14} {'%':>7} {'Type':<14} {'Short Name':<18} {'Kernel Name'}"
+        )
+        print("-" * 180)
+
+        for i, kernel in enumerate(kernels, 1):
+            pct = self.format_percentage(kernel.duration_us, total_time)
+            short_name = kernel.simplified_name if kernel.simplified_name else "-"
+            # Truncate kernel name to 50 characters
+            display_name = kernel.name[:50] + "..." if len(kernel.name) > 50 else kernel.name
+            print(
+                f"{i:<4} {kernel.duration_us:>14.3f} {pct:>7} "
+                f"{kernel.kernel_type.value:<14} {short_name:<18} {display_name}"
+            )
+
+        print()
+        print(f"Layer Total: {total_time:.3f} us ({total_time/1000:.3f} ms)")
+
+        # Print breakdown (recalculated without trailing ALLREDUCE)
+        breakdown = {}
+        for k in kernels:
+            if k.kernel_type not in breakdown:
+                breakdown[k.kernel_type] = 0.0
+            breakdown[k.kernel_type] += k.duration_us
+
+        print()
+        print("Breakdown:")
+        for kt, time_us in sorted(breakdown.items(), key=lambda x: x[1], reverse=True):
+            pct = self.format_percentage(time_us, total_time)
+            print(f"  - {kt.value:<14} {time_us:>14.3f} us ({pct})")
 
         print()
 
@@ -514,7 +887,6 @@ class ReportFormatter:
         self.print_type_breakdown()
 
         if stage_filter is None or stage_filter == "all":
-            # Print for each stage
             for stage in [Stage.PREFILL, Stage.DECODE]:
                 if stage in self.result.per_stage_stats:
                     self.print_stage_type_breakdown(stage)
@@ -580,6 +952,7 @@ class CSVExporter:
                     "duration_us",
                     "stage",
                     "kernel_type",
+                    "simplified_name",
                     "grid",
                     "block",
                     "kernel_name",
@@ -593,6 +966,7 @@ class CSVExporter:
                         f"{event.duration_us:.3f}",
                         event.stage.value,
                         event.kernel_type.value,
+                        event.simplified_name,
                         str(event.grid) if event.grid else "",
                         str(event.block) if event.block else "",
                         event.name,
@@ -600,6 +974,43 @@ class CSVExporter:
                 )
 
         logger.info(f"Events exported to: {path}")
+
+    def export_layers(self, path: str) -> None:
+        """Export layer-level statistics to CSV."""
+        with open(path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "layer_idx",
+                    "layer_type",
+                    "stage",
+                    "total_time_us",
+                    "attention_time_us",
+                    "moe_time_us",
+                    "linear_time_us",
+                    "communication_time_us",
+                    "quantization_time_us",
+                    "kernel_count",
+                ]
+            )
+
+            for layer in self.result.layers:
+                writer.writerow(
+                    [
+                        layer.layer_idx,
+                        layer.layer_type.value,
+                        layer.stage.value,
+                        f"{layer.total_time_us:.3f}",
+                        f"{layer.attention_time_us:.3f}",
+                        f"{layer.moe_time_us:.3f}",
+                        f"{layer.linear_time_us:.3f}",
+                        f"{layer.communication_time_us:.3f}",
+                        f"{layer.quantization_time_us:.3f}",
+                        len(layer.kernels),
+                    ]
+                )
+
+        logger.info(f"Layer stats exported to: {path}")
 
 
 def main():
@@ -614,8 +1025,17 @@ Examples:
   # Show top 30 kernels, decode stage only
   python -m sglang.srt.utils.trace_analyzer trace.json.gz --top-n 30 --stage decode
 
+  # Layer-level analysis
+  python -m sglang.srt.utils.trace_analyzer trace.json.gz --layer-analysis
+
+  # Show specific layer detail
+  python -m sglang.srt.utils.trace_analyzer trace.json.gz --layer-analysis --layer-report 5
+
   # Export to CSV
   python -m sglang.srt.utils.trace_analyzer trace.json.gz --csv-stats stats.csv --csv-events events.csv
+
+  # Export layer stats
+  python -m sglang.srt.utils.trace_analyzer trace.json.gz --layer-analysis --csv-layers layers.csv
 """,
     )
 
@@ -633,14 +1053,19 @@ Examples:
         help="Filter by stage (default: all)",
     )
     parser.add_argument(
-        "--csv-stats",
-        metavar="FILE",
-        help="Export kernel stats to CSV file",
+        "--layer-analysis", action="store_true", help="Enable layer-level analysis"
     )
     parser.add_argument(
-        "--csv-events",
-        metavar="FILE",
-        help="Export all events to CSV file",
+        "--layer-report", type=int, metavar="N", help="Show detailed report for layer N"
+    )
+    parser.add_argument(
+        "--csv-stats", metavar="FILE", help="Export kernel stats to CSV file"
+    )
+    parser.add_argument(
+        "--csv-events", metavar="FILE", help="Export all events to CSV file"
+    )
+    parser.add_argument(
+        "--csv-layers", metavar="FILE", help="Export layer stats to CSV file"
     )
     parser.add_argument(
         "--grid-threshold",
@@ -673,19 +1098,38 @@ Examples:
         logger.error(f"Invalid JSON in trace file: {e}")
         sys.exit(1)
 
-    result = analyzer.analyze(trace_data)
+    # Enable layer analysis if layer report is requested
+    detect_layers = (
+        args.layer_analysis or args.layer_report is not None or args.csv_layers
+    )
+
+    result = analyzer.analyze(trace_data, detect_layers=detect_layers)
 
     # Print report
     formatter = ReportFormatter(result)
     formatter.print_full_report(top_n=args.top_n, stage_filter=args.stage)
 
+    # Print layer analysis if requested
+    if detect_layers:
+        stage_enum = None
+        if args.stage == "prefill":
+            stage_enum = Stage.PREFILL
+        elif args.stage == "decode":
+            stage_enum = Stage.DECODE
+
+        formatter.print_layer_summary(stage=stage_enum)
+
+        if args.layer_report is not None:
+            formatter.print_layer_detail(args.layer_report, stage=stage_enum)
+
     # Export CSVs if requested
-    if args.csv_stats or args.csv_events:
-        exporter = CSVExporter(result)
-        if args.csv_stats:
-            exporter.export_kernel_stats(args.csv_stats)
-        if args.csv_events:
-            exporter.export_events(args.csv_events)
+    exporter = CSVExporter(result)
+    if args.csv_stats:
+        exporter.export_kernel_stats(args.csv_stats)
+    if args.csv_events:
+        exporter.export_events(args.csv_events)
+    if args.csv_layers:
+        exporter.export_layers(args.csv_layers)
 
 
 if __name__ == "__main__":
