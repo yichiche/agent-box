@@ -11,6 +11,7 @@ import csv
 import gzip
 import json
 import logging
+import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -1012,6 +1013,383 @@ class CSVExporter:
 
         logger.info(f"Layer stats exported to: {path}")
 
+    def export_full_analysis(
+        self,
+        output_path: str,
+        layer_indices: Optional[List[int]] = None,
+        stage_filter: Optional[Stage] = None,
+    ) -> str:
+        """Export full analysis to Excel file with multiple sheets.
+
+        Creates sheets:
+        - Summary: Overall summary and breakdown
+        - Layer_N: Detailed kernel list for each specified layer
+
+        Args:
+            output_path: Output Excel file path (.xlsx)
+            layer_indices: List of layer indices to export (None = all layers)
+            stage_filter: Filter layers by stage (None = all stages)
+
+        Returns:
+            Path to created Excel file
+        """
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Alignment, Font, PatternFill
+        except ImportError:
+            raise ImportError(
+                "openpyxl is required for Excel export. Install with: pip install openpyxl"
+            )
+
+        wb = Workbook()
+
+        # Create summary sheet
+        ws_summary = wb.active
+        ws_summary.title = "Summary"
+        self._write_summary_sheet(ws_summary)
+
+        # Filter layers
+        layers = self.result.layers
+        if stage_filter is not None:
+            layers = [l for l in layers if l.stage == stage_filter]
+
+        if layer_indices is not None:
+            layers = [l for l in layers if l.layer_idx in layer_indices]
+
+        # Create sheet for each layer
+        for layer in layers:
+            ws_layer = wb.create_sheet(title=f"Layer_{layer.layer_idx}")
+            self._write_layer_sheet(ws_layer, layer)
+
+        # Save workbook
+        wb.save(output_path)
+        logger.info(f"Exported Excel file: {output_path}")
+        return output_path
+
+    def _write_summary_sheet(self, ws) -> None:
+        """Write summary statistics to Excel sheet."""
+        from openpyxl.styles import Alignment, Font, PatternFill
+
+        # Styling
+        header_font = Font(bold=True)
+        header_fill = PatternFill(start_color="CCE5FF", end_color="CCE5FF", fill_type="solid")
+
+        row = 1
+
+        # Overall summary section
+        ws.cell(row=row, column=1, value="=== OVERALL SUMMARY ===").font = Font(bold=True, size=12)
+        row += 1
+
+        headers = ["Metric", "Value (us)", "Percentage"]
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=row, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+        row += 1
+
+        total_time_us = self.result.total_time_us
+        ws.cell(row=row, column=1, value="Total Kernel Time")
+        ws.cell(row=row, column=2, value=round(total_time_us, 3))
+        ws.cell(row=row, column=3, value="100.0%")
+        row += 1
+
+        for stage in [Stage.PREFILL, Stage.DECODE, Stage.UNKNOWN]:
+            stats = self.result.per_stage_stats.get(stage, KernelStats())
+            pct = f"{100.0 * stats.total_time_us / total_time_us:.1f}%" if total_time_us > 0 else "0.0%"
+            ws.cell(row=row, column=1, value=f"{stage.value.capitalize()} Time")
+            ws.cell(row=row, column=2, value=round(stats.total_time_us, 3))
+            ws.cell(row=row, column=3, value=pct)
+            row += 1
+
+        row += 1
+
+        # Type breakdown section
+        ws.cell(row=row, column=1, value="=== BREAKDOWN BY TYPE ===").font = Font(bold=True, size=12)
+        row += 1
+
+        headers = ["Type", "Count", "Total (us)", "Avg (us)", "Percentage"]
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=row, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+        row += 1
+
+        sorted_types = sorted(
+            self.result.per_type_stats.items(),
+            key=lambda x: x[1].total_time_us,
+            reverse=True,
+        )
+        for kernel_type, stats in sorted_types:
+            pct = f"{100.0 * stats.total_time_us / total_time_us:.1f}%" if total_time_us > 0 else "0.0%"
+            ws.cell(row=row, column=1, value=kernel_type.value)
+            ws.cell(row=row, column=2, value=stats.count)
+            ws.cell(row=row, column=3, value=round(stats.total_time_us, 3))
+            ws.cell(row=row, column=4, value=round(stats.avg_time_us, 3))
+            ws.cell(row=row, column=5, value=pct)
+            row += 1
+
+        row += 1
+
+        # Layer summary section
+        if self.result.layers:
+            ws.cell(row=row, column=1, value="=== LAYER SUMMARY ===").font = Font(bold=True, size=12)
+            row += 1
+
+            headers = ["Layer", "Type", "Stage", "Total (us)", "Attention (us)", "MoE (us)",
+                       "Linear (us)", "Comm (us)", "Quant (us)", "Kernels"]
+            for col, header in enumerate(headers, 1):
+                cell = ws.cell(row=row, column=col, value=header)
+                cell.font = header_font
+                cell.fill = header_fill
+            row += 1
+
+            for layer in self.result.layers:
+                ws.cell(row=row, column=1, value=layer.layer_idx)
+                ws.cell(row=row, column=2, value=layer.layer_type.value)
+                ws.cell(row=row, column=3, value=layer.stage.value)
+                ws.cell(row=row, column=4, value=round(layer.total_time_us, 3))
+                ws.cell(row=row, column=5, value=round(layer.attention_time_us, 3))
+                ws.cell(row=row, column=6, value=round(layer.moe_time_us, 3))
+                ws.cell(row=row, column=7, value=round(layer.linear_time_us, 3))
+                ws.cell(row=row, column=8, value=round(layer.communication_time_us, 3))
+                ws.cell(row=row, column=9, value=round(layer.quantization_time_us, 3))
+                ws.cell(row=row, column=10, value=len(layer.kernels))
+                row += 1
+
+        # Auto-adjust column widths
+        for col in ws.columns:
+            max_length = 0
+            column = col[0].column_letter
+            for cell in col:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            ws.column_dimensions[column].width = min(max_length + 2, 50)
+
+    def _write_layer_sheet(self, ws, layer: LayerEvent) -> None:
+        """Write layer detail to Excel sheet."""
+        from openpyxl.styles import Alignment, Font, PatternFill
+
+        header_font = Font(bold=True)
+        header_fill = PatternFill(start_color="CCE5FF", end_color="CCE5FF", fill_type="solid")
+
+        # Filter out trailing ALLREDUCE
+        kernels = layer.kernels
+        if kernels and kernels[-1].simplified_name == "ALLREDUCE":
+            kernels = kernels[:-1]
+
+        total_time = sum(k.duration_us for k in kernels)
+
+        row = 1
+
+        # Layer header
+        ws.cell(row=row, column=1, value=f"Layer {layer.layer_idx} ({layer.layer_type.value}, {layer.stage.value})").font = Font(bold=True, size=12)
+        row += 1
+        ws.cell(row=row, column=1, value=f"Total Time: {total_time:.3f} us ({total_time/1000:.3f} ms)")
+        row += 2
+
+        # Kernel details header
+        headers = ["#", "Duration (us)", "%", "Type", "Short Name", "Kernel Name"]
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=row, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+        row += 1
+
+        # Kernel details
+        for i, kernel in enumerate(kernels, 1):
+            pct = f"{100.0 * kernel.duration_us / total_time:.1f}%" if total_time > 0 else "0.0%"
+            ws.cell(row=row, column=1, value=i)
+            ws.cell(row=row, column=2, value=round(kernel.duration_us, 3))
+            ws.cell(row=row, column=3, value=pct)
+            ws.cell(row=row, column=4, value=kernel.kernel_type.value)
+            ws.cell(row=row, column=5, value=kernel.simplified_name)
+            ws.cell(row=row, column=6, value=kernel.name)
+            row += 1
+
+        row += 1
+
+        # Breakdown section
+        ws.cell(row=row, column=1, value="=== BREAKDOWN ===").font = Font(bold=True)
+        row += 1
+
+        headers = ["Type", "Time (us)", "Percentage"]
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=row, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+        row += 1
+
+        breakdown = {}
+        for k in kernels:
+            if k.kernel_type not in breakdown:
+                breakdown[k.kernel_type] = 0.0
+            breakdown[k.kernel_type] += k.duration_us
+
+        for kt, time_us in sorted(breakdown.items(), key=lambda x: x[1], reverse=True):
+            pct = f"{100.0 * time_us / total_time:.1f}%" if total_time > 0 else "0.0%"
+            ws.cell(row=row, column=1, value=kt.value)
+            ws.cell(row=row, column=2, value=round(time_us, 3))
+            ws.cell(row=row, column=3, value=pct)
+            row += 1
+
+        # Auto-adjust column widths
+        for col in ws.columns:
+            max_length = 0
+            column = col[0].column_letter
+            for cell in col:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            # Limit kernel name column width
+            if column == 'F':
+                ws.column_dimensions[column].width = 80
+            else:
+                ws.column_dimensions[column].width = min(max_length + 2, 30)
+
+    def _export_summary_csv(self, path: str) -> None:
+        """Export summary statistics to CSV."""
+        with open(path, "w", newline="") as f:
+            writer = csv.writer(f)
+
+            # Overall summary
+            writer.writerow(["=== OVERALL SUMMARY ==="])
+            writer.writerow(["metric", "value", "percentage"])
+            total_time_us = self.result.total_time_us
+            writer.writerow(["total_kernel_time_us", f"{total_time_us:.3f}", "100.0%"])
+
+            for stage in [Stage.PREFILL, Stage.DECODE, Stage.UNKNOWN]:
+                stats = self.result.per_stage_stats.get(stage, KernelStats())
+                pct = f"{100.0 * stats.total_time_us / total_time_us:.1f}%" if total_time_us > 0 else "0.0%"
+                writer.writerow([f"{stage.value}_time_us", f"{stats.total_time_us:.3f}", pct])
+
+            writer.writerow([])
+
+            # Type breakdown
+            writer.writerow(["=== BREAKDOWN BY TYPE ==="])
+            writer.writerow(["type", "count", "total_time_us", "avg_time_us", "percentage"])
+
+            sorted_types = sorted(
+                self.result.per_type_stats.items(),
+                key=lambda x: x[1].total_time_us,
+                reverse=True,
+            )
+            for kernel_type, stats in sorted_types:
+                pct = f"{100.0 * stats.total_time_us / total_time_us:.1f}%" if total_time_us > 0 else "0.0%"
+                writer.writerow([
+                    kernel_type.value,
+                    stats.count,
+                    f"{stats.total_time_us:.3f}",
+                    f"{stats.avg_time_us:.3f}",
+                    pct,
+                ])
+
+            writer.writerow([])
+
+            # Layer summary
+            if self.result.layers:
+                writer.writerow(["=== LAYER SUMMARY ==="])
+                writer.writerow([
+                    "layer_idx", "layer_type", "stage", "total_time_us",
+                    "attention_time_us", "moe_time_us", "linear_time_us",
+                    "communication_time_us", "quantization_time_us", "kernel_count"
+                ])
+
+                for layer in self.result.layers:
+                    writer.writerow([
+                        layer.layer_idx,
+                        layer.layer_type.value,
+                        layer.stage.value,
+                        f"{layer.total_time_us:.3f}",
+                        f"{layer.attention_time_us:.3f}",
+                        f"{layer.moe_time_us:.3f}",
+                        f"{layer.linear_time_us:.3f}",
+                        f"{layer.communication_time_us:.3f}",
+                        f"{layer.quantization_time_us:.3f}",
+                        len(layer.kernels),
+                    ])
+
+        logger.info(f"Summary exported to: {path}")
+
+    def _export_layer_detail_csv(self, layer: LayerEvent, path: str) -> None:
+        """Export detailed kernel list for a single layer to CSV."""
+        with open(path, "w", newline="") as f:
+            writer = csv.writer(f)
+
+            # Layer header
+            writer.writerow([f"=== LAYER {layer.layer_idx} ({layer.layer_type.value}, {layer.stage.value}) ==="])
+            writer.writerow([])
+
+            # Filter out trailing ALLREDUCE
+            kernels = layer.kernels
+            if kernels and kernels[-1].simplified_name == "ALLREDUCE":
+                kernels = kernels[:-1]
+
+            total_time = sum(k.duration_us for k in kernels)
+
+            # Kernel details
+            writer.writerow(["index", "duration_us", "percentage", "type", "short_name", "kernel_name"])
+
+            for i, kernel in enumerate(kernels, 1):
+                pct = f"{100.0 * kernel.duration_us / total_time:.1f}%" if total_time > 0 else "0.0%"
+                writer.writerow([
+                    i,
+                    f"{kernel.duration_us:.3f}",
+                    pct,
+                    kernel.kernel_type.value,
+                    kernel.simplified_name,
+                    kernel.name,
+                ])
+
+            writer.writerow([])
+
+            # Layer total and breakdown
+            writer.writerow(["=== LAYER TOTAL ==="])
+            writer.writerow(["total_time_us", f"{total_time:.3f}"])
+            writer.writerow([])
+
+            writer.writerow(["=== BREAKDOWN ==="])
+            writer.writerow(["type", "time_us", "percentage"])
+
+            breakdown = {}
+            for k in kernels:
+                if k.kernel_type not in breakdown:
+                    breakdown[k.kernel_type] = 0.0
+                breakdown[k.kernel_type] += k.duration_us
+
+            for kt, time_us in sorted(breakdown.items(), key=lambda x: x[1], reverse=True):
+                pct = f"{100.0 * time_us / total_time:.1f}%" if total_time > 0 else "0.0%"
+                writer.writerow([kt.value, f"{time_us:.3f}", pct])
+
+
+def parse_layer_indices(layer_spec: str) -> Optional[List[int]]:
+    """Parse layer specification string into list of indices.
+
+    Supports formats:
+    - "all" -> None (all layers)
+    - "4,10,20" -> [4, 10, 20]
+    - "4-10" -> [4, 5, 6, 7, 8, 9, 10]
+    - "4-10,20,30-32" -> [4, 5, ..., 10, 20, 30, 31, 32]
+    """
+    if layer_spec.lower() == "all":
+        return None
+
+    indices = []
+    parts = layer_spec.split(",")
+    for part in parts:
+        part = part.strip()
+        if "-" in part:
+            start, end = part.split("-", 1)
+            indices.extend(range(int(start), int(end) + 1))
+        else:
+            indices.append(int(part))
+
+    return sorted(set(indices))
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -1025,17 +1403,23 @@ Examples:
   # Show top 30 kernels, decode stage only
   python -m sglang.srt.utils.trace_analyzer trace.json.gz --top-n 30 --stage decode
 
-  # Layer-level analysis
-  python -m sglang.srt.utils.trace_analyzer trace.json.gz --layer-analysis
+  # Layer-level analysis (terminal output)
+  python -m sglang.srt.utils.trace_analyzer trace.json.gz --layer-analysis --show-layer-terminal
 
-  # Show specific layer detail
-  python -m sglang.srt.utils.trace_analyzer trace.json.gz --layer-analysis --layer-report 5
+  # Show specific layer detail on terminal
+  python -m sglang.srt.utils.trace_analyzer trace.json.gz --layer-analysis --layer-report 5 --show-layer-terminal
 
-  # Export to CSV
-  python -m sglang.srt.utils.trace_analyzer trace.json.gz --csv-stats stats.csv --csv-events events.csv
+  # Export full analysis to Excel file (summary + layer details as sheets)
+  python -m sglang.srt.utils.trace_analyzer trace.json.gz --export-csv analysis.xlsx --export-layers 4,10,20
 
-  # Export layer stats
-  python -m sglang.srt.utils.trace_analyzer trace.json.gz --layer-analysis --csv-layers layers.csv
+  # Export all layers to Excel
+  python -m sglang.srt.utils.trace_analyzer trace.json.gz --export-csv analysis.xlsx --export-layers all
+
+  # Export layers 0-10 for prefill stage
+  python -m sglang.srt.utils.trace_analyzer trace.json.gz --export-csv analysis.xlsx --export-layers 0-10 --stage prefill
+
+  # Export to Excel without terminal output
+  python -m sglang.srt.utils.trace_analyzer trace.json.gz --export-csv analysis.xlsx --export-layers 4,10
 """,
     )
 
@@ -1056,7 +1440,23 @@ Examples:
         "--layer-analysis", action="store_true", help="Enable layer-level analysis"
     )
     parser.add_argument(
-        "--layer-report", type=int, metavar="N", help="Show detailed report for layer N"
+        "--layer-report", type=int, metavar="N", help="Show detailed report for layer N on terminal"
+    )
+    parser.add_argument(
+        "--show-layer-terminal",
+        action="store_true",
+        help="Show layer analysis on terminal (default: False)",
+    )
+    parser.add_argument(
+        "--export-csv",
+        metavar="FILENAME",
+        help="Export analysis to Excel file (.xlsx) with multiple sheets (Summary + Layer_N sheets)",
+    )
+    parser.add_argument(
+        "--export-layers",
+        metavar="LAYERS",
+        help="Layers to include in CSV export: 'all', '4,10,20', or '4-10' (default: all)",
+        default="all",
     )
     parser.add_argument(
         "--csv-stats", metavar="FILE", help="Export kernel stats to CSV file"
@@ -1098,25 +1498,29 @@ Examples:
         logger.error(f"Invalid JSON in trace file: {e}")
         sys.exit(1)
 
-    # Enable layer analysis if layer report is requested
+    # Enable layer analysis if any layer-related option is requested
     detect_layers = (
-        args.layer_analysis or args.layer_report is not None or args.csv_layers
+        args.layer_analysis
+        or args.layer_report is not None
+        or args.csv_layers
+        or args.export_csv
     )
 
     result = analyzer.analyze(trace_data, detect_layers=detect_layers)
+
+    # Determine stage filter
+    stage_enum = None
+    if args.stage == "prefill":
+        stage_enum = Stage.PREFILL
+    elif args.stage == "decode":
+        stage_enum = Stage.DECODE
 
     # Print report
     formatter = ReportFormatter(result)
     formatter.print_full_report(top_n=args.top_n, stage_filter=args.stage)
 
-    # Print layer analysis if requested
-    if detect_layers:
-        stage_enum = None
-        if args.stage == "prefill":
-            stage_enum = Stage.PREFILL
-        elif args.stage == "decode":
-            stage_enum = Stage.DECODE
-
+    # Print layer analysis on terminal only if --show-layer-terminal is set
+    if detect_layers and args.show_layer_terminal:
         formatter.print_layer_summary(stage=stage_enum)
 
         if args.layer_report is not None:
@@ -1124,6 +1528,28 @@ Examples:
 
     # Export CSVs if requested
     exporter = CSVExporter(result)
+
+    # Export full analysis to Excel file
+    if args.export_csv:
+        layer_indices = parse_layer_indices(args.export_layers)
+
+        # Save Excel file in the same folder as the input trace file
+        trace_dir = os.path.dirname(os.path.abspath(args.trace_file))
+        output_filename = args.export_csv if args.export_csv.endswith('.xlsx') else f"{args.export_csv}.xlsx"
+        output_path = os.path.join(trace_dir, output_filename)
+
+        try:
+            created_file = exporter.export_full_analysis(
+                output_path=output_path,
+                layer_indices=layer_indices,
+                stage_filter=stage_enum,
+            )
+            print(f"\nExported Excel file: {created_file}")
+        except ImportError as e:
+            logger.error(str(e))
+            sys.exit(1)
+
+    # Legacy CSV exports
     if args.csv_stats:
         exporter.export_kernel_stats(args.csv_stats)
     if args.csv_events:
