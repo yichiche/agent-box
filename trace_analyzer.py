@@ -294,7 +294,7 @@ class KernelClassifier:
 
         # Simplified name patterns for display
         self._simplify_patterns = [
-            (re.compile(r"rcclGenericKernel|cross_device_reduce"), "ALLREDUCE"),
+            (re.compile(r"ncclDevKernel|rcclGenericKernel|cross_device_reduce"), "ALLREDUCE"), 
             (re.compile(r"fmha_fwd"), "FMHA"),
             (re.compile(r"mla_a8w8.*qseqlen1"), "MLA_DECODE"),
             (
