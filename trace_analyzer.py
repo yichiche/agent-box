@@ -58,6 +58,7 @@ class KernelEvent:
     duration_us: float  # microseconds
     stage: Stage
     kernel_type: KernelType
+    initial_stage: Stage
     grid: Optional[Tuple[int, int, int]] = None
     block: Optional[Tuple[int, int, int]] = None
     simplified_name: str = ""  # Short name for display
@@ -213,24 +214,20 @@ class KernelClassifier:
         self.grid_threshold = grid_threshold
 
         # Stage detection patterns (priority order)
+        self._stage_force_unknown_patterns = [
+            re.compile(
+                r"_fused_rms_fp8|_fused_rms_mxfp4|_gemm_a8w8|_batched_gemm_a8w8|"
+                r"_gemm_afp4wfp4|_batched_gemm_a16wfp4",
+                re.IGNORECASE,
+            ),
+        ]
         self._stage_patterns = [
-            (re.compile(r"qseqlen1[^0-9]|qseqlen1$", re.IGNORECASE), Stage.DECODE),
-            (re.compile(r"qseqlen[2-9]|qseqlen\d{2,}", re.IGNORECASE), Stage.PREFILL),
+            (re.compile(r"set_mla_kv_buffer_kernel|concat_and_cast_mha_k_kernel", re.IGNORECASE), Stage.PREFILL),
+            (re.compile(r"qseqlen[1-4][^0-9]|qseqlen[1-4]$", re.IGNORECASE), Stage.DECODE),
+            (re.compile(r"qseqlen[5-9]|qseqlen\d{2,}", re.IGNORECASE), Stage.PREFILL),
             (re.compile(r"_decode_|decode_attention", re.IGNORECASE), Stage.DECODE),
-            (
-                re.compile(r"_prefill_|flash_attn|fmha_fwd", re.IGNORECASE),
-                Stage.PREFILL,
-            ),
-            (
-                re.compile(r"generate_draft_decode|create_extend_after_decode"),
-                Stage.DECODE,
-            ),
-            # Quantization format patterns for stage detection
-            (
-                re.compile(r"_fused_rms_mxfp4|_gemm_afp4wfp4|_batched_gemm_a16wfp4"),
-                Stage.PREFILL,
-            ),
-            (re.compile(r"_fused_rms_fp8|_gemm_a8w8|_batched_gemm_a8w8"), Stage.DECODE),
+            (re.compile(r"_prefill_|flash_attn|fmha_fwd", re.IGNORECASE), Stage.PREFILL),
+            (re.compile(r"generate_draft_decode|create_extend_after_decode"), Stage.DECODE),
         ]
 
         # Kernel type patterns
@@ -238,7 +235,7 @@ class KernelClassifier:
             # Attention patterns
             (
                 re.compile(
-                    r"aiter::mla_|decode_attention|flash_attn|attention|softmax|"
+                    r"aiter::mla_|mla_a8w8|decode_attention|flash_attn|attention|softmax|"
                     r"fmha_|mla_reduce|kv_cache|flashinfer|set_mla_kv|"
                     r"kn_entry_2c_sbhd|kn_get_mla_metadata|qk_rope|"
                     r"concat_and_cast_mha|kn_mla_reduce",
@@ -338,6 +335,9 @@ class KernelClassifier:
         self, name: str, grid: Optional[Tuple[int, int, int]] = None
     ) -> Stage:
         """Classify kernel stage based on name and grid dimensions."""
+        for pattern in self._stage_force_unknown_patterns:
+            if pattern.search(name):
+                return Stage.UNKNOWN
         for pattern, stage in self._stage_patterns:
             if pattern.search(name):
                 return stage
@@ -370,7 +370,8 @@ class KernelClassifier:
 class LayerDetector:
     """Detects layer boundaries in kernel sequences."""
 
-    def __init__(self):
+    def __init__(self, mtp_qseqlen_decode: bool = False):
+        self._mtp_qseqlen_decode = mtp_qseqlen_decode
         # Layer start markers (after ALLREDUCE)
         self._layer_start_patterns = [
             re.compile(
@@ -389,6 +390,23 @@ class LayerDetector:
         self._fc_markers = [
             re.compile(r"act_and_mul_kernel|silu_kernel"),
         ]
+
+        # Attention stage hints for layer stage inference
+        self._attention_decode_patterns = [
+            re.compile(r"qseqlen1[^0-9]|qseqlen1$|decode_attention", re.IGNORECASE),
+            re.compile(r"mla_a8w8.*qseqlen(1|4)", re.IGNORECASE),
+        ]
+        if self._mtp_qseqlen_decode:
+            self._attention_decode_patterns.append(
+                re.compile(r"qseqlen[2-9]|qseqlen\d{2,}", re.IGNORECASE)
+            )
+        self._attention_prefill_patterns = [
+            re.compile(r"fmha_fwd|flash_attn", re.IGNORECASE),
+        ]
+        if not self._mtp_qseqlen_decode:
+            self._attention_prefill_patterns.append(
+                re.compile(r"qseqlen[2-9]|qseqlen\d{2,}", re.IGNORECASE)
+            )
 
     def detect_layers(self, events: List[KernelEvent]) -> List[LayerEvent]:
         """Detect layer boundaries and classify layers.
@@ -499,24 +517,27 @@ class LayerDetector:
 
         if prefill_count > decode_count:
             return Stage.PREFILL
-        elif decode_count > prefill_count:
+        if decode_count > prefill_count:
             return Stage.DECODE
-        else:
-            # If tied or all unknown, check for stage-specific patterns
-            for k in kernels:
-                if "mxfp4" in k.name.lower() or "afp4" in k.name.lower():
-                    return Stage.PREFILL
-                if "fp8" in k.name.lower() or "a8w8" in k.name.lower():
-                    return Stage.DECODE
-            return Stage.UNKNOWN
+
+        return Stage.UNKNOWN
+
+    def _infer_stage_from_names(self, kernels: List[KernelEvent]) -> Stage:
+        for k in kernels:
+            name = k.name
+            if any(p.search(name) for p in self._attention_decode_patterns):
+                return Stage.DECODE
+            if any(p.search(name) for p in self._attention_prefill_patterns):
+                return Stage.PREFILL
+        return Stage.UNKNOWN
 
 
 class TraceAnalyzer:
     """Main analyzer that loads and processes trace files."""
 
-    def __init__(self, grid_threshold: int = 10000):
+    def __init__(self, grid_threshold: int = 10000, mtp_qseqlen_decode: bool = False):
         self.classifier = KernelClassifier(grid_threshold=grid_threshold)
-        self.layer_detector = LayerDetector()
+        self.layer_detector = LayerDetector(mtp_qseqlen_decode=mtp_qseqlen_decode)
 
     def load_trace(self, path: str) -> Dict[str, Any]:
         """Load trace file (supports .json.gz and .json)."""
@@ -580,6 +601,15 @@ class TraceAnalyzer:
             kernel_type = self.classifier.classify_type(name)
             simplified_name = self.classifier.simplify_name(name)
 
+            if kernel_type in (
+                KernelType.COMMUNICATION,
+                KernelType.QUANTIZATION,
+                KernelType.MOE,
+                KernelType.LINEAR,
+                KernelType.MEMORY,
+            ):
+                stage = Stage.UNKNOWN
+
             # Create event
             kernel_event = KernelEvent(
                 name=name,
@@ -587,6 +617,7 @@ class TraceAnalyzer:
                 duration_us=duration_us,
                 stage=stage,
                 kernel_type=kernel_type,
+                initial_stage=stage,
                 grid=grid,
                 block=block,
                 simplified_name=simplified_name,
@@ -630,6 +661,35 @@ class TraceAnalyzer:
             logger.info(
                 f"Detected {prefill_count} prefill layers, {decode_count} decode layers"
             )
+            # Re-assign kernel stages based on layer vote (only for prefill/decode layers)
+            for layer in result.layers:
+                if layer.stage in (Stage.PREFILL, Stage.DECODE):
+                    for k in layer.kernels:
+                        k.stage = layer.stage
+
+            # Recompute stage-related stats after layer assignment
+            result.per_stage_stats = {}
+            result.per_stage_type_stats = {}
+            result.per_stage_kernel_stats = {}
+            for event in result.events:
+                stage = event.stage
+                kernel_type = event.kernel_type
+                name = event.name
+                duration_us = event.duration_us
+
+                if stage not in result.per_stage_stats:
+                    result.per_stage_stats[stage] = KernelStats()
+                result.per_stage_stats[stage].add(duration_us)
+
+                stage_type_key = (stage, kernel_type)
+                if stage_type_key not in result.per_stage_type_stats:
+                    result.per_stage_type_stats[stage_type_key] = KernelStats()
+                result.per_stage_type_stats[stage_type_key].add(duration_us)
+
+                stage_kernel_key = (stage, name)
+                if stage_kernel_key not in result.per_stage_kernel_stats:
+                    result.per_stage_kernel_stats[stage_kernel_key] = KernelStats()
+                result.per_stage_kernel_stats[stage_kernel_key].add(duration_us)
 
         return result
 
@@ -898,6 +958,48 @@ class ReportFormatter:
         elif stage_filter == "decode":
             self.print_stage_type_breakdown(Stage.DECODE)
             self.print_top_kernels(stage=Stage.DECODE, top_n=top_n)
+
+    def print_layer_debug(self, layer_idx: int, top_n: int = 20) -> None:
+        """Print debug details for a specific layer's stage decision."""
+        if not self.result.layers:
+            print("No layer analysis available. Use --layer-analysis to enable.")
+            return
+
+        layer = None
+        for l in self.result.layers:
+            if l.layer_idx == layer_idx:
+                layer = l
+                break
+
+        if layer is None:
+            print(f"Layer {layer_idx} not found.")
+            return
+
+        prefill_count = sum(1 for k in layer.kernels if k.initial_stage == Stage.PREFILL)
+        decode_count = sum(1 for k in layer.kernels if k.initial_stage == Stage.DECODE)
+        unknown_count = sum(1 for k in layer.kernels if k.initial_stage == Stage.UNKNOWN)
+
+        print("-" * 120)
+        print(f"LAYER DEBUG {layer.layer_idx} ({layer.layer_type.value})")
+        print("-" * 120)
+        print(f"Layer stage (after vote): {layer.stage.value}")
+        print(
+            f"Vote counts (initial stages): prefill={prefill_count}, decode={decode_count}, unknown={unknown_count}"
+        )
+        print()
+
+        sorted_kernels = sorted(layer.kernels, key=lambda k: k.duration_us, reverse=True)
+        print(
+            f"{'#':<4} {'Duration (us)':>14} {'Type':<14} {'Init':<8} {'Final':<8} {'Kernel Name'}"
+        )
+        print("-" * 120)
+        for i, k in enumerate(sorted_kernels[:top_n], 1):
+            display_name = k.name[:80] + "..." if len(k.name) > 83 else k.name
+            print(
+                f"{i:<4} {k.duration_us:>14.3f} {k.kernel_type.value:<14} "
+                f"{k.initial_stage.value:<8} {k.stage.value:<8} {display_name}"
+            )
+        print()
 
 
 class CSVExporter:
@@ -1370,13 +1472,12 @@ def parse_layer_indices(layer_spec: str) -> Optional[List[int]]:
     """Parse layer specification string into list of indices.
 
     Supports formats:
-    - "all" -> None (all layers)
     - "4,10,20" -> [4, 10, 20]
     - "4-10" -> [4, 5, 6, 7, 8, 9, 10]
     - "4-10,20,30-32" -> [4, 5, ..., 10, 20, 30, 31, 32]
     """
-    if layer_spec.lower() == "all":
-        return None
+    if layer_spec is None or not layer_spec.strip():
+        return []
 
     indices = []
     parts = layer_spec.split(",")
@@ -1412,14 +1513,14 @@ Examples:
   # Export full analysis to Excel file (summary + layer details as sheets)
   python -m sglang.srt.utils.trace_analyzer trace.json.gz --export-csv analysis.xlsx --export-layers 4,10,20
 
-  # Export all layers to Excel
-  python -m sglang.srt.utils.trace_analyzer trace.json.gz --export-csv analysis.xlsx --export-layers all
-
   # Export layers 0-10 for prefill stage
   python -m sglang.srt.utils.trace_analyzer trace.json.gz --export-csv analysis.xlsx --export-layers 0-10 --stage prefill
 
   # Export to Excel without terminal output
   python -m sglang.srt.utils.trace_analyzer trace.json.gz --export-csv analysis.xlsx --export-layers 4,10
+
+  # Debug specific layers
+  python -m sglang.srt.utils.trace_analyzer trace.json.gz --layer-analysis --debug-layers 4,10
 """,
     )
 
@@ -1455,8 +1556,20 @@ Examples:
     parser.add_argument(
         "--export-layers",
         metavar="LAYERS",
-        help="Layers to include in CSV export: 'all', '4,10,20', or '4-10' (default: all)",
-        default="all",
+        help="Layers to include in CSV export: '4,10,20' or '4-10' (required with --export-csv)",
+        default=None,
+    )
+    parser.add_argument(
+        "--debug-layers",
+        metavar="LAYERS",
+        help="Print debug info for specific layers: '4,10,20' or '4-10'",
+        default=None,
+    )
+    parser.add_argument(
+        "--debug-top-n",
+        type=int,
+        default=20,
+        help="Number of kernels to show in layer debug (default: 20)",
     )
     parser.add_argument(
         "--csv-stats", metavar="FILE", help="Export kernel stats to CSV file"
@@ -1474,6 +1587,11 @@ Examples:
         help="Grid[0] threshold for decode heuristic (default: 10000)",
     )
     parser.add_argument(
+        "--mtp-qseqlen-decode",
+        action="store_true",
+        help="Treat attention qseqlen>=2 kernels as decode for layer stage inference",
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
 
@@ -1487,7 +1605,10 @@ Examples:
     )
 
     # Run analysis
-    analyzer = TraceAnalyzer(grid_threshold=args.grid_threshold)
+    analyzer = TraceAnalyzer(
+        grid_threshold=args.grid_threshold,
+        mtp_qseqlen_decode=args.mtp_qseqlen_decode,
+    )
 
     try:
         trace_data = analyzer.load_trace(args.trace_file)
@@ -1504,6 +1625,7 @@ Examples:
         or args.layer_report is not None
         or args.csv_layers
         or args.export_csv
+        or args.debug_layers
     )
 
     result = analyzer.analyze(trace_data, detect_layers=detect_layers)
@@ -1526,12 +1648,23 @@ Examples:
         if args.layer_report is not None:
             formatter.print_layer_detail(args.layer_report, stage=stage_enum)
 
+    if detect_layers and args.debug_layers:
+        debug_layers = parse_layer_indices(args.debug_layers)
+        if not debug_layers:
+            logger.error("--debug-layers must include at least one layer number.")
+            sys.exit(1)
+        for layer_idx in debug_layers:
+            formatter.print_layer_debug(layer_idx, top_n=args.debug_top_n)
+
     # Export CSVs if requested
     exporter = CSVExporter(result)
 
     # Export full analysis to Excel file
     if args.export_csv:
         layer_indices = parse_layer_indices(args.export_layers)
+        if not layer_indices:
+            logger.error("--export-layers is required and must include at least one layer number.")
+            sys.exit(1)
 
         # Save Excel file in the same folder as the input trace file
         trace_dir = os.path.dirname(os.path.abspath(args.trace_file))
