@@ -194,6 +194,17 @@ class AnalysisResult:
     # Layer-level analysis
     layers: List[LayerEvent] = field(default_factory=list)
 
+    # TTFT/ITL metrics (elapsed wall-clock time, not sum of durations)
+    ttft_us: float = 0.0  # Time To First Token (prefill elapsed time)
+    itl_us: float = 0.0  # Inter-Token Latency (avg decode iteration time)
+    decode_iterations: int = 0  # Number of decode iterations
+    prefill_elapsed_us: float = 0.0  # Total prefill elapsed time
+    decode_elapsed_us: float = 0.0  # Total decode elapsed time
+
+    # Correction factors for per-request and MTP-adjusted metrics
+    num_requests: int = 1  # Number of requests in trace
+    accept_length: float = 1.0  # MTP acceptance length
+
     @property
     def total_time_us(self) -> float:
         return sum(e.duration_us for e in self.events)
@@ -205,6 +216,63 @@ class AnalysisResult:
     @property
     def total_time_s(self) -> float:
         return self.total_time_us / 1_000_000.0
+
+    @property
+    def ttft_ms(self) -> float:
+        return self.ttft_us / 1000.0
+
+    @property
+    def itl_ms(self) -> float:
+        return self.itl_us / 1000.0
+
+    @property
+    def ttft_corrected_us(self) -> float:
+        """TTFT corrected for number of requests (per-request TTFT)."""
+        if self.num_requests > 0:
+            return self.ttft_us / self.num_requests
+        return self.ttft_us
+
+    @property
+    def ttft_corrected_ms(self) -> float:
+        return self.ttft_corrected_us / 1000.0
+
+    @property
+    def itl_corrected_us(self) -> float:
+        """ITL corrected for MTP acceptance length."""
+        if self.accept_length > 0:
+            return self.itl_us / self.accept_length
+        return self.itl_us
+
+    @property
+    def itl_corrected_ms(self) -> float:
+        return self.itl_corrected_us / 1000.0
+
+    def get_stage_elapsed_us(self, stage: Stage) -> float:
+        """Calculate elapsed wall-clock time for a stage using timestamps.
+
+        Elapsed time = (max kernel end timestamp) - (min kernel start timestamp)
+        This accounts for kernel parallelism, unlike sum of durations.
+        """
+        stage_events = [e for e in self.events if e.stage == stage]
+        if not stage_events:
+            return 0.0
+        min_start = min(e.timestamp_us for e in stage_events)
+        max_end = max(e.timestamp_us + e.duration_us for e in stage_events)
+        return max_end - min_start
+
+    def count_decode_iterations(self) -> int:
+        """Count decode iterations using FC layer count.
+
+        Each decode forward pass has exactly one FC layer (MLA+FC type).
+        This gives the number of decode iterations (tokens generated).
+        """
+        if not self.layers:
+            return 0
+        decode_fc_layers = [
+            l for l in self.layers
+            if l.stage == Stage.DECODE and l.layer_type == LayerType.MLA_FC
+        ]
+        return len(decode_fc_layers)
 
 
 class KernelClassifier:
@@ -691,6 +759,32 @@ class TraceAnalyzer:
                     result.per_stage_kernel_stats[stage_kernel_key] = KernelStats()
                 result.per_stage_kernel_stats[stage_kernel_key].add(duration_us)
 
+        # Calculate TTFT and ITL metrics using elapsed time (wall-clock), not sum of durations
+        # TTFT = elapsed time for prefill phase
+        # ITL = elapsed time for decode phase / number of decode iterations
+        result.prefill_elapsed_us = result.get_stage_elapsed_us(Stage.PREFILL)
+        result.decode_elapsed_us = result.get_stage_elapsed_us(Stage.DECODE)
+        result.ttft_us = result.prefill_elapsed_us
+
+        # Count decode iterations using FC layer count (each iteration has 1 FC layer)
+        if detect_layers:
+            result.decode_iterations = result.count_decode_iterations()
+        else:
+            # Fallback: estimate from layer count if layers not detected
+            # This is less accurate but provides an estimate
+            result.decode_iterations = 0
+
+        # Calculate ITL
+        if result.decode_iterations > 0:
+            result.itl_us = result.decode_elapsed_us / result.decode_iterations
+        else:
+            result.itl_us = 0.0
+
+        logger.info(
+            f"TTFT: {result.ttft_us/1000:.2f} ms, "
+            f"ITL: {result.itl_us/1000:.2f} ms ({result.decode_iterations} decode iterations)"
+        )
+
         return result
 
 
@@ -738,6 +832,46 @@ class ReportFormatter:
             )
 
         print()
+
+        # TTFT and ITL metrics (wall-clock elapsed time)
+        print("-" * 80)
+        print("TTFT / ITL METRICS (Wall-Clock Time)")
+        print("-" * 80)
+        print()
+        print("Calculation method:")
+        print("  TTFT = (last prefill kernel end timestamp) - (first prefill kernel start timestamp)")
+        print("  ITL  = (decode elapsed time) / (number of decode iterations)")
+        print("  Decode iterations = count of MLA+FC layers in decode stage (1 per forward pass)")
+        if self.result.num_requests > 1:
+            print(f"  TTFT_corrected = TTFT / num_requests ({self.result.num_requests})")
+        if self.result.accept_length != 1.0:
+            print(f"  ITL_corrected = ITL / accept_length ({self.result.accept_length})")
+        print()
+        print(f"{'Metric':<28} {'Raw':>14} {'Corrected':>14} {'Description'}")
+        print("-" * 85)
+        # TTFT
+        ttft_raw = self.format_time(self.result.ttft_ms)
+        ttft_corr = self.format_time(self.result.ttft_corrected_ms) if self.result.num_requests > 1 else "-"
+        print(f"{'TTFT (prefill time)':<28} {ttft_raw:>14} {ttft_corr:>14} Time to first token")
+        # Prefill elapsed
+        print(f"{'Prefill elapsed':<28} {self.format_time(self.result.prefill_elapsed_us/1000):>14} {'-':>14} Wall-clock prefill duration")
+        # Decode elapsed
+        print(f"{'Decode elapsed':<28} {self.format_time(self.result.decode_elapsed_us/1000):>14} {'-':>14} Wall-clock decode duration")
+        # Decode iterations
+        print(f"{'Decode iterations':<28} {self.result.decode_iterations:>14} {'-':>14} Forward passes (FC layers)")
+        # ITL
+        itl_raw = self.format_time(self.result.itl_ms)
+        itl_corr = self.format_time(self.result.itl_corrected_ms) if self.result.accept_length != 1.0 else "-"
+        print(f"{'ITL (per token)':<28} {itl_raw:>14} {itl_corr:>14} Inter-token latency")
+        print()
+        # Show correction parameters if applied
+        if self.result.num_requests > 1 or self.result.accept_length != 1.0:
+            print("Correction parameters:")
+            if self.result.num_requests > 1:
+                print(f"  --num-requests {self.result.num_requests}")
+            if self.result.accept_length != 1.0:
+                print(f"  --accept-length {self.result.accept_length}")
+            print()
 
     def print_type_breakdown(self) -> None:
         """Print breakdown by kernel type."""
@@ -1205,6 +1339,84 @@ class CSVExporter:
 
         row += 1
 
+        # TTFT/ITL section
+        ws.cell(row=row, column=1, value="=== TTFT / ITL METRICS (Wall-Clock Time) ===").font = Font(bold=True, size=12)
+        row += 1
+
+        headers = ["Metric", "Raw (ms)", "Corrected (ms)", "Description"]
+        for col, header in enumerate(headers, 1):
+            cell = ws.cell(row=row, column=col, value=header)
+            cell.font = header_font
+            cell.fill = header_fill
+        row += 1
+
+        # TTFT
+        ws.cell(row=row, column=1, value="TTFT")
+        ws.cell(row=row, column=2, value=round(self.result.ttft_us / 1000, 2))
+        if self.result.num_requests > 1:
+            ws.cell(row=row, column=3, value=round(self.result.ttft_corrected_us / 1000, 2))
+        else:
+            ws.cell(row=row, column=3, value="-")
+        ws.cell(row=row, column=4, value="Time To First Token (prefill elapsed time)")
+        row += 1
+
+        # ITL
+        ws.cell(row=row, column=1, value="ITL")
+        ws.cell(row=row, column=2, value=round(self.result.itl_us / 1000, 2))
+        if self.result.accept_length != 1.0:
+            ws.cell(row=row, column=3, value=round(self.result.itl_corrected_us / 1000, 2))
+        else:
+            ws.cell(row=row, column=3, value="-")
+        ws.cell(row=row, column=4, value="Inter-Token Latency (avg decode iteration time)")
+        row += 1
+
+        # Decode iterations
+        ws.cell(row=row, column=1, value="Decode Iterations")
+        ws.cell(row=row, column=2, value=self.result.decode_iterations)
+        ws.cell(row=row, column=3, value="-")
+        ws.cell(row=row, column=4, value="Forward passes (MLA+FC layer count)")
+        row += 1
+
+        # Prefill elapsed
+        ws.cell(row=row, column=1, value="Prefill Elapsed")
+        ws.cell(row=row, column=2, value=round(self.result.prefill_elapsed_us / 1000, 2))
+        ws.cell(row=row, column=3, value="-")
+        ws.cell(row=row, column=4, value="Wall-clock prefill duration")
+        row += 1
+
+        # Decode elapsed
+        ws.cell(row=row, column=1, value="Decode Elapsed")
+        ws.cell(row=row, column=2, value=round(self.result.decode_elapsed_us / 1000, 2))
+        ws.cell(row=row, column=3, value="-")
+        ws.cell(row=row, column=4, value="Wall-clock decode duration")
+        row += 1
+
+        row += 1
+
+        # Correction parameters
+        ws.cell(row=row, column=1, value="Correction Parameters:").font = Font(italic=True)
+        row += 1
+        ws.cell(row=row, column=1, value=f"num_requests = {self.result.num_requests}")
+        ws.cell(row=row, column=2, value="TTFT_corrected = TTFT / num_requests")
+        row += 1
+        ws.cell(row=row, column=1, value=f"accept_length = {self.result.accept_length}")
+        ws.cell(row=row, column=2, value="ITL_corrected = ITL / accept_length")
+        row += 1
+
+        row += 1
+
+        # Calculation method note
+        ws.cell(row=row, column=1, value="Calculation Method:").font = Font(italic=True)
+        row += 1
+        ws.cell(row=row, column=1, value="TTFT = (last prefill kernel end timestamp) - (first prefill kernel start timestamp)")
+        row += 1
+        ws.cell(row=row, column=1, value="ITL = (decode elapsed time) / (decode iterations)")
+        row += 1
+        ws.cell(row=row, column=1, value="Decode iterations = count of MLA+FC layers in decode stage (1 per forward pass)")
+        row += 1
+
+        row += 1
+
         # Type breakdown section
         ws.cell(row=row, column=1, value="=== BREAKDOWN BY TYPE ===").font = Font(bold=True, size=12)
         row += 1
@@ -1592,6 +1804,20 @@ Examples:
         help="Treat attention qseqlen>=2 kernels as decode for layer stage inference",
     )
     parser.add_argument(
+        "--num-requests",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Number of requests in trace for per-request TTFT calculation (default: 1)",
+    )
+    parser.add_argument(
+        "--accept-length",
+        type=float,
+        default=1.0,
+        metavar="L",
+        help="MTP acceptance length for ITL correction (default: 1.0, no correction)",
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
 
@@ -1629,6 +1855,10 @@ Examples:
     )
 
     result = analyzer.analyze(trace_data, detect_layers=detect_layers)
+
+    # Apply correction parameters for TTFT/ITL
+    result.num_requests = args.num_requests
+    result.accept_length = args.accept_length
 
     # Determine stage filter
     stage_enum = None
