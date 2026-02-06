@@ -19,7 +19,9 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 # Claude initialization / config linking
 echo "[claude] finished"
 
+mkdir -p /sgl-workspace/.claude
 cp ${HOST_HOME}/agent-box/CLAUDE.md /sgl-workspace/
+cp ${HOST_HOME}/agent-box/setting.json /sgl-workspace/.claude/setting.json 
 if [ -f "${HOST_HOME}/.claude.json" ]; then
   ln -sf "${HOST_HOME}/.claude.json" /root/.claude.json
 else
