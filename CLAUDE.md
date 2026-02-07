@@ -10,6 +10,21 @@ SGLang is a high-performance serving framework for large language models (LLMs) 
 - **sgl-kernel/** — Optimized CUDA/C++ compute kernels
 - **sgl-model-gateway/** — Rust-based routing/API gateway (OpenAI-compatible)
 
+## Setup
+
+After cloning, activate the git hooks:
+```bash
+bash setup-hooks.sh
+```
+
+## Commit & PR Conventions
+
+All commit messages and PR titles must follow: `[Tag] Description` .
+
+Allowed tags: `[Feature]`, `[Fix]`, `[Refactor]`, `[Docs]`, `[Test]`, `[CI]`, `[Chore]`, `[Perf]`
+
+Trailers like `Co-Authored-By:` is not allowed to show nerither in the commit body or the subject line.
+
 ## Build & Development Commands
 
 ### Python package (main runtime)
@@ -21,11 +36,6 @@ cd sglang/python && pip install -e .
 ```bash
 cd sglang/sgl-kernel && make build
 # Resource-limited: make build MAX_JOBS=2 CMAKE_ARGS="-DSGL_KERNEL_COMPILE_THREADS=1"
-```
-
-### sgl-model-gateway (Rust)
-```bash
-cd sglang/sgl-model-gateway && make build
 ```
 
 ### Running the server
@@ -40,30 +50,8 @@ pre-commit run --all-files
 ```
 Hooks: isort, ruff (F401/F821), black-jupyter, codespell, clang-format, nbstripout.
 
-### Testing
-```bash
-# Single test file
-python3 test/srt/test_srt_endpoint.py
-
-# Single test case
-python3 test/srt/test_srt_endpoint.py TestSRTEndpoint.test_simple_decode
-
-# Test suite (per-commit)
-python3 test/srt/run_suite.py --suite per-commit
-
-# sgl-kernel tests
-cd sglang/sgl-kernel && pytest tests/
-```
 
 ## Architecture
-
-### Frontend (`python/sglang/lang/`)
-Language-level API for composing LLM programs. Key files:
-- `api.py` — Public API exports (Engine, function, gen, etc.)
-- `interpreter.py` — Program interpreter
-- `ir.py` — Intermediate representation
-- `backend/` — Backend connectors (OpenAI, Anthropic, LiteLLM, VertexAI, SGLang runtime)
-
 ### Serving Runtime (`python/sglang/srt/`)
 The core inference engine. Major subsystems:
 - **`entrypoints/`** — Engine entry points, gRPC server
@@ -83,9 +71,6 @@ The core inference engine. Major subsystems:
 ### sgl-kernel (`sgl-kernel/`)
 CMake-based C++/CUDA project with Python bindings. Contains optimized kernels for attention, quantization, and other compute-intensive operations. Built via scikit-build-core.
 
-### sgl-model-gateway (`sgl-model-gateway/`)
-Rust async service (tokio/tonic) providing HTTP and gRPC routing, load balancing, and an OpenAI-compatible API layer. Has Python and Go bindings in `bindings/`.
-
 ### Key Design Patterns
 - **RadixAttention**: Prefix-aware KV cache reuse across requests
 - **Continuous batching**: Dynamic request scheduling for throughput
@@ -95,11 +80,3 @@ Rust async service (tokio/tonic) providing HTTP and gRPC routing, load balancing
 ## Version Management
 
 Versions are managed via `setuptools-scm` from git tags. Generated gRPC files (`*_pb2.py`, `*_pb2_grpc.py`) are excluded from linting.
-
-## Hardware Support
-
-NVIDIA CUDA (primary), AMD ROCm/HIP, Intel Gaudi, Ascend NPU, Google TPU (experimental). Hardware-specific code lives in `srt/hardware_backend/`.
-
-## Key Dependencies
-
-PyTorch >= 2.8.0, Transformers 4.57.1, Flash Attention, Triton (kernels), FastAPI/Uvicorn (HTTP), tonic (gRPC/Rust), outlines/xgrammar/llguidance (structured generation).
