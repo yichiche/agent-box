@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+#
+# pre-commit hook: checks git user identity before committing.
+# - Blocks if user.name or user.email is not set.
+# - Displays current identity so you can verify it's yours.
+#
+
+USER_NAME=$(git config user.name)
+USER_EMAIL=$(git config user.email)
+
+# Block if identity is missing
+ERRORS=""
+if [ -z "$USER_NAME" ]; then
+  ERRORS="${ERRORS}  - user.name is not set\n"
+fi
+if [ -z "$USER_EMAIL" ]; then
+  ERRORS="${ERRORS}  - user.email is not set\n"
+fi
+
+if [ -n "$ERRORS" ]; then
+  echo ""
+  echo "ERROR: Git identity is not configured."
+  echo ""
+  echo -e "$ERRORS"
+  echo "  Set your identity with:"
+  echo "    git config user.name \"Your Name\""
+  echo "    git config user.email \"your@email.com\""
+  echo ""
+  exit 1
+fi
+
+# Display current identity for verification
+echo ""
+echo "Committing as: $USER_NAME <$USER_EMAIL>"
+echo ""
+echo "  If this is not you, abort (Ctrl+C) and run:"
+echo "    git config user.name \"Your Name\""
+echo "    git config user.email \"your@email.com\""
+echo ""
+echo "  If you already committed with the wrong identity, fix it with:"
+echo "    git commit --amend --author=\"Your Name <your@email.com>\" --no-edit"
+echo ""
+
+exit 0
