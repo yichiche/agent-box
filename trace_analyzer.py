@@ -837,7 +837,7 @@ class ReportFormatter:
     def print_layer_summary(self, stage: Optional[Stage] = None) -> None:
         """Print layer-level summary."""
         if not self.result.layers:
-            print("No layer analysis available. Use --layer-analysis to enable.")
+            print("No layer analysis available.")
             return
 
         # Filter layers by stage if specified
@@ -879,7 +879,7 @@ class ReportFormatter:
     def print_layer_detail(self, layer_idx: int, stage: Optional[Stage] = None) -> None:
         """Print detailed kernel sequence for a specific layer."""
         if not self.result.layers:
-            print("No layer analysis available. Use --layer-analysis to enable.")
+            print("No layer analysis available.")
             return
 
         # Find the layer
@@ -962,7 +962,7 @@ class ReportFormatter:
     def print_layer_debug(self, layer_idx: int, top_n: int = 20) -> None:
         """Print debug details for a specific layer's stage decision."""
         if not self.result.layers:
-            print("No layer analysis available. Use --layer-analysis to enable.")
+            print("No layer analysis available.")
             return
 
         layer = None
@@ -1538,7 +1538,9 @@ Examples:
         help="Filter by stage (default: all)",
     )
     parser.add_argument(
-        "--layer-analysis", action="store_true", help="Enable layer-level analysis"
+        "--layer-analysis",
+        action="store_true",
+        help="Deprecated: layer detection is enabled by default",
     )
     parser.add_argument(
         "--layer-report", type=int, metavar="N", help="Show detailed report for layer N on terminal"
@@ -1619,14 +1621,8 @@ Examples:
         logger.error(f"Invalid JSON in trace file: {e}")
         sys.exit(1)
 
-    # Enable layer analysis if any layer-related option is requested
-    detect_layers = (
-        args.layer_analysis
-        or args.layer_report is not None
-        or args.csv_layers
-        or args.export_csv
-        or args.debug_layers
-    )
+    # Detect layers by default for consistent stage stats
+    detect_layers = True
 
     result = analyzer.analyze(trace_data, detect_layers=detect_layers)
 
