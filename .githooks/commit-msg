@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+#
+# commit-msg hook: enforces [Tag] Description format on commit messages.
+# Allowed tags: Feature, Fix, Refactor, Docs, Test, CI, Chore, Perf
+# Minimum description length: 10 characters
+#
+
+COMMIT_MSG_FILE="$1"
+COMMIT_MSG=$(head -1 "$COMMIT_MSG_FILE")
+
+# Skip merge commits
+if echo "$COMMIT_MSG" | grep -qE '^Merge '; then
+  exit 0
+fi
+
+# Reject Co-Authored-By or other trailers in the subject line
+if echo "$COMMIT_MSG" | grep -qiE '(Co-Authored-By|Signed-off-by|Reviewed-by):'; then
+  echo ""
+  echo "ERROR: Trailer found in the commit subject line."
+  echo "  Move 'Co-Authored-By:', 'Signed-off-by:', etc. to the commit body"
+  echo "  (separated from the subject by a blank line)."
+  echo ""
+  echo "  Example:"
+  echo "    [Feature] Add new authentication flow"
+  echo "    "
+  echo "    Co-Authored-By: Name <email>"
+  echo ""
+  exit 1
+fi
+
+# Validate [Tag] Description format
+PATTERN='^\[(Feature|Fix|Refactor|Docs|Test|CI|Chore|Perf)\] .{10,}'
+
+if ! echo "$COMMIT_MSG" | grep -qE "$PATTERN"; then
+  echo ""
+  echo "ERROR: Commit message does not follow the required format."
+  echo ""
+  echo "  Required: [Tag] Description (at least 10 characters)"
+  echo ""
+  echo "  Allowed tags: [Feature], [Fix], [Refactor], [Docs], [Test], [CI], [Chore], [Perf]"
+  echo ""
+  echo "  Examples:"
+  echo "    [Feature] Add user authentication endpoint"
+  echo "    [Fix] Resolve race condition in scheduler"
+  echo "    [Refactor] Simplify model loading pipeline"
+  echo ""
+  echo "  Your message: $COMMIT_MSG"
+  echo ""
+  exit 1
+fi
+
+exit 0
