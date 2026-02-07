@@ -38,6 +38,8 @@ class ModuleAssignment:
     line_no: int
     is_conditional: bool = False
     condition_text: str = ""
+    # For hybrid dispatch: maps a key (e.g. "attention") to a class name
+    dispatch_map: Optional[Dict[str, str]] = None
 
 
 @dataclass
@@ -62,6 +64,8 @@ class ModuleTree:
     is_conditional: bool = False
     condition_text: str = ""
     line_no: int = 0
+    # For hybrid dispatch: maps a key (e.g. "attention") to class name
+    dispatch_map: Optional[Dict[str, str]] = None
 
 
 @dataclass
@@ -177,6 +181,80 @@ def _extract_lambda_body_class(node: ast.Call) -> Optional[str]:
     return None
 
 
+def _extract_func_ref_name(node: ast.Call) -> Optional[str]:
+    """From make_layers(N, get_layer, ...), extract the function reference name 'get_layer'."""
+    if len(node.args) >= 2:
+        arg = node.args[1]
+        if isinstance(arg, ast.Name):
+            return arg.id
+    return None
+
+
+def _find_local_func(body: List[ast.stmt], func_name: str) -> Optional[ast.FunctionDef]:
+    """Find a local function definition in a list of statements."""
+    for stmt in body:
+        if isinstance(stmt, ast.FunctionDef) and stmt.name == func_name:
+            return stmt
+    return None
+
+
+def _extract_classes_from_func(func_node: ast.FunctionDef) -> List[str]:
+    """Extract class names constructed in return statements of a local function."""
+    classes = []
+    for node in ast.walk(func_node):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Call):
+            name = _get_call_class_name(node.value)
+            if name:
+                classes.append(name)
+    return classes
+
+
+def _extract_dispatch_dict(tree: ast.Module, dict_name: str) -> Dict[str, str]:
+    """Extract a module-level dict mapping string keys to class names.
+
+    Handles patterns like:
+        ALL_DECODER_LAYER_TYPES = {
+            "attention": Qwen3HybridAttentionDecoderLayer,
+            "linear_attention": Qwen3HybridLinearDecoderLayer,
+        }
+    """
+    result = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == dict_name:
+                    if isinstance(node.value, ast.Dict):
+                        for key, val in zip(node.value.keys, node.value.values):
+                            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                                if isinstance(val, ast.Name):
+                                    result[key.value] = val.id
+                                elif isinstance(val, ast.Attribute):
+                                    result[key.value] = ast.unparse(val)
+    return result
+
+
+def _detect_dispatch_in_func(
+    func_node: ast.FunctionDef, module_tree: ast.Module
+) -> Optional[Dict[str, str]]:
+    """Detect if a local function dispatches via a module-level dict.
+
+    Looks for patterns like:
+        layer_class = ALL_DECODER_LAYER_TYPES[config.layers_block_type[idx]]
+        return layer_class(...)
+    """
+    # Look for: xxx = SOME_DICT[...]
+    for node in ast.walk(func_node):
+        if isinstance(node, ast.Assign):
+            if isinstance(node.value, ast.Subscript):
+                subscript_val = node.value.value
+                if isinstance(subscript_val, ast.Name):
+                    dict_name = subscript_val.id
+                    dispatch = _extract_dispatch_dict(module_tree, dict_name)
+                    if dispatch:
+                        return dispatch
+    return None
+
+
 # ---------------------------------------------------------------------------
 # ModelFileParser
 # ---------------------------------------------------------------------------
@@ -212,7 +290,7 @@ class ModelFileParser:
                 init_method = self._find_init(node)
                 if init_method:
                     info.assignments = self._extract_init_assignments(
-                        init_method.body, known_classes
+                        init_method.body, known_classes, init_body=init_method.body
                     )
                     info.config_accesses = self._extract_config_accesses(init_method)
 
@@ -241,8 +319,11 @@ class ModelFileParser:
         known_classes: set,
         is_conditional: bool = False,
         condition_text: str = "",
+        init_body: Optional[List[ast.stmt]] = None,
     ) -> List[ModuleAssignment]:
         """Walk __init__ body (including if/else) to find self.xxx = ClassName(...)."""
+        if init_body is None:
+            init_body = body
         assignments = []
 
         for stmt in body:
@@ -250,7 +331,8 @@ class ModelFileParser:
             if isinstance(stmt, ast.Assign):
                 assignments.extend(
                     self._process_assign(
-                        stmt, known_classes, is_conditional, condition_text
+                        stmt, known_classes, is_conditional, condition_text,
+                        init_body=init_body,
                     )
                 )
 
@@ -262,6 +344,7 @@ class ModelFileParser:
                         stmt.body, known_classes,
                         is_conditional=True,
                         condition_text=cond_text,
+                        init_body=init_body,
                     )
                 )
                 if stmt.orelse:
@@ -273,6 +356,7 @@ class ModelFileParser:
                                 stmt.orelse, known_classes,
                                 is_conditional=True,
                                 condition_text="",
+                                init_body=init_body,
                             )
                         )
                     else:
@@ -281,6 +365,7 @@ class ModelFileParser:
                                 stmt.orelse, known_classes,
                                 is_conditional=True,
                                 condition_text=else_text,
+                                init_body=init_body,
                             )
                         )
 
@@ -292,43 +377,82 @@ class ModelFileParser:
         known_classes: set,
         is_conditional: bool,
         condition_text: str,
+        init_body: Optional[List[ast.stmt]] = None,
     ) -> List[ModuleAssignment]:
         """Process a single assignment statement."""
         results = []
 
-        # Handle tuple unpacking: self.layers, self.start_layer, self.end_layer = make_layers(...)
-        if (
-            len(stmt.targets) == 1
-            and isinstance(stmt.targets[0], ast.Tuple)
-            and isinstance(stmt.value, ast.Call)
-        ):
-            target_tuple = stmt.targets[0]
+        # Handle make_layers() calls — both tuple unpacking and direct assignment
+        call_node = None
+        attr_name = None
+
+        if isinstance(stmt.value, ast.Call):
             call_name = _get_call_class_name(stmt.value)
             if call_name == "make_layers":
-                # Find the lambda body to get the constructed class
-                constructed_class = _extract_lambda_body_class(stmt.value)
-                if constructed_class:
-                    # Find the first self.xxx in the tuple (usually self.layers)
-                    for elt in target_tuple.elts:
+                call_node = stmt.value
+                # Tuple unpacking: self.layers, self.start_layer, self.end_layer = make_layers(...)
+                if (
+                    len(stmt.targets) == 1
+                    and isinstance(stmt.targets[0], ast.Tuple)
+                ):
+                    for elt in stmt.targets[0].elts:
                         if (
                             isinstance(elt, ast.Attribute)
                             and isinstance(elt.value, ast.Name)
                             and elt.value.id == "self"
                         ):
                             attr_name = elt.attr
-                            # Get num_layers arg
-                            num_layers_arg = ""
-                            if stmt.value.args:
-                                num_layers_arg = ast.unparse(stmt.value.args[0])
-                            results.append(ModuleAssignment(
-                                attr_name=attr_name,
-                                class_name=constructed_class,
-                                raw_args=f"make_layers({num_layers_arg}, ...)",
-                                line_no=stmt.lineno,
-                                is_conditional=is_conditional,
-                                condition_text=condition_text,
-                            ))
                             break
+                # Direct: self.layers = make_layers(...)
+                elif (
+                    len(stmt.targets) == 1
+                    and isinstance(stmt.targets[0], ast.Attribute)
+                    and isinstance(stmt.targets[0].value, ast.Name)
+                    and stmt.targets[0].value.id == "self"
+                ):
+                    attr_name = stmt.targets[0].attr
+
+        if call_node and attr_name:
+            num_layers_arg = ""
+            if call_node.args:
+                num_layers_arg = ast.unparse(call_node.args[0])
+
+            # Try lambda body first
+            constructed_class = _extract_lambda_body_class(call_node)
+            dispatch_map = None
+
+            # Try function reference (e.g. make_layers(N, get_layer, ...))
+            if not constructed_class and init_body:
+                func_ref = _extract_func_ref_name(call_node)
+                if func_ref:
+                    local_func = _find_local_func(init_body, func_ref)
+                    if local_func:
+                        # Check for dispatch dict pattern
+                        dispatch_map = _detect_dispatch_in_func(local_func, self.tree)
+                        if dispatch_map:
+                            # Use first class as representative
+                            constructed_class = next(iter(dispatch_map.values()))
+                        else:
+                            # Direct class construction in return
+                            func_classes = _extract_classes_from_func(local_func)
+                            if func_classes:
+                                constructed_class = func_classes[0]
+                                if len(func_classes) > 1:
+                                    dispatch_map = {
+                                        f"variant_{i}": c
+                                        for i, c in enumerate(func_classes)
+                                    }
+
+            if constructed_class:
+                results.append(ModuleAssignment(
+                    attr_name=attr_name,
+                    class_name=constructed_class,
+                    raw_args=f"make_layers({num_layers_arg}, ...)",
+                    line_no=stmt.lineno,
+                    is_conditional=is_conditional,
+                    condition_text=condition_text,
+                    dispatch_map=dispatch_map,
+                ))
             return results
 
         # Standard: self.xxx = ClassName(...)
@@ -429,6 +553,7 @@ class HierarchyBuilder:
             child_node.is_conditional = assignment.is_conditional
             child_node.condition_text = assignment.condition_text
             child_node.line_no = assignment.line_no
+            child_node.dispatch_map = assignment.dispatch_map
             node.children.append(child_node)
 
         return node
@@ -460,10 +585,16 @@ class ConfigParser:
         "hidden_size", "intermediate_size", "moe_intermediate_size",
         "num_hidden_layers", "num_attention_heads", "num_key_value_heads",
         "n_routed_experts", "n_shared_experts", "num_experts_per_tok",
+        "num_experts", "shared_expert_intermediate_size",
         "n_group", "topk_group", "topk_method",
         "first_k_dense_replace", "moe_layer_freq",
+        "full_attention_interval", "layers_block_type",
         "qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim",
         "q_lora_rank", "kv_lora_rank",
+        "head_dim", "partial_rotary_factor",
+        "linear_key_head_dim", "linear_value_head_dim",
+        "linear_num_key_heads", "linear_num_value_heads",
+        "linear_conv_kernel_dim",
         "vocab_size", "max_position_embeddings",
         "rms_norm_eps", "rope_theta", "rope_scaling",
         "routed_scaling_factor",
@@ -512,6 +643,10 @@ class OutputFormatter:
             extension = "|   " if not is_child_last else "    "
 
             label = f"{child.attr_name}: {child.class_name}"
+            if child.dispatch_map and len(child.dispatch_map) > 1:
+                other_classes = [c for c in child.dispatch_map.values() if c != child.class_name]
+                if other_classes:
+                    label += f" | {other_classes[0]}"
             if child.multiplicity:
                 label += f" [{child.multiplicity}]"
             if child.is_conditional and child.condition_text:
@@ -547,12 +682,16 @@ class OutputFormatter:
         tree: ModuleTree,
         config: Optional[ConfigMetadata] = None,
         max_depth: int = 2,
+        class_trees: Optional[Dict[str, ModuleTree]] = None,
     ) -> str:
         """Format as a PyTorch-profiler-style expanded tree with instance indices.
 
         Expands repeated layers (make_layers) into individual instances with _0, _1, ...
         and resolves conditional branches per-layer using config metadata.
         """
+        # Store pre-built class trees for dispatch resolution
+        self._class_trees = class_trees or {}
+
         lines = []
         lines.append(f"=== Module Tree (profiler-style): {tree.class_name} ===")
         lines.append(tree.class_name)
@@ -582,8 +721,16 @@ class OutputFormatter:
                 # Expand into individual instances
                 num_layers = self._resolve_num_layers(child.multiplicity, config_data)
                 if num_layers is not None:
-                    for idx in range(num_layers):
-                        expanded.append((child, idx, True))
+                    if child.dispatch_map:
+                        # Hybrid dispatch: resolve class per layer
+                        for idx in range(num_layers):
+                            resolved = self._resolve_dispatch_for_layer(
+                                child, idx, config_data
+                            )
+                            expanded.append((resolved, idx, True))
+                    else:
+                        for idx in range(num_layers):
+                            expanded.append((child, idx, True))
                 else:
                     expanded.append((child, None, False))
             else:
@@ -638,6 +785,90 @@ class OutputFormatter:
             if isinstance(val, int):
                 return val
         return None
+
+    def _resolve_dispatch_for_layer(
+        self,
+        child: ModuleTree,
+        layer_idx: int,
+        config_data: Dict[str, Any],
+    ) -> ModuleTree:
+        """Resolve a dispatch_map node to the correct class for a given layer index.
+
+        Handles the Qwen3-Next hybrid pattern where full_attention_interval determines
+        which layers use "attention" vs "linear_attention".
+        """
+        dispatch_map = child.dispatch_map
+        if not dispatch_map:
+            return child
+
+        # Determine layer type key
+        layer_type_key = self._get_layer_type_key(layer_idx, config_data, dispatch_map)
+
+        resolved_class = dispatch_map.get(layer_type_key, child.class_name)
+
+        # Create a new ModuleTree with the resolved class
+        # We need to look up children from the class_map via the builder
+        # For now, just swap the class_name — children will be resolved at recursion time
+        resolved = ModuleTree(
+            class_name=resolved_class,
+            attr_name=child.attr_name,
+            children=self._get_children_for_class(resolved_class, child),
+            multiplicity="",
+            is_conditional=False,
+            condition_text="",
+            line_no=child.line_no,
+            dispatch_map=None,
+        )
+        return resolved
+
+    def _get_children_for_class(
+        self, class_name: str, original: ModuleTree
+    ) -> List[ModuleTree]:
+        """Get children for a resolved dispatch class.
+
+        If the original node already has children from the hierarchy builder matching
+        this class, reuse them. Otherwise return empty (leaf node in tree).
+        """
+        # If the hierarchy builder already resolved children for the original node's class,
+        # and this is the same class, reuse them
+        if original.class_name == class_name:
+            return original.children
+        # For dispatch-resolved nodes, we need the hierarchy builder to have built
+        # child trees for all dispatch target classes. This is handled by building
+        # a lookup in format_profiler_tree.
+        if hasattr(self, '_class_trees') and class_name in self._class_trees:
+            return self._class_trees[class_name].children
+        return []
+
+    def _get_layer_type_key(
+        self, layer_idx: int, config_data: Dict[str, Any], dispatch_map: Dict[str, str]
+    ) -> str:
+        """Determine the dispatch key for a given layer index.
+
+        Supports:
+        - full_attention_interval: every Nth layer is "attention", rest are "linear_attention"
+        - layers_block_type: explicit per-layer list from config
+        """
+        # Check explicit per-layer list
+        block_types = config_data.get("layers_block_type")
+        if isinstance(block_types, list) and layer_idx < len(block_types):
+            return block_types[layer_idx]
+
+        # Check full_attention_interval pattern (Qwen3-Next)
+        interval = config_data.get("full_attention_interval")
+        if isinstance(interval, int) and interval > 0:
+            if (layer_idx + 1) % interval == 0:
+                # This maps to "attention" key in ALL_DECODER_LAYER_TYPES
+                if "attention" in dispatch_map:
+                    return "attention"
+                return "full_attention"
+            else:
+                if "linear_attention" in dispatch_map:
+                    return "linear_attention"
+                return "linear_attention"
+
+        # Default: first key
+        return next(iter(dispatch_map))
 
     def _resolve_conditionals(
         self,
@@ -770,6 +1001,13 @@ def _auto_detect_root(classes: Dict[str, ClassInfo]) -> Optional[str]:
     return None
 
 
+def _walk_tree(node: ModuleTree):
+    """Yield all nodes in a ModuleTree."""
+    yield node
+    for child in node.children:
+        yield from _walk_tree(child)
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -867,8 +1105,20 @@ def main():
             config = None
             if args.config and os.path.isfile(args.config):
                 config = ConfigParser.parse(args.config)
+
+            # Pre-build class trees for all dispatch target classes
+            class_trees = {}
+            for node in _walk_tree(tree):
+                if node.dispatch_map:
+                    for cls_name in node.dispatch_map.values():
+                        if cls_name not in class_trees:
+                            class_trees[cls_name] = builder.build(cls_name)
+
             output_parts.append(
-                formatter.format_profiler_tree(tree, config=config, max_depth=args.depth)
+                formatter.format_profiler_tree(
+                    tree, config=config, max_depth=args.depth,
+                    class_trees=class_trees,
+                )
             )
         else:
             output_parts.append(formatter.format_tree(tree))

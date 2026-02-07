@@ -1,0 +1,45 @@
+name: PR Lint
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+jobs:
+  validate-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          PATTERN='^\[(Feature|Fix|Refactor|Docs|Test|CI|Chore|Perf)\] .{10,}'
+          if ! echo "$PR_TITLE" | grep -qE "$PATTERN"; then
+            echo "::error::PR title must match format: [Tag] Description (at least 10 chars)"
+            echo ""
+            echo "Allowed tags: [Feature], [Fix], [Refactor], [Docs], [Test], [CI], [Chore], [Perf]"
+            echo ""
+            echo "Examples:"
+            echo "  [Feature] Add user authentication endpoint"
+            echo "  [Fix] Resolve race condition in scheduler"
+            echo ""
+            echo "Your title: $PR_TITLE"
+            exit 1
+          fi
+          echo "PR title is valid."
+
+      - name: Validate PR body
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if ! echo "$PR_BODY" | grep -q '## Summary'; then
+            echo "::error::PR body must contain a '## Summary' section."
+            exit 1
+          fi
+
+          # Check that Summary section has content beyond the template placeholder
+          SUMMARY_CONTENT=$(echo "$PR_BODY" | sed -n '/## Summary/,/^## /p' | grep -v '## Summary' | grep -v '^## ' | grep -v '<!--.*-->' | sed '/^[[:space:]]*$/d' | sed '/^-$/d')
+          if [ -z "$SUMMARY_CONTENT" ]; then
+            echo "::error::PR Summary section must contain a description (not just the template placeholder)."
+            exit 1
+          fi
+          echo "PR body is valid."
