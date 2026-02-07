@@ -13,17 +13,13 @@ if echo "$COMMIT_MSG" | grep -qE '^Merge '; then
   exit 0
 fi
 
-# Reject Co-Authored-By or other trailers in the subject line
-if echo "$COMMIT_MSG" | grep -qiE '(Co-Authored-By|Signed-off-by|Reviewed-by):'; then
+# Reject Co-Authored-By or other trailers anywhere in the commit message
+FULL_MSG=$(cat "$COMMIT_MSG_FILE")
+if echo "$FULL_MSG" | grep -qiE '(Co-Authored-By|Signed-off-by|Reviewed-by):'; then
   echo ""
-  echo "ERROR: Trailer found in the commit subject line."
-  echo "  Move 'Co-Authored-By:', 'Signed-off-by:', etc. to the commit body"
-  echo "  (separated from the subject by a blank line)."
-  echo ""
-  echo "  Example:"
-  echo "    [Feature] Add new authentication flow"
-  echo "    "
-  echo "    Co-Authored-By: Name <email>"
+  echo "ERROR: Trailers are not allowed in commit messages."
+  echo "  'Co-Authored-By:', 'Signed-off-by:', 'Reviewed-by:', etc."
+  echo "  are not permitted in either the subject line or the body."
   echo ""
   exit 1
 fi
