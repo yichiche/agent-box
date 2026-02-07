@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+#
+# pre-push hook: warns on direct pushes to main and validates last commit message.
+#
+
+REMOTE="$1"
+BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null)
+
+# Warn if pushing directly to main
+if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
+  echo ""
+  echo "WARNING: You are pushing directly to '$BRANCH'."
+  echo "  Consider using a feature branch and opening a pull request instead."
+  echo ""
+fi
+
+# Validate the last commit message format (catches --no-verify commits)
+LAST_MSG=$(git log -1 --format='%s')
+
+# Skip merge commits
+if echo "$LAST_MSG" | grep -qE '^Merge '; then
+  exit 0
+fi
+
+PATTERN='^\[(Feature|Fix|Refactor|Docs|Test|CI|Chore|Perf)\] .{10,}'
+
+if ! echo "$LAST_MSG" | grep -qE "$PATTERN"; then
+  echo ""
+  echo "ERROR: Last commit message does not follow the required format."
+  echo ""
+  echo "  Required: [Tag] Description (at least 10 characters)"
+  echo "  Allowed tags: [Feature], [Fix], [Refactor], [Docs], [Test], [CI], [Chore], [Perf]"
+  echo ""
+  echo "  Last commit: $LAST_MSG"
+  echo ""
+  echo "  Please amend your commit message before pushing:"
+  echo "    git commit --amend"
+  echo ""
+  exit 1
+fi
+
+exit 0
