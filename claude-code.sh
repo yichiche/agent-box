@@ -21,7 +21,7 @@ echo "[claude] finished"
 
 mkdir -p /sgl-workspace/.claude
 cp ${HOST_HOME}/agent-box/CLAUDE.md /sgl-workspace/
-cp ${HOST_HOME}/agent-box/setting.json /sgl-workspace/.claude/setting.json 
+ln ${HOST_HOME}/agent-box/setting.json ~/.claude/settings.json
 if [ -f "${HOST_HOME}/.claude.json" ]; then
   ln -sf "${HOST_HOME}/.claude.json" /root/.claude.json
 else

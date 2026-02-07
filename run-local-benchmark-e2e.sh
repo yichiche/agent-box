@@ -8,10 +8,9 @@ Usage:
 
 Required:
   --image <image>                    Docker image used for benchmark run.
+  --model-path <path>                Model path for sglang.launch_server.
 
 Common options:
-  --model-path <path>                Model path for sglang.launch_server.
-                                     Default: /data/models/amd/DeepSeek-R1-MXFP4-Preview
   --container-name <name>            Optional container name.
                                      Default: sglang-bench-<image-tag>-<timestamp>
   --concurrencies <csv>              Concurrency list, comma separated.
@@ -71,7 +70,7 @@ quote_one() {
 }
 
 IMAGE=""
-MODEL_PATH="/raid/models/DeepSeek-R1-MXFP4-Preview/"
+MODEL_PATH=""
 CONTAINER_NAME=""
 CONCURRENCIES="1,2,4,8,16"
 CONCURRENCIES_SET=0
@@ -85,6 +84,8 @@ RESULT_DIR=""
 WAIT_TIMEOUT_SEC=1800
 KEEP_CONTAINER=0
 USE_SUDO_DOCKER=1
+HOST_HOME_DIR=""
+MTP_MODE=""
 
 SERVER_PORT=9000
 TP_SIZE=8
@@ -155,6 +156,18 @@ while [[ $# -gt 0 ]]; do
       USE_SUDO_DOCKER=0
       shift
       ;;
+    --home-dir)
+      HOST_HOME_DIR="${2:-}"
+      shift 2
+      ;;
+    --mtp)
+      MTP_MODE=1
+      shift
+      ;;
+    --no-mtp)
+      MTP_MODE=0
+      shift
+      ;;
     --port)
       SERVER_PORT="${2:-}"
       shift 2
@@ -219,9 +232,22 @@ if (( CONCURRENCIES_SET == 0 )); then
     CONCURRENCIES="$CONCURRENCIES_INPUT"
   fi
 fi
+if [[ -z "$HOST_HOME_DIR" ]]; then
+  DEFAULT_HOME_DIR="$HOME"
+  read -r -p "Host home directory (default: ${DEFAULT_HOME_DIR}): " HOME_DIR_INPUT
+  HOST_HOME_DIR="${HOME_DIR_INPUT:-$DEFAULT_HOME_DIR}"
+fi
+if [[ -z "$MTP_MODE" ]]; then
+  read -r -p "Enable MTP (speculative decoding)? [Y/n]: " MTP_INPUT
+  case "${MTP_INPUT,,}" in
+    n|no) MTP_MODE=0 ;;
+    *)    MTP_MODE=1 ;;
+  esac
+fi
 
 [[ -n "$IMAGE" ]] || die "--image is required"
 [[ -n "$MODEL_PATH" ]] || die "--model-path is required"
+[[ -d "$MODEL_PATH" ]] || die "Model path does not exist or is not a directory: $MODEL_PATH"
 command -v docker >/dev/null 2>&1 || die "docker not found in PATH"
 command -v curl >/dev/null 2>&1 || die "curl not found in PATH"
 
@@ -252,7 +278,7 @@ TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
 if [[ -z "$CONTAINER_NAME" ]]; then
   IMAGE_TAG="${IMAGE##*:}"
   IMAGE_TAG="${IMAGE_TAG//[^a-zA-Z0-9_.-]/_}"
-  CONTAINER_NAME="sglang-bench-${IMAGE_TAG}-${TIMESTAMP}"
+  CONTAINER_NAME="jacky-sglang-bench-${IMAGE_TAG}-${TIMESTAMP}"
 fi
 
 if [[ -z "$RESULT_DIR" ]]; then
@@ -285,8 +311,18 @@ cleanup() {
       if (( KEEP_CONTAINER == 1 )); then
         log "Keeping container: ${CONTAINER_NAME}"
       else
-        log "Stopping/removing container: ${CONTAINER_NAME}"
-        docker_cmd rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        # Interactive prompt: ask user whether to remove the container (default: yes)
+        local answer=""
+        read -r -p "Remove container '${CONTAINER_NAME}'? [Y/n]: " answer 2>/dev/tty </dev/tty || true
+        case "${answer,,}" in
+          n|no)
+            log "Keeping container: ${CONTAINER_NAME}"
+            ;;
+          *)
+            log "Stopping/removing container: ${CONTAINER_NAME}"
+            docker_cmd rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+            ;;
+        esac
       fi
     fi
   fi
@@ -320,7 +356,7 @@ add_mount_if_exists() {
   fi
 }
 
-add_mount_if_exists "$HOME/jacky" /home/amd/jacky
+add_mount_if_exists "$HOST_HOME_DIR" "$HOST_HOME_DIR"
 add_mount_if_exists /data /data
 add_mount_if_exists /data2 /data2
 add_mount_if_exists /mnt /mnt
@@ -344,11 +380,16 @@ SERVER_ARGS=(
   --max-running-requests "$MAX_RUNNING_REQUESTS"
   --kv-cache-dtype "$KV_CACHE_DTYPE"
   --attention-backend "$ATTENTION_BACKEND"
-  --speculative-algorithm EAGLE
-  --speculative-num-steps 3
-  --speculative-eagle-topk 1
-  --speculative-num-draft-tokens 4
 )
+
+if (( MTP_MODE == 1 )); then
+  SERVER_ARGS+=(
+    --speculative-algorithm EAGLE
+    --speculative-num-steps 3
+    --speculative-eagle-topk 1
+    --speculative-num-draft-tokens 4
+  )
+fi
 
 if [[ -n "$SERVER_EXTRA_ARGS" ]]; then
   # shellcheck disable=SC2206
@@ -434,7 +475,7 @@ if (( PROFILE_MODE == 1 )); then
     TRACE_BASENAME="$(basename "$TRACE_PATH_IN_CONTAINER")"
     log "Running trace analyzer in container"
     docker_cmd exec "$CONTAINER_NAME" mkdir -p "$CONTAINER_TRACE_ANALYSIS_DIR"
-    docker_cmd cp /home/yichiche/agent-box/trace_analyzer.py \
+    docker_cmd cp "${HOST_HOME_DIR}/agent-box/trace_analyzer.py" \
       "${CONTAINER_NAME}:/tmp/trace_analyzer.py"
     docker_cmd exec "$CONTAINER_NAME" bash -lc \
       "python3 /tmp/trace_analyzer.py $(quote_one "$TRACE_PATH_IN_CONTAINER") \
