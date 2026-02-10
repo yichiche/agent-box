@@ -304,10 +304,23 @@ docker_cmd() {
   fi
 }
 
+kill_tail() {
+  if [[ -n "${TAIL_PID:-}" ]]; then
+    # Kill the entire process group (docker exec + tee pipeline)
+    kill -- -"$TAIL_PID" 2>/dev/null || kill "$TAIL_PID" 2>/dev/null || true
+    wait "$TAIL_PID" 2>/dev/null || true
+    TAIL_PID=""
+  fi
+}
+
 cleanup() {
   set +e
+  kill_tail
   if [[ -n "${CONTAINER_NAME:-}" ]]; then
     if docker_cmd ps -a --format '{{.Names}}' | grep -Fxq "$CONTAINER_NAME"; then
+      # Always kill the server process inside the container so the port is freed
+      log "Killing server process inside container"
+      docker_cmd exec "$CONTAINER_NAME" bash -c 'pkill -f "sglang.launch_server" 2>/dev/null; exit 0' || true
       if (( KEEP_CONTAINER == 1 )); then
         log "Keeping container: ${CONTAINER_NAME}"
       else
@@ -404,8 +417,11 @@ log "Launching server inside container"
 docker_cmd exec -d "$CONTAINER_NAME" bash -lc "$START_SERVER_CMD"
 
 log "Streaming server log to host: ${HOST_SERVER_LOG}"
+set -m  # enable job control so the pipeline gets its own process group
 docker_cmd exec "$CONTAINER_NAME" bash -lc "tail -n +1 -F $(quote_one "$CONTAINER_SERVER_LOG")" \
   | tee -a "$HOST_SERVER_LOG" >/dev/null &
+TAIL_PID=$!
+set +m
 
 wait_for_health() {
   local deadline=$((SECONDS + WAIT_TIMEOUT_SEC))
@@ -490,6 +506,9 @@ if (( PROFILE_MODE == 1 )); then
   fi
 fi
 
+# Stop the background log-streaming pipeline before collecting artifacts
+kill_tail
+
 log "Collecting benchmark artifacts to host: ${RESULT_DIR}"
 docker_cmd cp "${CONTAINER_NAME}:${CONTAINER_RESULT_DIR}/." "${RESULT_DIR}/"
 
@@ -521,7 +540,7 @@ for raw in jsonl_path.read_text(encoding="utf-8").splitlines():
             "total_throughput_tok_s": item.get("total_throughput"),
             "median_e2e_latency_ms": item.get("median_e2e_latency_ms"),
             "median_ttft_ms": item.get("median_ttft_ms"),
-            "mean_itl_ms": item.get("mean_itl_ms"),
+            "median_itl_ms": item.get("median_itl_ms"),
         }
     )
 
@@ -538,7 +557,7 @@ with csv_path.open("w", encoding="utf-8", newline="") as f:
             "total_throughput_tok_s",
             "median_e2e_latency_ms",
             "median_ttft_ms",
-            "mean_itl_ms",
+            "median_itl_ms",
         ],
     )
     writer.writeheader()
