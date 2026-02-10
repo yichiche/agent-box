@@ -27,6 +27,10 @@ Common options:
   --wait-timeout-sec <int>           Max wait for server health. Default: 1800
   --keep-container                   Do not stop/remove container on exit.
   --no-sudo-docker                   Use docker directly instead of sudo docker.
+  --accuracy                         Run GSM8K accuracy benchmark after perf bench.
+  --accuracy-num-questions <int>     Number of GSM8K questions. Default: 2000
+  --accuracy-parallel <int>          GSM8K parallel requests. Default: 1000
+  --accuracy-num-shots <int>         GSM8K few-shot count. Default: 5
 
 Advanced options:
   --port <int>                       Server port. Default: 9000
@@ -69,6 +73,17 @@ quote_one() {
   printf '%q' "$1"
 }
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="${SCRIPT_DIR}/.bench_config"
+
+# Load saved values from config file (if exists)
+SAVED_MODEL_PATH=""
+SAVED_HOST_HOME_DIR=""
+if [[ -f "$CONFIG_FILE" ]]; then
+  SAVED_MODEL_PATH="$(grep -m1 '^MODEL_PATH=' "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- || true)"
+  SAVED_HOST_HOME_DIR="$(grep -m1 '^HOST_HOME_DIR=' "$CONFIG_FILE" 2>/dev/null | cut -d= -f2- || true)"
+fi
+
 IMAGE=""
 MODEL_PATH=""
 CONTAINER_NAME=""
@@ -86,6 +101,10 @@ KEEP_CONTAINER=0
 USE_SUDO_DOCKER=1
 HOST_HOME_DIR=""
 MTP_MODE=""
+ACCURACY_MODE=""
+ACCURACY_NUM_QUESTIONS=2000
+ACCURACY_PARALLEL=1000
+ACCURACY_NUM_SHOTS=5
 
 SERVER_PORT=9000
 TP_SIZE=8
@@ -156,6 +175,22 @@ while [[ $# -gt 0 ]]; do
       USE_SUDO_DOCKER=0
       shift
       ;;
+    --accuracy)
+      ACCURACY_MODE=1
+      shift
+      ;;
+    --accuracy-num-questions)
+      ACCURACY_NUM_QUESTIONS="${2:-}"
+      shift 2
+      ;;
+    --accuracy-parallel)
+      ACCURACY_PARALLEL="${2:-}"
+      shift 2
+      ;;
+    --accuracy-num-shots)
+      ACCURACY_NUM_SHOTS="${2:-}"
+      shift 2
+      ;;
     --home-dir)
       HOST_HOME_DIR="${2:-}"
       shift 2
@@ -218,8 +253,14 @@ if [[ -z "$IMAGE" ]]; then
   read -r -p "Docker image: " IMAGE
 fi
 if [[ -z "$MODEL_PATH" ]]; then
-  read -r -p "Model path: " MODEL_PATH
+  if [[ -n "$SAVED_MODEL_PATH" ]]; then
+    read -r -p "Model path (default: ${SAVED_MODEL_PATH}): " MODEL_PATH_INPUT
+    MODEL_PATH="${MODEL_PATH_INPUT:-$SAVED_MODEL_PATH}"
+  else
+    read -r -p "Model path: " MODEL_PATH
+  fi
 fi
+# Save will happen after all interactive prompts are done
 if (( PROFILE_MODE == 0 )); then
   read -r -p "Enable profile mode? [y/N]: " PROFILE_INPUT
   case "${PROFILE_INPUT,,}" in
@@ -233,7 +274,7 @@ if (( CONCURRENCIES_SET == 0 )); then
   fi
 fi
 if [[ -z "$HOST_HOME_DIR" ]]; then
-  DEFAULT_HOME_DIR="$HOME"
+  DEFAULT_HOME_DIR="${SAVED_HOST_HOME_DIR:-$HOME}"
   read -r -p "Host home directory (default: ${DEFAULT_HOME_DIR}): " HOME_DIR_INPUT
   HOST_HOME_DIR="${HOME_DIR_INPUT:-$DEFAULT_HOME_DIR}"
 fi
@@ -244,6 +285,19 @@ if [[ -z "$MTP_MODE" ]]; then
     *)    MTP_MODE=1 ;;
   esac
 fi
+if [[ -z "$ACCURACY_MODE" ]]; then
+  read -r -p "Run GSM8K accuracy benchmark? [y/N]: " ACCURACY_INPUT
+  case "${ACCURACY_INPUT,,}" in
+    y|yes) ACCURACY_MODE=1 ;;
+    *)     ACCURACY_MODE=0 ;;
+  esac
+fi
+
+# Save config for next run
+{
+  echo "MODEL_PATH=${MODEL_PATH}"
+  echo "HOST_HOME_DIR=${HOST_HOME_DIR}"
+} > "$CONFIG_FILE"
 
 [[ -n "$IMAGE" ]] || die "--image is required"
 [[ -n "$MODEL_PATH" ]] || die "--model-path is required"
@@ -295,6 +349,8 @@ HOST_SUMMARY_CSV="${RESULT_DIR}/bench_summary.csv"
 HOST_SERVER_LOG="${RESULT_DIR}/server.log"
 HOST_CLIENT_LOG="${RESULT_DIR}/client.log"
 HOST_TRACE_ANALYSIS_DIR="${RESULT_DIR}/trace_analysis"
+CONTAINER_ACCURACY_LOG="${CONTAINER_RESULT_DIR}/accuracy_gsm8k.log"
+HOST_ACCURACY_LOG="${RESULT_DIR}/accuracy_gsm8k.log"
 
 docker_cmd() {
   if (( USE_SUDO_DOCKER == 1 )); then
@@ -504,6 +560,18 @@ if (( PROFILE_MODE == 1 )); then
   else
     log "No TP0 trace found in /tmp (expected *-TP-0.trace.json.gz)"
   fi
+fi
+
+if (( ACCURACY_MODE == 1 )); then
+  log "Running GSM8K accuracy benchmark: num_questions=${ACCURACY_NUM_QUESTIONS}, parallel=${ACCURACY_PARALLEL}, num_shots=${ACCURACY_NUM_SHOTS}"
+  ACCURACY_CMD="cd /sgl-workspace/sglang && python3 benchmark/gsm8k/bench_sglang.py"
+  ACCURACY_CMD+=" --num-questions ${ACCURACY_NUM_QUESTIONS}"
+  ACCURACY_CMD+=" --parallel ${ACCURACY_PARALLEL}"
+  ACCURACY_CMD+=" --num-shots ${ACCURACY_NUM_SHOTS}"
+  ACCURACY_CMD+=" --port ${SERVER_PORT}"
+  docker_cmd exec "$CONTAINER_NAME" bash -lc \
+    "${ACCURACY_CMD} 2>&1 | tee $(quote_one "$CONTAINER_ACCURACY_LOG")" \
+    | tee -a "$HOST_ACCURACY_LOG"
 fi
 
 # Stop the background log-streaming pipeline before collecting artifacts
