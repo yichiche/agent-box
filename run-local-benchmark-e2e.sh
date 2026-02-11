@@ -503,6 +503,18 @@ if ! wait_for_health; then
 fi
 log "Server is healthy"
 
+if (( ACCURACY_MODE == 1 )); then
+  log "Running GSM8K accuracy benchmark: num_questions=${ACCURACY_NUM_QUESTIONS}, parallel=${ACCURACY_PARALLEL}, num_shots=${ACCURACY_NUM_SHOTS}"
+  ACCURACY_CMD="cd /sgl-workspace/sglang && python3 benchmark/gsm8k/bench_sglang.py"
+  ACCURACY_CMD+=" --num-questions ${ACCURACY_NUM_QUESTIONS}"
+  ACCURACY_CMD+=" --parallel ${ACCURACY_PARALLEL}"
+  ACCURACY_CMD+=" --num-shots ${ACCURACY_NUM_SHOTS}"
+  ACCURACY_CMD+=" --port ${SERVER_PORT}"
+  docker_cmd exec "$CONTAINER_NAME" bash -lc \
+    "${ACCURACY_CMD} 2>&1 | tee $(quote_one "$CONTAINER_ACCURACY_LOG")" \
+    | tee -a "$HOST_ACCURACY_LOG"
+fi
+
 for c in "${CONCURRENCY_ARRAY[@]}"; do
   NUM_PROMPTS=$((c * PROMPTS_MULTIPLIER))
   CONTAINER_BENCH_LOG="${CONTAINER_RESULT_DIR}/bench_c${c}.log"
@@ -560,18 +572,6 @@ if (( PROFILE_MODE == 1 )); then
   else
     log "No TP0 trace found in /tmp (expected *-TP-0.trace.json.gz)"
   fi
-fi
-
-if (( ACCURACY_MODE == 1 )); then
-  log "Running GSM8K accuracy benchmark: num_questions=${ACCURACY_NUM_QUESTIONS}, parallel=${ACCURACY_PARALLEL}, num_shots=${ACCURACY_NUM_SHOTS}"
-  ACCURACY_CMD="cd /sgl-workspace/sglang && python3 benchmark/gsm8k/bench_sglang.py"
-  ACCURACY_CMD+=" --num-questions ${ACCURACY_NUM_QUESTIONS}"
-  ACCURACY_CMD+=" --parallel ${ACCURACY_PARALLEL}"
-  ACCURACY_CMD+=" --num-shots ${ACCURACY_NUM_SHOTS}"
-  ACCURACY_CMD+=" --port ${SERVER_PORT}"
-  docker_cmd exec "$CONTAINER_NAME" bash -lc \
-    "${ACCURACY_CMD} 2>&1 | tee $(quote_one "$CONTAINER_ACCURACY_LOG")" \
-    | tee -a "$HOST_ACCURACY_LOG"
 fi
 
 # Stop the background log-streaming pipeline before collecting artifacts
