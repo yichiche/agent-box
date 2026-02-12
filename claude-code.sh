@@ -19,13 +19,14 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 # Claude initialization / config linking
 echo "[claude] finished"
 
-mkdir -p /sgl-workspace/.claude
-cp ${HOST_HOME}/agent-box/CLAUDE.md /sgl-workspace/
-ln ${HOST_HOME}/agent-box/setting.json ~/.claude/settings.json
-if [ -f "${HOST_HOME}/.claude.json" ]; then
-  ln -sf "${HOST_HOME}/.claude.json" /root/.claude.json
-else
-  claude
-  cp /root/.claude.json "${HOST_HOME}/"
-  echo "[claude] First-time initialization"
-fi
+## Login with personal API.
+# mkdir -p /sgl-workspace/.claude
+# cp ${HOST_HOME}/agent-box/CLAUDE.md /sgl-workspace/
+# ln ${HOST_HOME}/agent-box/setting.json ~/.claude/settings.json
+# if [ -f "${HOST_HOME}/.claude.json" ]; then
+#   ln -sf "${HOST_HOME}/.claude.json" /root/.claude.json
+# else
+#   claude
+#   cp /root/.claude.json "${HOST_HOME}/"
+#   echo "[claude] First-time initialization"
+# fi
