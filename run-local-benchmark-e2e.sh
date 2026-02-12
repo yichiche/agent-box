@@ -336,7 +336,7 @@ if [[ -z "$CONTAINER_NAME" ]]; then
 fi
 
 if [[ -z "$RESULT_DIR" ]]; then
-  RESULT_DIR="$(pwd)/benchmark_runs/${TIMESTAMP}"
+  RESULT_DIR="${HOST_HOME_DIR}/benchmark_runs/${TIMESTAMP}"
 fi
 mkdir -p "$RESULT_DIR"
 
@@ -559,12 +559,14 @@ if (( PROFILE_MODE == 1 )); then
     TRACE_BASENAME="$(basename "$TRACE_PATH_IN_CONTAINER")"
     log "Running trace analyzer in container"
     docker_cmd exec "$CONTAINER_NAME" mkdir -p "$CONTAINER_TRACE_ANALYSIS_DIR"
+    docker_cmd exec "$CONTAINER_NAME" pip install openpyxl -q
     docker_cmd cp "${HOST_HOME_DIR}/agent-box/trace_analyzer.py" \
       "${CONTAINER_NAME}:/tmp/trace_analyzer.py"
     docker_cmd exec "$CONTAINER_NAME" bash -lc \
       "python3 /tmp/trace_analyzer.py $(quote_one "$TRACE_PATH_IN_CONTAINER") \
-      --csv-stats $(quote_one "${CONTAINER_TRACE_ANALYSIS_DIR}/kernel_stats.csv") \
-      --csv-events $(quote_one "${CONTAINER_TRACE_ANALYSIS_DIR}/events.csv") \
+      --export-csv $(quote_one "${CONTAINER_TRACE_ANALYSIS_DIR}/profile.csv") \
+      --export-layers 58-65 \
+      --debug-layers 2-5 \
       > $(quote_one "${CONTAINER_TRACE_ANALYSIS_DIR}/trace_analyzer.log") 2>&1"
     mkdir -p "$HOST_TRACE_ANALYSIS_DIR"
     docker_cmd cp "${CONTAINER_NAME}:${TRACE_PATH_IN_CONTAINER}" \
@@ -622,8 +624,8 @@ with csv_path.open("w", encoding="utf-8", newline="") as f:
             "request_throughput_req_s",
             "input_throughput_tok_s",
             "output_throughput_tok_s",
-            "total_throughput_tok_s",
             "median_e2e_latency_ms",
+            "total_throughput_tok_s",
             "median_ttft_ms",
             "median_itl_ms",
         ],
