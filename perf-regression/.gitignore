@@ -1,0 +1,11 @@
+# Runtime data
+data/
+logs/
+benchmark_runs/
+
+# Lock file
+.orchestrator.lock
+
+# Python
+__pycache__/
+*.pyc

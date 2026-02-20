@@ -1,0 +1,242 @@
+/* SGLang ROCm Perf Regression Dashboard */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background: #f5f5f5;
+    color: #333;
+    line-height: 1.6;
+}
+
+header {
+    background: #1a1a2e;
+    color: #fff;
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+header h1 {
+    font-size: 1.3rem;
+    font-weight: 600;
+}
+
+.health-badge {
+    padding: 6px 14px;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    font-weight: 500;
+}
+
+.health-badge.ok {
+    background: #2e7d32;
+    color: #fff;
+}
+
+.health-badge.warn {
+    background: #f57c00;
+    color: #fff;
+}
+
+.health-badge.error {
+    background: #c62828;
+    color: #fff;
+}
+
+/* Filter bar */
+.filter-bar {
+    background: #fff;
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    border-bottom: 1px solid #ddd;
+    flex-wrap: wrap;
+}
+
+.filter-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.filter-group label {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #555;
+}
+
+.filter-group select {
+    padding: 6px 10px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    background: #fff;
+}
+
+#btn-refresh {
+    padding: 6px 16px;
+    background: #1a1a2e;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    margin-left: auto;
+}
+
+#btn-refresh:hover {
+    background: #2a2a4e;
+}
+
+/* Charts grid */
+.charts-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px;
+    padding: 20px 24px;
+}
+
+@media (max-width: 1200px) {
+    .charts-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+.chart-container {
+    background: #fff;
+    border-radius: 8px;
+    padding: 16px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+.chart-container h3 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: #333;
+}
+
+.chart-container canvas {
+    height: 280px !important;
+}
+
+/* Tables */
+.tables-section {
+    padding: 0 24px 40px;
+}
+
+.tables-section h2 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin: 24px 0 12px;
+    color: #333;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #fff;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    font-size: 0.85rem;
+}
+
+th {
+    background: #f0f0f0;
+    padding: 10px 12px;
+    text-align: left;
+    font-weight: 600;
+    color: #555;
+    border-bottom: 2px solid #ddd;
+}
+
+td {
+    padding: 8px 12px;
+    border-bottom: 1px solid #eee;
+}
+
+tr:hover {
+    background: #fafafa;
+}
+
+.tag-cell {
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: monospace;
+    font-size: 0.8rem;
+}
+
+.empty {
+    text-align: center;
+    color: #999;
+    padding: 20px;
+}
+
+.alert-row {
+    background: #fff5f5;
+}
+
+.regression-val {
+    color: #c62828;
+    font-weight: 600;
+}
+
+.status-ok {
+    color: #2e7d32;
+    font-weight: 600;
+}
+
+.status-fail {
+    color: #c62828;
+    font-weight: 600;
+}
+
+.status-pending {
+    color: #f57c00;
+    font-weight: 600;
+}
+
+.btn-expand {
+    padding: 3px 10px;
+    background: #e0e0e0;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 0.8rem;
+}
+
+.btn-expand:hover {
+    background: #ccc;
+}
+
+.metrics-detail td {
+    padding: 0;
+    background: #f9f9f9;
+}
+
+.inner-table {
+    margin: 8px 16px;
+    width: calc(100% - 32px);
+    box-shadow: none;
+    font-size: 0.8rem;
+}
+
+.inner-table th {
+    background: #e8e8e8;
+    padding: 6px 10px;
+    font-size: 0.78rem;
+}
+
+.inner-table td {
+    padding: 6px 10px;
+    font-family: monospace;
+}

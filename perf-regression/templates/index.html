@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SGLang ROCm Perf Regression Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <h1>SGLang ROCm Performance Regression Dashboard</h1>
+        <div class="health-badge" id="health-badge">Loading...</div>
+    </header>
+
+    <div class="filter-bar">
+        <div class="filter-group">
+            <label>Date Range:</label>
+            <select id="filter-days">
+                <option value="3">3 days</option>
+                <option value="14">14 days</option>
+                <option value="30" selected>30 days</option>
+                <option value="60">60 days</option>
+            </select>
+        </div>
+        <div class="filter-group">
+            <label>ROCm Version:</label>
+            <select id="filter-rocm">
+                <option value="all">All</option>
+                <option value="700">ROCm 700</option>
+                <option value="720">ROCm 720</option>
+            </select>
+        </div>
+        <div class="filter-group">
+            <label>Concurrency:</label>
+            <select id="filter-concurrency">
+                <option value="all">All</option>
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="4">4</option>
+                <option value="8">8</option>
+                <option value="16">16</option>
+            </select>
+        </div>
+        <button id="btn-refresh" onclick="refreshAll()">Refresh</button>
+    </div>
+
+    <div class="charts-grid">
+        <div class="chart-container">
+            <h3>Output Throughput (tok/s)</h3>
+            <canvas id="chart-output_throughput"></canvas>
+        </div>
+        <div class="chart-container">
+            <h3>Total Throughput (tok/s)</h3>
+            <canvas id="chart-total_throughput"></canvas>
+        </div>
+        <div class="chart-container">
+            <h3>Median TTFT (ms)</h3>
+            <canvas id="chart-median_ttft_ms"></canvas>
+        </div>
+        <div class="chart-container">
+            <h3>Median ITL (ms)</h3>
+            <canvas id="chart-median_itl_ms"></canvas>
+        </div>
+        <div class="chart-container">
+            <h3>Median E2E Latency (ms)</h3>
+            <canvas id="chart-median_e2e_latency_ms"></canvas>
+        </div>
+        <div class="chart-container">
+            <h3>GSM8K Accuracy (%)</h3>
+            <canvas id="chart-accuracy_pct"></canvas>
+        </div>
+    </div>
+
+    <div class="tables-section">
+        <h2>Regression Alerts</h2>
+        <table id="alerts-table">
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Image Tag</th>
+                    <th>ROCm</th>
+                    <th>Metric</th>
+                    <th>Concurrency</th>
+                    <th>Current</th>
+                    <th>Baseline</th>
+                    <th>Degradation</th>
+                </tr>
+            </thead>
+            <tbody id="alerts-body">
+                <tr><td colspan="8" class="empty">Loading...</td></tr>
+            </tbody>
+        </table>
+
+        <h2>Run History</h2>
+        <table id="runs-table">
+            <thead>
+                <tr>
+                    <th>Build Date</th>
+                    <th>Image Tag</th>
+                    <th>SGLang</th>
+                    <th>ROCm</th>
+                    <th>Status</th>
+                    <th>Duration</th>
+                    <th>Accuracy</th>
+                    <th>Details</th>
+                </tr>
+            </thead>
+            <tbody id="runs-body">
+                <tr><td colspan="8" class="empty">Loading...</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        const chartInstances = {};
+        const metricKeys = [
+            'output_throughput', 'total_throughput',
+            'median_ttft_ms', 'median_itl_ms',
+            'median_e2e_latency_ms', 'accuracy_pct'
+        ];
+
+        function getFilters() {
+            return {
+                days: document.getElementById('filter-days').value,
+                rocm_version: document.getElementById('filter-rocm').value,
+                concurrency: document.getElementById('filter-concurrency').value,
+            };
+        }
+
+        async function fetchChartData() {
+            const f = getFilters();
+            const params = new URLSearchParams({
+                days: f.days,
+                rocm_version: f.rocm_version,
+                concurrency: f.concurrency,
+            });
+            const resp = await fetch(`/api/chart-data?${params}`);
+            return await resp.json();
+        }
+
+        async function fetchAlerts() {
+            const f = getFilters();
+            const params = new URLSearchParams({
+                days: f.days,
+                rocm_version: f.rocm_version,
+            });
+            const resp = await fetch(`/api/alerts?${params}`);
+            return await resp.json();
+        }
+
+        async function fetchRuns() {
+            const f = getFilters();
+            const params = new URLSearchParams({
+                days: f.days,
+                rocm_version: f.rocm_version,
+            });
+            const resp = await fetch(`/api/runs?${params}`);
+            return await resp.json();
+        }
+
+        async function fetchHealth() {
+            const resp = await fetch('/api/health');
+            return await resp.json();
+        }
+
+        function createChart(canvasId, chartData) {
+            const ctx = document.getElementById(canvasId).getContext('2d');
+
+            if (chartInstances[canvasId]) {
+                chartInstances[canvasId].destroy();
+            }
+
+            const datasets = (chartData.datasets || []).map(ds => ({
+                ...ds,
+                pointRadius: ds.data.map((_, i) =>
+                    ds.pointBackgroundColor && ds.pointBackgroundColor[i] === '#FF0000' ? 8 : 4
+                ),
+                pointStyle: ds.data.map((_, i) =>
+                    ds.pointBackgroundColor && ds.pointBackgroundColor[i] === '#FF0000' ? 'triangle' : 'circle'
+                ),
+            }));
+
+            chartInstances[canvasId] = new Chart(ctx, {
+                type: 'line',
+                data: { datasets },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'nearest',
+                        intersect: false,
+                    },
+                    scales: {
+                        x: {
+                            type: 'category',
+                            title: { display: true, text: 'Build Date' },
+                        },
+                        y: {
+                            title: { display: true, text: chartData.label },
+                            beginAtZero: false,
+                        },
+                    },
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                title: function(items) {
+                                    const d = items[0].raw;
+                                    return d.tag || d.x;
+                                },
+                                label: function(ctx) {
+                                    const d = ctx.raw;
+                                    let label = `${ctx.dataset.label}: ${d.y}`;
+                                    if (d.sglang) label += ` (${d.sglang})`;
+                                    return label;
+                                },
+                            },
+                        },
+                        legend: {
+                            position: 'bottom',
+                            labels: { usePointStyle: true },
+                        },
+                    },
+                },
+            });
+        }
+
+        function renderAlerts(alerts) {
+            const tbody = document.getElementById('alerts-body');
+            if (!alerts || alerts.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" class="empty">No regression alerts</td></tr>';
+                return;
+            }
+            tbody.innerHTML = alerts.map(a => {
+                const date = `${a.build_date.slice(0,4)}-${a.build_date.slice(4,6)}-${a.build_date.slice(6)}`;
+                const degradation = a.regression_pct > 0 ? `+${a.regression_pct.toFixed(1)}%` : `${a.regression_pct.toFixed(1)}%`;
+                return `<tr class="alert-row">
+                    <td>${date}</td>
+                    <td class="tag-cell" title="${a.image_tag}">${a.image_tag}</td>
+                    <td>${a.rocm_version}</td>
+                    <td>${a.metric_name}</td>
+                    <td>${a.concurrency !== null ? a.concurrency : 'N/A'}</td>
+                    <td>${a.current_value !== null ? a.current_value.toFixed(2) : 'N/A'}</td>
+                    <td>${a.baseline_value !== null ? a.baseline_value.toFixed(2) : 'N/A'}</td>
+                    <td class="regression-val">${degradation}</td>
+                </tr>`;
+            }).join('');
+        }
+
+        function renderRuns(runs) {
+            const tbody = document.getElementById('runs-body');
+            if (!runs || runs.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" class="empty">No benchmark runs</td></tr>';
+                return;
+            }
+            tbody.innerHTML = runs.map(r => {
+                const date = `${r.build_date.slice(0,4)}-${r.build_date.slice(4,6)}-${r.build_date.slice(6)}`;
+                const statusClass = r.status === 'completed' ? 'status-ok' :
+                                    r.status === 'failed' ? 'status-fail' : 'status-pending';
+                const duration = r.duration_total_sec ? `${(r.duration_total_sec / 60).toFixed(1)} min` : '-';
+                const accuracy = r.accuracy ? `${r.accuracy.accuracy_pct.toFixed(1)}%` : '-';
+                const metricsId = `metrics-${r.id}`;
+
+                let metricsHtml = '';
+                if (r.metrics && r.metrics.length > 0) {
+                    metricsHtml = `<tr id="${metricsId}" class="metrics-detail" style="display:none">
+                        <td colspan="8">
+                            <table class="inner-table">
+                                <thead>
+                                    <tr>
+                                        <th>Conc.</th>
+                                        <th>Out Tput</th>
+                                        <th>Total Tput</th>
+                                        <th>Med E2E</th>
+                                        <th>Med TTFT</th>
+                                        <th>Med ITL</th>
+                                        <th>P99 E2E</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${r.metrics.map(m => `<tr>
+                                        <td>${m.concurrency}</td>
+                                        <td>${m.output_throughput ? m.output_throughput.toFixed(1) : '-'}</td>
+                                        <td>${m.total_throughput ? m.total_throughput.toFixed(1) : '-'}</td>
+                                        <td>${m.median_e2e_latency_ms ? m.median_e2e_latency_ms.toFixed(1) : '-'}</td>
+                                        <td>${m.median_ttft_ms ? m.median_ttft_ms.toFixed(1) : '-'}</td>
+                                        <td>${m.median_itl_ms ? m.median_itl_ms.toFixed(1) : '-'}</td>
+                                        <td>${m.p99_e2e_latency_ms ? m.p99_e2e_latency_ms.toFixed(1) : '-'}</td>
+                                    </tr>`).join('')}
+                                </tbody>
+                            </table>
+                        </td>
+                    </tr>`;
+                }
+
+                return `<tr>
+                    <td>${date}</td>
+                    <td class="tag-cell" title="${r.image_tag}">${r.image_tag}</td>
+                    <td>${r.sglang_version || '-'}</td>
+                    <td>${r.rocm_version || '-'}</td>
+                    <td><span class="${statusClass}">${r.status}</span></td>
+                    <td>${duration}</td>
+                    <td>${accuracy}</td>
+                    <td>${r.metrics && r.metrics.length > 0 ?
+                        `<button class="btn-expand" onclick="toggleMetrics('${metricsId}', this)">Show</button>` : '-'}</td>
+                </tr>${metricsHtml}`;
+            }).join('');
+        }
+
+        function toggleMetrics(id, btn) {
+            const row = document.getElementById(id);
+            if (row) {
+                const isHidden = row.style.display === 'none';
+                row.style.display = isHidden ? 'table-row' : 'none';
+                btn.textContent = isHidden ? 'Hide' : 'Show';
+            }
+        }
+
+        async function refreshAll() {
+            document.getElementById('btn-refresh').textContent = 'Loading...';
+            try {
+                const [chartData, alerts, runs, health] = await Promise.all([
+                    fetchChartData(), fetchAlerts(), fetchRuns(), fetchHealth(),
+                ]);
+
+                // Render charts
+                for (const key of metricKeys) {
+                    if (chartData[key]) {
+                        createChart(`chart-${key}`, chartData[key]);
+                    }
+                }
+
+                // Render tables
+                renderAlerts(alerts);
+                renderRuns(runs);
+
+                // Health badge
+                const badge = document.getElementById('health-badge');
+                badge.textContent = `${health.completed_runs} runs | ${health.unacknowledged_alerts} alerts | ${health.disk_free_gb} GB free`;
+                badge.className = health.unacknowledged_alerts > 0 ? 'health-badge warn' : 'health-badge ok';
+
+            } catch (err) {
+                console.error('Refresh failed:', err);
+                document.getElementById('health-badge').textContent = 'Error loading data';
+                document.getElementById('health-badge').className = 'health-badge error';
+            }
+            document.getElementById('btn-refresh').textContent = 'Refresh';
+        }
+
+        // Auto-refresh on filter change
+        document.getElementById('filter-days').addEventListener('change', refreshAll);
+        document.getElementById('filter-rocm').addEventListener('change', refreshAll);
+        document.getElementById('filter-concurrency').addEventListener('change', refreshAll);
+
+        // Initial load
+        refreshAll();
+        // Auto-refresh every 5 minutes
+        setInterval(refreshAll, 300000);
+    </script>
+</body>
+</html>
