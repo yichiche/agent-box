@@ -10,6 +10,9 @@ Examples:
     python model_inspector.py /path/to/deepseek_v2.py --list-classes
     python model_inspector.py /path/to/deepseek_v2.py --root DeepseekV2ForCausalLM
     python model_inspector.py /path/to/deepseek_v2.py --config /path/to/config.json -o out.txt
+
+    python3 /home/yichiche/agent-box/model_inspector.py /sgl-workspace/sglang/python/sglang/srt/models/deepseek_v2.py --config /data/deepseek-ai/DeepSeek-R1-0528/config.json
+    python3 /home/yichiche/agent-box/model_inspector.py /sgl-workspace/sglang/python/sglang/srt/models/grok.py --config /data/huggingface/hub/xai-org/grok-2/config.json
 """
 
 import argparse
@@ -455,6 +458,36 @@ class ModelFileParser:
                 ))
             return results
 
+        # Handle nn.ModuleList([ClassName(...) for ... in range(...)]) pattern
+        if isinstance(stmt.value, ast.Call):
+            call_name = _get_call_class_name(stmt.value)
+            if call_name == "nn.ModuleList" and stmt.value.args:
+                first_arg = stmt.value.args[0]
+                if isinstance(first_arg, ast.ListComp) and isinstance(first_arg.elt, ast.Call):
+                    inner_class = _get_call_class_name(first_arg.elt)
+                    if inner_class and _looks_like_module(inner_class, known_classes):
+                        for target in stmt.targets:
+                            if (
+                                isinstance(target, ast.Attribute)
+                                and isinstance(target.value, ast.Name)
+                                and target.value.id == "self"
+                            ):
+                                range_arg = ""
+                                if first_arg.generators:
+                                    gen = first_arg.generators[0]
+                                    if isinstance(gen.iter, ast.Call):
+                                        range_arg = ast.unparse(gen.iter)
+                                raw_args = f"nn.ModuleList([{inner_class}(...) for ... in {range_arg}])"
+                                results.append(ModuleAssignment(
+                                    attr_name=target.attr,
+                                    class_name=inner_class,
+                                    raw_args=raw_args,
+                                    line_no=stmt.lineno,
+                                    is_conditional=is_conditional,
+                                    condition_text=condition_text,
+                                ))
+                                return results
+
         # Standard: self.xxx = ClassName(...)
         for target in stmt.targets:
             if not (
@@ -569,6 +602,11 @@ class HierarchyBuilder:
                 count_arg = inner.split(",", 1)[0].strip()
                 return f"x N ({count_arg})"
         if "ModuleList" in assignment.raw_args:
+            import re
+            m = re.search(r'range\(([^)]+)\)', assignment.raw_args)
+            if m:
+                count_arg = m.group(1).rsplit(",", 1)[-1].strip()
+                return f"x N ({count_arg})"
             return "x N"
         return ""
 
