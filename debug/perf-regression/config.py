@@ -6,8 +6,9 @@ from pathlib import Path
 
 # ── Paths ──────────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent
-HOST_HOME_DIR = "/home/yichiche"
-BENCH_SCRIPT = "/home/yichiche/agent-box/run-local-benchmark-e2e.sh"
+AGENT_BOX_DIR = BASE_DIR.parent.parent
+HOST_HOME_DIR = str(AGENT_BOX_DIR.parent)
+BENCH_SCRIPT = str(AGENT_BOX_DIR / "benchmark" / "run-local-benchmark-e2e.sh")
 MODEL_PATH = "/raid/models/DeepSeek-R1-MXFP4-Preview/"
 MODEL_NAME = "DeepSeek-R1-MXFP4"
 

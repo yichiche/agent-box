@@ -2,8 +2,8 @@
 # Daily performance regression benchmark runner.
 #
 # Usage:
-#   crontab: 0 2 * * * /home/yichiche/agent-box/perf-regression/run_daily.sh
-#   Manual:  nohup bash /home/yichiche/agent-box/perf-regression/run_daily.sh &
+#   crontab: 0 2 * * * /home/yichiche/agent-box/debug/perf-regression/run_daily.sh
+#   Manual:  nohup bash /home/yichiche/agent-box/debug/perf-regression/run_daily.sh &
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
