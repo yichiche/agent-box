@@ -76,7 +76,8 @@ quote_one() {
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/.bench_config"
+source "${SCRIPT_DIR}/../env.sh"
+CONFIG_FILE="${AGENT_BOX_DIR}/.bench_config"
 
 # Load saved values from config file (if exists)
 SAVED_MODEL_PATH=""
@@ -573,7 +574,7 @@ if (( PROFILE_MODE == 1 )); then
     log "Running trace analyzer in container"
     docker_cmd exec "$CONTAINER_NAME" mkdir -p "$CONTAINER_TRACE_ANALYSIS_DIR"
     docker_cmd exec "$CONTAINER_NAME" pip install openpyxl -q
-    docker_cmd cp "${HOST_HOME_DIR}/agent-box/trace_analyzer.py" \
+    docker_cmd cp "${AGENT_BOX_DIR}/profile/trace_analyzer.py" \
       "${CONTAINER_NAME}:/tmp/trace_analyzer.py"
     docker_cmd exec "$CONTAINER_NAME" bash -lc \
       "python3 /tmp/trace_analyzer.py $(quote_one "$TRACE_PATH_IN_CONTAINER") \

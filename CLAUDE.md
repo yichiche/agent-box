@@ -81,6 +81,16 @@ CMake-based C++/CUDA project with Python bindings. Contains optimized kernels fo
 
 Versions are managed via `setuptools-scm` from git tags. Generated gRPC files (`*_pb2.py`, `*_pb2_grpc.py`) are excluded from linting.
 
+## agent-box Layout
+
+```
+benchmark/   — Performance benchmarking (run, compare, analyze CSVs)
+profile/     — Profiler trace analysis & model structure inspection
+debug/       — Regression detection (perf-regression subsystem)
+configs/     — Shared model configuration files
+env.sh       — Central environment config (HOST_HOME, AGENT_BOX_DIR)
+```
+
 ## Trace Analyzer
 
-When debugging or adding features to `trace_analyzer.py`, use the `/trace-analyzer` skill command for detailed guidance on pattern tables, half-layer handling, and diagnostic steps. See `trace-analyzer.md`.
+When debugging or adding features to `trace_analyzer.py`, use the `/trace-analyzer` skill command for detailed guidance on pattern tables, half-layer handling, and diagnostic steps. See `profile/trace-analyzer.md`.

@@ -28,7 +28,7 @@ Example:
     --image-b rocm/sgl-dev:v0.5.8-new \
     --model-path /data/Qwen/Qwen3-Coder-Next/ \
     --concurrencies 1,2,4,8 \
-    --home-dir /home/yichiche \
+    --home-dir "$HOME" \
     --no-profile \
     --mtp \
     --no-accuracy

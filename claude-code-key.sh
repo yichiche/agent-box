@@ -1,5 +1,6 @@
  #!/usr/bin/env bash
-HOST_HOME="/home/yichiche"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/env.sh"
 
 mkdir -p /sgl-workspace/.claude
 cp ${HOST_HOME}/agent-box/CLAUDE.md /sgl-workspace/

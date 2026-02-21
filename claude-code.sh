@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
-HOST_HOME="/home/yichiche"   # host-mounted home directory inside container
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/env.sh"
+# HOST_HOME is set by env.sh (auto-detected from agent-box parent directory)
 
 echo "[claude] start"
 

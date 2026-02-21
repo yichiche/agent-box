@@ -11,8 +11,8 @@ Examples:
     python model_inspector.py /path/to/deepseek_v2.py --root DeepseekV2ForCausalLM
     python model_inspector.py /path/to/deepseek_v2.py --config /path/to/config.json -o out.txt
 
-    python3 /home/yichiche/agent-box/model_inspector.py /sgl-workspace/sglang/python/sglang/srt/models/deepseek_v2.py --config /data/deepseek-ai/DeepSeek-R1-0528/config.json
-    python3 /home/yichiche/agent-box/model_inspector.py /sgl-workspace/sglang/python/sglang/srt/models/grok.py --config /data/huggingface/hub/xai-org/grok-2/config.json
+    python3 /home/yichiche/agent-box/profile/model_inspector.py /sgl-workspace/sglang/python/sglang/srt/models/deepseek_v2.py --config /data/deepseek-ai/DeepSeek-R1-0528/config.json
+    python3 /home/yichiche/agent-box/profile/model_inspector.py /sgl-workspace/sglang/python/sglang/srt/models/grok.py --config /data/huggingface/hub/xai-org/grok-2/config.json
 """
 
 import argparse
