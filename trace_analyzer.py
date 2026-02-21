@@ -1001,6 +1001,50 @@ class ReportFormatter:
             )
         print()
 
+    def print_auto_layer_details(self, num_layers: int = 2) -> None:
+        """Auto-detect and print details for first N prefill and decode layers."""
+        if not self.result.layers:
+            print("No layer analysis available.")
+            return
+
+        prefill_layers = [l for l in self.result.layers if l.stage == Stage.PREFILL]
+        decode_layers = [l for l in self.result.layers if l.stage == Stage.DECODE]
+
+        # Sort by layer_idx to get the first ones
+        prefill_layers.sort(key=lambda l: l.layer_idx)
+        decode_layers.sort(key=lambda l: l.layer_idx)
+
+        selected_prefill = prefill_layers[:num_layers]
+        selected_decode = decode_layers[:num_layers]
+
+        print("=" * 80)
+        print("AUTO-DETECTED LAYER DETAILS")
+        print("=" * 80)
+        print()
+        print(
+            f"Total layers detected: {len(self.result.layers)} "
+            f"(prefill: {len(prefill_layers)}, decode: {len(decode_layers)})"
+        )
+        print()
+
+        if selected_prefill:
+            print(f"First prefill layer: layer {selected_prefill[0].layer_idx}")
+        else:
+            print("No prefill layers detected.")
+
+        if selected_decode:
+            print(f"First decode layer: layer {selected_decode[0].layer_idx}")
+        else:
+            print("No decode layers detected.")
+
+        print()
+
+        for layer in selected_prefill:
+            self.print_layer_detail(layer.layer_idx)
+
+        for layer in selected_decode:
+            self.print_layer_detail(layer.layer_idx)
+
 
 class CSVExporter:
     """Exports analysis results to CSV files."""
@@ -1636,6 +1680,10 @@ Examples:
     # Print report
     formatter = ReportFormatter(result)
     formatter.print_full_report(top_n=args.top_n, stage_filter=args.stage)
+
+    # Auto-show first 2 prefill + first 2 decode layer details
+    if detect_layers:
+        formatter.print_auto_layer_details(num_layers=5)
 
     # Print layer analysis on terminal only if --show-layer-terminal is set
     if detect_layers and args.show_layer_terminal:
