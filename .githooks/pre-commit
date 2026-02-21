@@ -41,4 +41,40 @@ echo "  If you already committed with the wrong identity, fix it with:"
 echo "    git commit --amend --author=\"Your Name <your@email.com>\" --no-edit"
 echo ""
 
+# --- trace_analyzer regression tests ---
+PROFILE_DIR="$(git rev-parse --show-toplevel)/profile"
+
+if git diff --cached --name-only | grep -q "profile/trace_analyzer.py"; then
+    echo "==> trace_analyzer.py modified — running regression tests (no cache)..."
+    echo ""
+
+    # Run unit tests first (fast, no trace files needed)
+    python -m pytest "$PROFILE_DIR/tests/test_classifier_unit.py" \
+                     "$PROFILE_DIR/tests/test_layer_detector_unit.py" \
+                     -v --tb=short
+    UNIT_EXIT=$?
+
+    if [ $UNIT_EXIT -ne 0 ]; then
+        echo ""
+        echo "==> UNIT TESTS FAILED. Commit aborted."
+        exit 1
+    fi
+
+    # Run regression tests with --regen-snapshots (re-parses traces, skips pickle cache)
+    python -m pytest "$PROFILE_DIR/tests/test_regression.py" \
+                     -v --tb=short --regen-snapshots
+    REGR_EXIT=$?
+
+    if [ $REGR_EXIT -ne 0 ]; then
+        echo ""
+        echo "==> REGRESSION TESTS FAILED. Commit aborted."
+        echo "    If failures are expected (new model support), update baselines:"
+        echo "    python tests/generate_baselines.py --all"
+        exit 1
+    fi
+
+    echo ""
+    echo "==> All tests passed."
+fi
+
 exit 0
