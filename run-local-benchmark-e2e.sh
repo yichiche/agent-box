@@ -16,6 +16,7 @@ Common options:
   --concurrencies <csv>              Concurrency list, comma separated.
                                      Default: 1,2,4,8,16
   --profile                          Enable --profile in bench_serving.
+  --no-profile                       Disable profile mode (skip interactive prompt).
   --prompts-multiplier <int>         num_prompts = concurrency * multiplier.
                                      Default: 8 (or 2 when --profile is set)
   --random-input-len <int>           Random input token length. Default: 70000
@@ -28,6 +29,7 @@ Common options:
   --keep-container                   Do not stop/remove container on exit.
   --no-sudo-docker                   Use docker directly instead of sudo docker.
   --accuracy                         Run GSM8K accuracy benchmark after perf bench.
+  --no-accuracy                      Skip accuracy benchmark (skip interactive prompt).
   --accuracy-num-questions <int>     Number of GSM8K questions. Default: 2000
   --accuracy-parallel <int>          GSM8K parallel requests. Default: 1000
   --accuracy-num-shots <int>         GSM8K few-shot count. Default: 5
@@ -90,6 +92,7 @@ CONTAINER_NAME=""
 CONCURRENCIES="1,2,4,8,16"
 CONCURRENCIES_SET=0
 PROFILE_MODE=0
+PROFILE_SET=0
 PROMPTS_MULTIPLIER=""
 RANDOM_INPUT_LEN=70000
 RANDOM_OUTPUT_LEN=200
@@ -137,6 +140,12 @@ while [[ $# -gt 0 ]]; do
       ;;
     --profile)
       PROFILE_MODE=1
+      PROFILE_SET=1
+      shift
+      ;;
+    --no-profile)
+      PROFILE_MODE=0
+      PROFILE_SET=1
       shift
       ;;
     --prompts-multiplier)
@@ -177,6 +186,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --accuracy)
       ACCURACY_MODE=1
+      shift
+      ;;
+    --no-accuracy)
+      ACCURACY_MODE=0
       shift
       ;;
     --accuracy-num-questions)
@@ -261,7 +274,7 @@ if [[ -z "$MODEL_PATH" ]]; then
   fi
 fi
 # Save will happen after all interactive prompts are done
-if (( PROFILE_MODE == 0 )); then
+if (( PROFILE_SET == 0 )); then
   read -r -p "Enable profile mode? [y/N]: " PROFILE_INPUT
   case "${PROFILE_INPUT,,}" in
     y|yes) PROFILE_MODE=1 ;;
