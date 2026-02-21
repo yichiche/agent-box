@@ -80,3 +80,7 @@ CMake-based C++/CUDA project with Python bindings. Contains optimized kernels fo
 ## Version Management
 
 Versions are managed via `setuptools-scm` from git tags. Generated gRPC files (`*_pb2.py`, `*_pb2_grpc.py`) are excluded from linting.
+
+## Trace Analyzer
+
+When debugging or adding features to `trace_analyzer.py`, use the `/trace-analyzer` skill command for detailed guidance on pattern tables, half-layer handling, and diagnostic steps. See `trace-analyzer.md`.

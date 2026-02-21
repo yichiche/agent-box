@@ -46,6 +46,11 @@ class LayerType(Enum):
 
     MLA_FC = "MLA+FC"  # MLA attention + fully connected
     MLA_MOE = "MLA+MoE"  # MLA attention + MoE
+    MHA_FC = "MHA+FC"  # MHA attention + fully connected
+    MHA_MOE = "MHA+MoE"  # MHA attention + MoE
+    ATTN = "Attn"  # Attention-only half-layer (no MoE/FC)
+    MOE = "MoE"  # MoE-only half-layer (no attention)
+    FC = "FC"  # FC-only half-layer (no attention)
     UNKNOWN = "unknown"
 
 
@@ -225,8 +230,8 @@ class KernelClassifier:
             (re.compile(r"set_mla_kv_buffer_kernel|concat_and_cast_mha_k_kernel", re.IGNORECASE), Stage.PREFILL),
             (re.compile(r"qseqlen[1-4][^0-9]|qseqlen[1-4]$", re.IGNORECASE), Stage.DECODE),
             (re.compile(r"qseqlen[5-9]|qseqlen\d{2,}", re.IGNORECASE), Stage.PREFILL),
-            (re.compile(r"_decode_|decode_attention", re.IGNORECASE), Stage.DECODE),
-            (re.compile(r"_prefill_|flash_attn|fmha_fwd", re.IGNORECASE), Stage.PREFILL),
+            (re.compile(r"_decode_|decode_attention|paged_attention_ll4mi", re.IGNORECASE), Stage.DECODE),
+            (re.compile(r"_prefill_|flash_attn|fmha_fwd|FmhaBatchPrefill", re.IGNORECASE), Stage.PREFILL),
             (re.compile(r"generate_draft_decode|create_extend_after_decode"), Stage.DECODE),
         ]
 
@@ -236,9 +241,9 @@ class KernelClassifier:
             (
                 re.compile(
                     r"aiter::mla_|mla_a8w8|decode_attention|flash_attn|attention|softmax|"
-                    r"fmha_|mla_reduce|kv_cache|flashinfer|set_mla_kv|"
+                    r"fmha_|FmhaBatchPrefill|mla_reduce|kv_cache|flashinfer|set_mla_kv|"
                     r"kn_entry_2c_sbhd|kn_get_mla_metadata|qk_rope|"
-                    r"concat_and_cast_mha|kn_mla_reduce",
+                    r"concat_and_cast_mha|kn_mla_reduce|paged_attention",
                     re.IGNORECASE,
                 ),
                 KernelType.ATTENTION,
@@ -308,7 +313,7 @@ class KernelClassifier:
             (re.compile(r"_gemm_afp4wfp4"), "GEMM_FP4"),
             (re.compile(r"_gemm_a8w8_blockscale.*reduce"), "GEMM_FP8_RED"),
             (re.compile(r"_gemm_a8w8_blockscale"), "GEMM_FP8"),
-            (re.compile(r"Rmsnorm2dFwd"), "RMSNORM"),
+            (re.compile(r"Rmsnorm2dFwd|fused_dual_residual_rmsnorm_kernel|fused_rmsnorm_kernel"), "RMSNORM"),
             (re.compile(r"kn_entry_2c_sbhd"), "KV_CACHE"),
             (re.compile(r"set_mla_kv_buffer"), "MLA_KV_SET"),
             (re.compile(r"_dynamic_mxfp4_quant"), "DYN_MXFP4"),
@@ -319,6 +324,13 @@ class KernelClassifier:
             (re.compile(r"fused_append_shared_experts"), "SHARED_EXP"),
             (re.compile(r"act_and_mul_kernel"), "ACT_MUL"),
             (re.compile(r"Cijk_Alik|Custom_Cijk"), "HIPBLAS_GEMM"),
+            (re.compile(r"paged_attention_ll4mi_QKV"), "PA_DECODE"),
+            (re.compile(r"paged_attention_ll4mi_reduce"), "PA_REDUCE"),
+            (re.compile(r"FmhaBatchPrefill"), "FMHA_PREFILL"),
+            (re.compile(r"fused_dual_residual_rmsnorm"), "DUAL_RMSNORM"),
+            (re.compile(r"gelu_and_mul_kernel"), "GELU_MUL"),
+            (re.compile(r"rotary_embedding_kernel"), "ROPE"),
+            (re.compile(r"fused_softcap_kernel"), "SOFTCAP"),
             (re.compile(r"grouped_topk"), "TOPK"),
             (re.compile(r"bfloat16_copy"), "BF16_COPY"),
             (re.compile(r"float8_copy"), "FP8_COPY"),
@@ -375,8 +387,8 @@ class LayerDetector:
         # Layer start markers (after ALLREDUCE)
         self._layer_start_patterns = [
             re.compile(
-                r"_fused_rms_mxfp4_quant|_fused_rms_fp8"
-            ),  # Prefill/decode layernorm
+                r"_fused_rms_mxfp4_quant|_fused_rms_fp8|fused_dual_residual_rmsnorm_kernel|fused_rmsnorm_kernel"
+            ),  # Prefill/decode layernorm (quantized fused or standard)
         ]
 
         # MoE block markers
@@ -388,12 +400,20 @@ class LayerDetector:
 
         # FC block markers (activation function after linear)
         self._fc_markers = [
-            re.compile(r"act_and_mul_kernel|silu_kernel"),
+            re.compile(r"act_and_mul_kernel|silu_kernel|gelu_and_mul_kernel"),
+        ]
+
+        # MLA-specific attention markers (vs generic MHA/FMHA)
+        self._mla_markers = [
+            re.compile(
+                r"aiter::mla_|mla_a8w8|set_mla_kv_buffer|kn_mla_reduce|"
+                r"mla_reduce|concat_and_cast_mha_k"
+            ),
         ]
 
         # Attention stage hints for layer stage inference
         self._attention_decode_patterns = [
-            re.compile(r"qseqlen1[^0-9]|qseqlen1$|decode_attention", re.IGNORECASE),
+            re.compile(r"qseqlen1[^0-9]|qseqlen1$|decode_attention|paged_attention_ll4mi", re.IGNORECASE),
             re.compile(r"mla_a8w8.*qseqlen(1|4)", re.IGNORECASE),
         ]
         if self._mtp_qseqlen_decode:
@@ -401,7 +421,7 @@ class LayerDetector:
                 re.compile(r"qseqlen[2-9]|qseqlen\d{2,}", re.IGNORECASE)
             )
         self._attention_prefill_patterns = [
-            re.compile(r"fmha_fwd|flash_attn", re.IGNORECASE),
+            re.compile(r"fmha_fwd|flash_attn|FmhaBatchPrefill", re.IGNORECASE),
         ]
         if not self._mtp_qseqlen_decode:
             self._attention_prefill_patterns.append(
@@ -421,6 +441,7 @@ class LayerDetector:
         layer_idx = 0
         in_layer = False
         saw_attention = False
+        saw_mla = False
         saw_moe = False
         saw_fc = False
 
@@ -436,10 +457,11 @@ class LayerDetector:
             )
             is_layer_start = any(p.search(name) for p in self._layer_start_patterns)
 
-            # Check if this is a MoE or FC marker
+            # Check if this is a MoE, FC, or MLA marker
             is_moe = any(p.search(name) for p in self._moe_markers)
             is_fc = any(p.search(name) for p in self._fc_markers)
             is_attention = event.kernel_type == KernelType.ATTENTION
+            is_mla = any(p.search(name) for p in self._mla_markers)
 
             # Start a new layer on layer_start after allreduce or at very beginning
             if is_layer_start and (
@@ -450,11 +472,9 @@ class LayerDetector:
                 )
             ):
                 # Save previous layer if exists
-                if current_layer_kernels and saw_attention:
-                    layer_type = (
-                        LayerType.MLA_MOE
-                        if saw_moe
-                        else (LayerType.MLA_FC if saw_fc else LayerType.UNKNOWN)
+                if current_layer_kernels:
+                    layer_type = self._classify_layer_type(
+                        saw_attention, saw_mla, saw_moe, saw_fc
                     )
                     # Determine stage from kernels
                     stage = self._determine_layer_stage(current_layer_kernels)
@@ -478,6 +498,7 @@ class LayerDetector:
                     current_layer_kernels = [event]
                 in_layer = True
                 saw_attention = False
+                saw_mla = False
                 saw_moe = False
                 saw_fc = False
             else:
@@ -486,17 +507,17 @@ class LayerDetector:
             # Track what we've seen in this layer
             if is_attention:
                 saw_attention = True
+            if is_mla:
+                saw_mla = True
             if is_moe:
                 saw_moe = True
             if is_fc:
                 saw_fc = True
 
         # Save last layer
-        if current_layer_kernels and saw_attention:
-            layer_type = (
-                LayerType.MLA_MOE
-                if saw_moe
-                else (LayerType.MLA_FC if saw_fc else LayerType.UNKNOWN)
+        if current_layer_kernels:
+            layer_type = self._classify_layer_type(
+                saw_attention, saw_mla, saw_moe, saw_fc
             )
             stage = self._determine_layer_stage(current_layer_kernels)
             layers.append(
@@ -510,6 +531,34 @@ class LayerDetector:
 
         return layers
 
+    @staticmethod
+    def _classify_layer_type(
+        saw_attention: bool, saw_mla: bool, saw_moe: bool, saw_fc: bool
+    ) -> LayerType:
+        """Classify layer type from what markers were observed.
+
+        MLA (multi-latent attention) vs MHA (multi-head attention) is
+        determined by whether MLA-specific kernels were seen.
+        """
+        if saw_attention:
+            if saw_mla:
+                if saw_moe:
+                    return LayerType.MLA_MOE
+                if saw_fc:
+                    return LayerType.MLA_FC
+            else:
+                if saw_moe:
+                    return LayerType.MHA_MOE
+                if saw_fc:
+                    return LayerType.MHA_FC
+            return LayerType.ATTN
+        # No attention — half-layer
+        if saw_moe:
+            return LayerType.MOE
+        if saw_fc:
+            return LayerType.FC
+        return LayerType.UNKNOWN
+
     def _determine_layer_stage(self, kernels: List[KernelEvent]) -> Stage:
         """Determine layer stage based on dominant stage of its kernels."""
         prefill_count = sum(1 for k in kernels if k.stage == Stage.PREFILL)
@@ -521,6 +570,60 @@ class LayerDetector:
             return Stage.DECODE
 
         return Stage.UNKNOWN
+
+    def merge_half_layers(self, layers: List[LayerEvent]) -> List[LayerEvent]:
+        """Merge adjacent Attn+MoE or Attn+FC half-layers into full layers.
+
+        Models like Grok-2 produce two half-layers per transformer block
+        (one attention-only, one MoE/FC-only).  This pass recombines them
+        into single full layers so layer counts match the model's
+        num_hidden_layers.  The merged type is MLA or MHA based on
+        whether MLA-specific kernels appear in the attention half.
+        """
+        merged: List[LayerEvent] = []
+        i = 0
+        idx = 0
+        while i < len(layers):
+            layer = layers[i]
+            if (
+                layer.layer_type == LayerType.ATTN
+                and i + 1 < len(layers)
+                and layers[i + 1].layer_type in (LayerType.MOE, LayerType.FC)
+            ):
+                next_layer = layers[i + 1]
+                has_mla = any(
+                    p.search(k.name)
+                    for k in layer.kernels
+                    for p in self._mla_markers
+                )
+                is_moe = next_layer.layer_type == LayerType.MOE
+                if has_mla:
+                    merged_type = LayerType.MLA_MOE if is_moe else LayerType.MLA_FC
+                else:
+                    merged_type = LayerType.MHA_MOE if is_moe else LayerType.MHA_FC
+                combined_kernels = layer.kernels + next_layer.kernels
+                stage = self._determine_layer_stage(combined_kernels)
+                merged.append(
+                    LayerEvent(
+                        layer_idx=idx,
+                        layer_type=merged_type,
+                        stage=stage,
+                        kernels=combined_kernels,
+                    )
+                )
+                i += 2
+            else:
+                merged.append(
+                    LayerEvent(
+                        layer_idx=idx,
+                        layer_type=layer.layer_type,
+                        stage=layer.stage,
+                        kernels=layer.kernels,
+                    )
+                )
+                i += 1
+            idx += 1
+        return merged
 
     def _infer_stage_from_names(self, kernels: List[KernelEvent]) -> Stage:
         for k in kernels:
@@ -535,9 +638,15 @@ class LayerDetector:
 class TraceAnalyzer:
     """Main analyzer that loads and processes trace files."""
 
-    def __init__(self, grid_threshold: int = 10000, mtp_qseqlen_decode: bool = False):
+    def __init__(
+        self,
+        grid_threshold: int = 10000,
+        mtp_qseqlen_decode: bool = False,
+        split_half_layers: bool = False,
+    ):
         self.classifier = KernelClassifier(grid_threshold=grid_threshold)
         self.layer_detector = LayerDetector(mtp_qseqlen_decode=mtp_qseqlen_decode)
+        self.split_half_layers = split_half_layers
 
     def load_trace(self, path: str) -> Dict[str, Any]:
         """Load trace file (supports .json.gz and .json)."""
@@ -653,13 +762,36 @@ class TraceAnalyzer:
             # Layer stage is determined by dominant stage within each layer
             all_layers = self.layer_detector.detect_layers(result.events)
 
+            # Merge adjacent Attn+MoE / Attn+FC half-layers into full
+            # layers when requested (e.g. Grok-2 dual-norm architecture).
+            if not self.split_half_layers:
+                before = len(all_layers)
+                all_layers = self.layer_detector.merge_half_layers(all_layers)
+                logger.info(
+                    f"Merged half-layers: {before} -> {len(all_layers)} layers"
+                )
+
+            # Stage propagation: MoE/FC half-layers inherit stage from
+            # the immediately preceding layer (the attention half of the
+            # same transformer block).  This fixes models like Grok-2 where
+            # dual-residual RMSNorm fires twice per block, producing an
+            # attention half-layer followed by a MoE/FC half-layer whose
+            # tied vote would otherwise leave stage=UNKNOWN.
+            for i, layer in enumerate(all_layers):
+                if layer.stage == Stage.UNKNOWN and i > 0:
+                    prev = all_layers[i - 1]
+                    if prev.stage in (Stage.PREFILL, Stage.DECODE):
+                        layer.stage = prev.stage
+
             # Count layers by stage
             prefill_count = sum(1 for l in all_layers if l.stage == Stage.PREFILL)
             decode_count = sum(1 for l in all_layers if l.stage == Stage.DECODE)
+            unknown_count = sum(1 for l in all_layers if l.stage == Stage.UNKNOWN)
 
             result.layers = all_layers
             logger.info(
                 f"Detected {prefill_count} prefill layers, {decode_count} decode layers"
+                + (f", {unknown_count} unknown layers" if unknown_count else "")
             )
             # Re-assign kernel stages based on layer vote (only for prefill/decode layers)
             for layer in result.layers:
@@ -861,7 +993,7 @@ class ReportFormatter:
         for layer in layers:
             moe_fc_time = (
                 layer.moe_time_us
-                if layer.layer_type == LayerType.MLA_MOE
+                if layer.layer_type in (LayerType.MLA_MOE, LayerType.MHA_MOE, LayerType.MOE)
                 else layer.linear_time_us
             )
             print(
@@ -1638,6 +1770,12 @@ Examples:
         help="Treat attention qseqlen>=2 kernels as decode for layer stage inference",
     )
     parser.add_argument(
+        "--split-half-layers",
+        action="store_true",
+        help="Keep attention and MoE/FC half-layers separate instead of "
+        "merging them into single full layers (default: merged)",
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
 
@@ -1654,6 +1792,7 @@ Examples:
     analyzer = TraceAnalyzer(
         grid_threshold=args.grid_threshold,
         mtp_qseqlen_decode=args.mtp_qseqlen_decode,
+        split_half_layers=args.split_half_layers,
     )
 
     try:
