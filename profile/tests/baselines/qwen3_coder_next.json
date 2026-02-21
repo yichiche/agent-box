@@ -1,0 +1,41 @@
+{
+  "meta": {
+    "model_name": "qwen3_coder_next",
+    "trace_file": "mi355_aiter_0.1.10.post1_rocm720_Qwen3-Coder-Next_nonMTP_tp8_IL70kOL200_conc1_1771642699.0373511-TP-0.trace.json.gz",
+    "status": "known_broken",
+    "num_hidden_layers": 48,
+    "layers_per_block": 1,
+    "mtp_qseqlen_decode": false,
+    "grid_threshold": 10000
+  },
+  "metrics": {
+    "stage_coverage_pct": {
+      "min": 50.0
+    },
+    "type_coverage_pct": {
+      "min": 50.0,
+      "is_secondary": true
+    },
+    "both_stages_present": true,
+    "layer_count_min": 48,
+    "expected_layer_types": {
+      "pattern": "first_n_fc_rest_moe",
+      "first_n_fc": 4
+    }
+  },
+  "actual_metrics": {
+    "stage_coverage_pct": 100.0,
+    "type_coverage_pct": 41.09,
+    "both_stages_present": false,
+    "total_layers": 1,
+    "prefill_layers": 0,
+    "decode_layers": 1,
+    "layer_types": [
+      "MHA+MoE"
+    ]
+  },
+  "known_issues": [
+    "Missing prefill or decode layers",
+    "Only 1 layer(s) detected, expected at least 48"
+  ]
+}
