@@ -481,7 +481,7 @@ if [[ -n "$SERVER_EXTRA_ARGS" ]]; then
 fi
 
 SERVER_CMD="$(quote_join "${SERVER_ARGS[@]}")"
-START_SERVER_CMD="SGLANG_AITER_MLA_PERSIST=1 ${SERVER_CMD} > $(quote_one "$CONTAINER_SERVER_LOG") 2>&1"
+START_SERVER_CMD="cd /sgl-workspace/sglang/python && SGLANG_AITER_MLA_PERSIST=1 ${SERVER_CMD} > $(quote_one "$CONTAINER_SERVER_LOG") 2>&1"
 
 log "Launching server inside container"
 docker_cmd exec -d "$CONTAINER_NAME" bash -lc "$START_SERVER_CMD"
@@ -519,7 +519,7 @@ log "Server is healthy"
 
 if (( ACCURACY_MODE == 1 )); then
   log "Running GSM8K accuracy benchmark: num_questions=${ACCURACY_NUM_QUESTIONS}, parallel=${ACCURACY_PARALLEL}, num_shots=${ACCURACY_NUM_SHOTS}"
-  ACCURACY_CMD="cd /sgl-workspace/sglang && python3 benchmark/gsm8k/bench_sglang.py"
+  ACCURACY_CMD="cd /sgl-workspace/sglang/python && python3 /sgl-workspace/sglang/benchmark/gsm8k/bench_sglang.py"
   ACCURACY_CMD+=" --num-questions ${ACCURACY_NUM_QUESTIONS}"
   ACCURACY_CMD+=" --parallel ${ACCURACY_PARALLEL}"
   ACCURACY_CMD+=" --num-shots ${ACCURACY_NUM_SHOTS}"
@@ -562,7 +562,7 @@ for c in "${CONCURRENCY_ARRAY[@]}"; do
   BENCH_CMD="$(quote_join "${BENCH_ARGS[@]}")"
   log "Running benchmark: concurrency=${c}, num_prompts=${NUM_PROMPTS}"
   docker_cmd exec "$CONTAINER_NAME" bash -lc \
-    "${BENCH_CMD} 2>&1 | tee -a $(quote_one "$CONTAINER_BENCH_LOG")" \
+    "cd /sgl-workspace/sglang/python && ${BENCH_CMD} 2>&1 | tee -a $(quote_one "$CONTAINER_BENCH_LOG")" \
     | tee -a "$HOST_CLIENT_LOG"
 done
 
