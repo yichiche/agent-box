@@ -288,7 +288,7 @@ if (( CONCURRENCIES_SET == 0 )); then
   fi
 fi
 if [[ -z "$HOST_HOME_DIR" ]]; then
-  DEFAULT_HOME_DIR="${SAVED_HOST_HOME_DIR:-$HOME}"
+  DEFAULT_HOME_DIR="${SAVED_HOST_HOME_DIR:-$HOST_HOME}"
   read -r -p "Host home directory (default: ${DEFAULT_HOME_DIR}): " HOME_DIR_INPUT
   HOST_HOME_DIR="${HOME_DIR_INPUT:-$DEFAULT_HOME_DIR}"
 fi

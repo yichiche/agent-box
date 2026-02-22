@@ -45,6 +45,7 @@ die() {
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../env.sh"
 BENCH_SCRIPT="${SCRIPT_DIR}/run-local-benchmark-e2e.sh"
 COMPARE_SCRIPT="${SCRIPT_DIR}/compare_bench_results.py"
 
@@ -120,10 +121,10 @@ if ! has_flag "--accuracy" && ! has_flag "--no-accuracy"; then
 fi
 
 # Determine home-dir for result storage
-HOME_DIR="$HOME"
+HOME_DIR="$HOST_HOME"
 for i in "${!PASSTHROUGH_ARGS[@]}"; do
   if [[ "${PASSTHROUGH_ARGS[$i]}" == "--home-dir" ]]; then
-    HOME_DIR="${PASSTHROUGH_ARGS[$((i + 1))]:-$HOME}"
+    HOME_DIR="${PASSTHROUGH_ARGS[$((i + 1))]:-$HOST_HOME}"
     break
   fi
 done
