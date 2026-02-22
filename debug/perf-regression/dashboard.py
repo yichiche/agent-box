@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+import config as _cfg
 from config import DASHBOARD_PORT, DB_PATH, TEMPLATES_DIR, STATIC_DIR, ROCM_VERSIONS
 from collector import get_connection, init_db, get_version_snapshot
 
@@ -239,14 +240,17 @@ async def chart_data(
 @app.get("/api/runs")
 async def get_runs(
     rocm_version: Optional[str] = Query(None),
+    model_name: Optional[str] = Query(None),
     days: int = Query(30),
     limit: int = Query(100),
 ):
     """Return run history."""
     conn = _get_conn()
     try:
-        where_parts = ["1=1"]
-        params: list = []
+        # Default to the configured model so different model runs don't mix
+        effective_model = model_name or _cfg.MODEL_NAME
+        where_parts = ["br.model_name = ?"]
+        params: list = [effective_model]
 
         if rocm_version and rocm_version != "all":
             where_parts.append("br.rocm_version = ?")
