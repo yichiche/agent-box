@@ -13,9 +13,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import config as _cfg
 from config import (
     BENCH_SCRIPT,
-    MODEL_PATH,
     CONCURRENCIES,
     USE_SUDO_DOCKER,
     MTP_MODE,
@@ -33,7 +33,7 @@ from config import (
     LOCK_FILE,
     BENCHMARK_RUNS_DIR,
     LOG_DIR,
-    MODEL_NAME,
+    save_model_config,
 )
 from collector import get_connection, init_db, is_already_benchmarked, create_run, update_run_status, ingest_run
 from discover import discover_images
@@ -151,7 +151,7 @@ def run_benchmark(image: str, result_dir: Path) -> tuple[str, str]:
     cmd = [
         "bash", BENCH_SCRIPT,
         "--image", image,
-        "--model-path", MODEL_PATH,
+        "--model-path", _cfg.MODEL_PATH,
         "--concurrencies", CONCURRENCIES,
         "--home-dir", HOST_HOME_DIR,
         "--keep-container",
@@ -172,7 +172,9 @@ def run_benchmark(image: str, result_dir: Path) -> tuple[str, str]:
             "--accuracy-num-shots", str(ACCURACY_NUM_SHOTS),
         ])
 
+    log_file = result_dir / "orchestrator_output.log"
     logger.info("Running benchmark: %s", " ".join(cmd))
+    logger.info("Output log: %s", log_file)
 
     # Use Popen so we can stream stdout, detect the container name early,
     # and handle Ctrl+C cleanup properly.
@@ -193,10 +195,18 @@ def run_benchmark(image: str, result_dir: Path) -> tuple[str, str]:
     except BrokenPipeError:
         pass
 
+    # Fatal patterns that indicate unrecoverable GPU/hardware errors.
+    # When detected we kill the benchmark immediately instead of hanging.
+    FATAL_PATTERNS = [
+        "Memory access fault by GPU",
+        "Xcdna kernel error",
+        "uncorrectable ECC error",
+    ]
+
     # Stream stdout, capture it, and watch for the container name
     stdout_lines = []
     container_name = ""
-    log_file = result_dir / "orchestrator_output.log"
+    fatal_hit = ""
 
     with open(log_file, "w") as log_fh:
         for line in proc.stdout:
@@ -211,9 +221,24 @@ def run_benchmark(image: str, result_dir: Path) -> tuple[str, str]:
                     _active_container = container_name
                     logger.info("Detected container name: %s", container_name)
 
+            # Detect fatal GPU errors and abort early
+            if not fatal_hit:
+                for pat in FATAL_PATTERNS:
+                    if pat in line:
+                        fatal_hit = pat
+                        logger.error("Fatal GPU error detected: %s", line.rstrip())
+                        logger.error("Killing benchmark process immediately")
+                        proc.kill()
+                        break
+
     proc.wait()
     _active_process = None
     stdout = "".join(stdout_lines)
+
+    if fatal_hit:
+        raise subprocess.CalledProcessError(
+            -9, cmd, stdout, f"Fatal GPU error: {fatal_hit}"
+        )
 
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd, stdout, "")
@@ -267,6 +292,59 @@ def prune_old_images() -> None:
                 logger.warning("Failed to remove image: %s", image)
 
 
+def _salvage_version_snapshot(
+    conn, run_id: int, container_name: str, result_dir: Path
+) -> None:
+    """Try to copy version_snapshot.json out of a container on failure.
+
+    The snapshot is collected early in the benchmark script (right after
+    the server health check), so it often exists even when the benchmark
+    crashes later.  We look for it in the container and, if found, copy
+    it to the host result dir and ingest it into the database.
+    """
+    from collector import ingest_version_snapshot
+
+    host_path = result_dir / "version_snapshot.json"
+    if host_path.exists():
+        # Already on host (copied before failure)
+        try:
+            import json
+            snapshot = json.loads(host_path.read_text())
+            ingest_version_snapshot(conn, run_id, snapshot)
+            logger.info("Ingested version snapshot from existing host file")
+        except Exception as e:
+            logger.warning("Failed to ingest existing version snapshot: %s", e)
+        return
+
+    # Try to find and copy from container
+    try:
+        # Locate the snapshot inside the container
+        find_cmd = _docker_cmd() + [
+            "exec", container_name, "bash", "-c",
+            "find /tmp -name version_snapshot.json -maxdepth 3 2>/dev/null | head -1",
+        ]
+        find_result = subprocess.run(
+            find_cmd, capture_output=True, text=True, timeout=10
+        )
+        container_path = find_result.stdout.strip()
+        if not container_path:
+            logger.info("No version snapshot found in container to salvage")
+            return
+
+        result_dir.mkdir(parents=True, exist_ok=True)
+        cp_cmd = _docker_cmd() + [
+            "cp", f"{container_name}:{container_path}", str(host_path),
+        ]
+        subprocess.run(cp_cmd, check=True, capture_output=True, timeout=10)
+        logger.info("Salvaged version snapshot from container: %s", container_path)
+
+        import json
+        snapshot = json.loads(host_path.read_text())
+        ingest_version_snapshot(conn, run_id, snapshot)
+    except Exception as e:
+        logger.warning("Failed to salvage version snapshot: %s", e)
+
+
 def process_image(conn, image_info, dry_run: bool = False) -> bool:
     """Process a single image: pull, benchmark, collect, detect regressions.
     Returns True on success.
@@ -294,6 +372,11 @@ def process_image(conn, image_info, dry_run: bool = False) -> bool:
     _active_conn = conn
 
     try:
+        # Clean up stale result dir from a previous failed attempt
+        if result_dir.exists():
+            logger.info("Removing stale result dir: %s", result_dir)
+            shutil.rmtree(result_dir)
+
         # Pull image
         if not pull_image(image):
             return False
@@ -344,8 +427,13 @@ def process_image(conn, image_info, dry_run: bool = False) -> bool:
         return False
 
     except subprocess.CalledProcessError as e:
-        msg = f"Benchmark failed (rc={e.returncode}): {(e.stderr or '')[:500]}"
+        # stderr is merged into stdout via STDOUT, so use e.output (stdout)
+        output_tail = (e.output or e.stderr or '')[-500:]
+        log_path = result_dir / "orchestrator_output.log"
+        msg = f"Benchmark failed (rc={e.returncode}): {output_tail}"
         logger.error(msg)
+        if log_path.exists():
+            logger.error("Full output log: %s", log_path)
         if run_id:
             update_run_status(conn, run_id, "failed", error_message=msg)
         return False
@@ -358,6 +446,11 @@ def process_image(conn, image_info, dry_run: bool = False) -> bool:
         return False
 
     finally:
+        # Salvage version snapshot from the container before cleanup.
+        # The snapshot is collected early (right after health check), so it
+        # may exist even when the benchmark itself crashes.
+        if container_name and run_id:
+            _salvage_version_snapshot(conn, run_id, container_name, result_dir)
         cleanup_container(container_name)
         _active_container = ""
         _active_run_id = None
@@ -381,6 +474,18 @@ def main():
         help=f"ROCm versions to test (default: {ROCM_VERSIONS})",
     )
     parser.add_argument(
+        "--model-path",
+        type=str,
+        default=None,
+        help=f"Model path for sglang.launch_server (default: {_cfg.MODEL_PATH})",
+    )
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        default=None,
+        help=f"Short model name for DB records (default: {_cfg.MODEL_NAME})",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Discover and filter images but don't run benchmarks",
@@ -388,10 +493,28 @@ def main():
     parser.add_argument(
         "--force-rerun",
         type=str,
+        nargs="+",
         default=None,
-        help="Force re-run a specific image tag (deletes existing record)",
+        help="Force re-run one or more image tags (deletes existing records)",
     )
     args = parser.parse_args()
+
+    # Interactive model path prompt (same pattern as run-local-benchmark-e2e.sh)
+    if args.model_path:
+        _cfg.MODEL_PATH = args.model_path
+    else:
+        user_input = input(f"Model path (default: {_cfg.MODEL_PATH}): ").strip()
+        if user_input:
+            _cfg.MODEL_PATH = user_input
+
+    # Derive model name from path basename; --model-name overrides
+    if args.model_name:
+        _cfg.MODEL_NAME = args.model_name
+    else:
+        _cfg.MODEL_NAME = Path(_cfg.MODEL_PATH).name or Path(_cfg.MODEL_PATH).parent.name
+
+    # Persist for next run
+    save_model_config(_cfg.MODEL_PATH, _cfg.MODEL_NAME)
 
     # Validate rocm versions
     for v in args.rocm_versions:
@@ -443,12 +566,17 @@ def main():
         init_db(conn)
 
         # Handle force-rerun
+        # Normalize tags: strip "repo:" prefix if present so they match DB values
         if args.force_rerun:
-            logger.info("Force re-running: %s", args.force_rerun)
-            conn.execute(
-                "DELETE FROM benchmark_runs WHERE image_tag = ? AND model_name = ?",
-                (args.force_rerun, MODEL_NAME),
-            )
+            args.force_rerun = [
+                t.split(":")[-1] if ":" in t else t for t in args.force_rerun
+            ]
+            for tag in args.force_rerun:
+                logger.info("Force re-running: %s", tag)
+                conn.execute(
+                    "DELETE FROM benchmark_runs WHERE image_tag = ? AND model_name = ?",
+                    (tag, _cfg.MODEL_NAME),
+                )
             conn.commit()
 
         # Discover images
@@ -468,8 +596,9 @@ def main():
         fail_count = 0
         skip_count = 0
 
+        force_set = set(args.force_rerun) if args.force_rerun else set()
         for img in images:
-            if is_already_benchmarked(conn, img.full_tag) and not args.force_rerun:
+            if is_already_benchmarked(conn, img.full_tag) and img.full_tag not in force_set:
                 logger.info("Skipping (already completed): %s", img.full_tag)
                 skip_count += 1
                 continue

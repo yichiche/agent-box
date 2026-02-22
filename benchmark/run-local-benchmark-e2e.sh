@@ -517,6 +517,14 @@ if ! wait_for_health; then
 fi
 log "Server is healthy"
 
+# ── Collect version snapshot ──────────────────────────────────────
+log "Collecting version snapshot"
+docker_cmd cp "${AGENT_BOX_DIR}/debug/perf-regression/version_snapshot.py" \
+  "${CONTAINER_NAME}:/tmp/version_snapshot.py"
+docker_cmd exec "$CONTAINER_NAME" python3 /tmp/version_snapshot.py \
+  --output "${CONTAINER_RESULT_DIR}/version_snapshot.json" || \
+  log "WARNING: Version snapshot collection failed (non-fatal)"
+
 if (( ACCURACY_MODE == 1 )); then
   log "Running GSM8K accuracy benchmark: num_questions=${ACCURACY_NUM_QUESTIONS}, parallel=${ACCURACY_PARALLEL}, num_shots=${ACCURACY_NUM_SHOTS}"
   ACCURACY_CMD="cd /sgl-workspace/sglang/python && python3 /sgl-workspace/sglang/benchmark/gsm8k/bench_sglang.py"

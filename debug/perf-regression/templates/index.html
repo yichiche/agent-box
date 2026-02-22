@@ -86,10 +86,11 @@
                     <th>Current</th>
                     <th>Baseline</th>
                     <th>Degradation</th>
+                    <th>Compare</th>
                 </tr>
             </thead>
             <tbody id="alerts-body">
-                <tr><td colspan="8" class="empty">Loading...</td></tr>
+                <tr><td colspan="9" class="empty">Loading...</td></tr>
             </tbody>
         </table>
 
@@ -104,11 +105,12 @@
                     <th>Status</th>
                     <th>Duration</th>
                     <th>Accuracy</th>
+                    <th>Versions</th>
                     <th>Details</th>
                 </tr>
             </thead>
             <tbody id="runs-body">
-                <tr><td colspan="8" class="empty">Loading...</td></tr>
+                <tr><td colspan="9" class="empty">Loading...</td></tr>
             </tbody>
         </table>
     </div>
@@ -229,7 +231,7 @@
         function renderAlerts(alerts) {
             const tbody = document.getElementById('alerts-body');
             if (!alerts || alerts.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="8" class="empty">No regression alerts</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="9" class="empty">No regression alerts</td></tr>';
                 return;
             }
             tbody.innerHTML = alerts.map(a => {
@@ -244,6 +246,7 @@
                     <td>${a.current_value !== null ? a.current_value.toFixed(2) : 'N/A'}</td>
                     <td>${a.baseline_value !== null ? a.baseline_value.toFixed(2) : 'N/A'}</td>
                     <td class="regression-val">${degradation}</td>
+                    <td><button class="btn-expand" onclick="compareVersions(${a.run_id}, '${a.rocm_version}', this)">Compare</button></td>
                 </tr>`;
             }).join('');
         }
@@ -251,7 +254,7 @@
         function renderRuns(runs) {
             const tbody = document.getElementById('runs-body');
             if (!runs || runs.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="8" class="empty">No benchmark runs</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="9" class="empty">No benchmark runs</td></tr>';
                 return;
             }
             tbody.innerHTML = runs.map(r => {
@@ -265,7 +268,7 @@
                 let metricsHtml = '';
                 if (r.metrics && r.metrics.length > 0) {
                     metricsHtml = `<tr id="${metricsId}" class="metrics-detail" style="display:none">
-                        <td colspan="8">
+                        <td colspan="9">
                             <table class="inner-table">
                                 <thead>
                                     <tr>
@@ -294,6 +297,33 @@
                     </tr>`;
                 }
 
+                let versionsHtml = '';
+                if (r.versions && r.versions.length > 0) {
+                    const versionsId = `versions-${r.id}`;
+                    versionsHtml = `<tr id="${versionsId}" class="metrics-detail" style="display:none">
+                        <td colspan="9">
+                            <table class="inner-table">
+                                <thead>
+                                    <tr>
+                                        <th>Library</th>
+                                        <th>Version</th>
+                                        <th>Source</th>
+                                        <th>Commit</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${r.versions.map(v => `<tr>
+                                        <td>${v.library_name}</td>
+                                        <td>${v.version || '-'}</td>
+                                        <td>${v.source_type}</td>
+                                        <td>${v.git_commit ? v.git_commit.substring(0, 10) : '-'}</td>
+                                    </tr>`).join('')}
+                                </tbody>
+                            </table>
+                        </td>
+                    </tr>`;
+                }
+
                 return `<tr>
                     <td>${date}</td>
                     <td class="tag-cell" title="${r.image_tag}">${r.image_tag}</td>
@@ -302,9 +332,11 @@
                     <td><span class="${statusClass}">${r.status}</span></td>
                     <td>${duration}</td>
                     <td>${accuracy}</td>
+                    <td>${r.versions && r.versions.length > 0 ?
+                        `<button class="btn-expand" onclick="toggleMetrics('versions-${r.id}', this)">Show</button>` : '-'}</td>
                     <td>${r.metrics && r.metrics.length > 0 ?
                         `<button class="btn-expand" onclick="toggleMetrics('${metricsId}', this)">Show</button>` : '-'}</td>
-                </tr>${metricsHtml}`;
+                </tr>${metricsHtml}${versionsHtml}`;
             }).join('');
         }
 
@@ -315,6 +347,49 @@
                 row.style.display = isHidden ? 'table-row' : 'none';
                 btn.textContent = isHidden ? 'Hide' : 'Show';
             }
+        }
+
+        async function compareVersions(runId, rocmVersion, btn) {
+            // Find the previous completed run with the same rocm_version
+            const f = getFilters();
+            const params = new URLSearchParams({ days: f.days, rocm_version: rocmVersion });
+            const runs = await (await fetch(`/api/runs?${params}`)).json();
+            const completedRuns = runs.filter(r => r.status === 'completed').sort((a, b) => a.build_date.localeCompare(b.build_date));
+            const currentIdx = completedRuns.findIndex(r => r.id === runId);
+            if (currentIdx <= 0) {
+                alert('No previous run found for comparison');
+                return;
+            }
+            const prevRun = completedRuns[currentIdx - 1];
+
+            btn.textContent = 'Loading...';
+            try {
+                const diffResp = await fetch(`/api/version-diff?run_a=${prevRun.id}&run_b=${runId}`);
+                const diffData = await diffResp.json();
+
+                // Show in a simple alert/modal
+                let msg = 'Version Diff:\n\n';
+                if (diffData.diff.changed && diffData.diff.changed.length > 0) {
+                    msg += 'CHANGED:\n';
+                    diffData.diff.changed.forEach(c => {
+                        const oldCommit = c.old_commit ? ` (${c.old_commit.substring(0, 7)})` : '';
+                        const newCommit = c.new_commit ? ` (${c.new_commit.substring(0, 7)})` : '';
+                        msg += `  ${c.name}: ${c.old_version}${oldCommit} -> ${c.new_version}${newCommit}\n`;
+                    });
+                } else {
+                    msg += 'No version changes detected\n';
+                }
+                if (diffData.suggestions && diffData.suggestions.length > 0) {
+                    msg += '\nRoot Cause Analysis:\n';
+                    diffData.suggestions.forEach((s, i) => {
+                        msg += `  ${i+1}. ${s.name} — ${s.reason}\n`;
+                    });
+                }
+                alert(msg);
+            } catch (err) {
+                alert('Failed to compare versions: ' + err.message);
+            }
+            btn.textContent = 'Compare';
         }
 
         async function refreshAll() {

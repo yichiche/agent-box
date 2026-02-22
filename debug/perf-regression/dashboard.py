@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from config import DASHBOARD_PORT, DB_PATH, TEMPLATES_DIR, STATIC_DIR, ROCM_VERSIONS
-from collector import get_connection, init_db
+from collector import get_connection, init_db, get_version_snapshot
 
 logger = logging.getLogger(__name__)
 app = FastAPI(title="SGLang ROCm Perf Regression Dashboard")
@@ -296,9 +296,42 @@ async def get_runs(
             else:
                 run_dict["accuracy"] = None
 
+            # Fetch versions
+            versions = conn.execute(
+                """SELECT library_name, version, source_type, git_commit
+                   FROM version_snapshots WHERE run_id = ?
+                   ORDER BY library_name""",
+                (run["id"],),
+            ).fetchall()
+            run_dict["versions"] = [dict(v) for v in versions]
+
             result.append(run_dict)
 
         return JSONResponse(result)
+    finally:
+        conn.close()
+
+
+@app.get("/api/versions/{run_id}")
+async def get_versions(run_id: int):
+    """Return version snapshot for a given run."""
+    conn = _get_conn()
+    try:
+        versions = get_version_snapshot(conn, run_id)
+        return JSONResponse(versions)
+    finally:
+        conn.close()
+
+
+@app.get("/api/version-diff")
+async def version_diff_api(run_a: int = Query(...), run_b: int = Query(...)):
+    """Compare versions between two runs."""
+    conn = _get_conn()
+    try:
+        from version_diff import compute_version_diff, suggest_root_cause
+        diff = compute_version_diff(conn, run_a, run_b)
+        suggestions = suggest_root_cause(diff)
+        return JSONResponse({"diff": diff, "suggestions": suggestions})
     finally:
         conn.close()
 
@@ -332,7 +365,7 @@ async def get_alerts(
 
         query = f"""
             SELECT
-                ra.id, ra.metric_name, ra.concurrency,
+                ra.id, ra.run_id, ra.metric_name, ra.concurrency,
                 ra.current_value, ra.baseline_value, ra.regression_pct,
                 ra.acknowledged, ra.created_at,
                 br.image_tag, br.build_date, br.rocm_version, br.sglang_version
