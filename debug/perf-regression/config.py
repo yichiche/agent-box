@@ -7,16 +7,21 @@ from pathlib import Path
 # ── Paths ──────────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent
 AGENT_BOX_DIR = BASE_DIR.parent.parent
-HOST_HOME_DIR = str(AGENT_BOX_DIR.parent)
+HOST_HOME_DIR = os.getenv("AGENT_BOX_HOST_HOME", str(AGENT_BOX_DIR.parent))
 BENCH_SCRIPT = str(AGENT_BOX_DIR / "benchmark" / "run-local-benchmark-e2e.sh")
 MODEL_PATH = "/raid/models/DeepSeek-R1-MXFP4-Preview/"
 MODEL_NAME = "DeepSeek-R1-MXFP4"
 
 # Runtime directories (auto-created)
 DATA_DIR = BASE_DIR / "data"
-LOG_DIR = BASE_DIR / "logs"
 BENCHMARK_RUNS_DIR = Path(HOST_HOME_DIR) / "benchmark_runs"
-DB_PATH = DATA_DIR / "perf_regression.db"
+LOG_DIR = BENCHMARK_RUNS_DIR / "logs"
+DB_PATH = Path(
+    os.getenv(
+        "PERF_REGRESSION_DB_PATH",
+        str(BENCHMARK_RUNS_DIR / "data" / "perf_regression.db"),
+    )
+)
 LOCK_FILE = BASE_DIR / ".orchestrator.lock"
 
 # ── Docker Hub ─────────────────────────────────────────────────────────────

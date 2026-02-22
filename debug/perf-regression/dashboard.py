@@ -1,5 +1,6 @@
 """FastAPI web dashboard for viewing benchmark results and regression alerts."""
 
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,9 +11,10 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from config import DASHBOARD_PORT, TEMPLATES_DIR, STATIC_DIR, ROCM_VERSIONS
+from config import DASHBOARD_PORT, DB_PATH, TEMPLATES_DIR, STATIC_DIR, ROCM_VERSIONS
 from collector import get_connection, init_db
 
+logger = logging.getLogger(__name__)
 app = FastAPI(title="SGLang ROCm Perf Regression Dashboard")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -21,6 +23,7 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 @app.on_event("startup")
 def startup():
     init_db()
+    logger.info("Dashboard database path: %s", DB_PATH)
 
 
 def _get_conn() -> sqlite3.Connection:
