@@ -7,7 +7,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG_DIR="${SCRIPT_DIR}/logs"
+AGENT_BOX_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
+HOST_HOME_DIR="${AGENT_BOX_HOST_HOME:-$(dirname "$AGENT_BOX_DIR")}"
+LOG_DIR="${HOST_HOME_DIR}/benchmark_runs/logs"
 mkdir -p "$LOG_DIR"
 
 TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"

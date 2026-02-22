@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from config import DB_PATH, DATA_DIR, MODEL_NAME
+from config import DB_PATH, MODEL_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ CREATE INDEX IF NOT EXISTS idx_alerts_run_id ON regression_alerts(run_id);
 
 def get_connection() -> sqlite3.Connection:
     """Get a SQLite connection with WAL mode and foreign keys."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH), timeout=30)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
