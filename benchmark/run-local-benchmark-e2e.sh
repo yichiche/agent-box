@@ -449,6 +449,16 @@ docker_cmd run "${DOCKER_RUN_ARGS[@]}" "$IMAGE" tail -f /dev/null >/dev/null
 
 docker_cmd exec "$CONTAINER_NAME" mkdir -p "$CONTAINER_RESULT_DIR"
 
+# ── Collect version snapshot (before server launch) ───────────────
+# Captures pip packages, system info, etc.  Runs early so the data
+# is available even when the server crashes during startup.
+log "Collecting version snapshot"
+docker_cmd cp "${AGENT_BOX_DIR}/debug/perf-regression/version_snapshot.py" \
+  "${CONTAINER_NAME}:/tmp/version_snapshot.py"
+docker_cmd exec "$CONTAINER_NAME" python3 /tmp/version_snapshot.py \
+  --output "${CONTAINER_RESULT_DIR}/version_snapshot.json" || \
+  log "WARNING: Version snapshot collection failed (non-fatal)"
+
 SERVER_ARGS=(
   python3 -m sglang.launch_server
   --model-path "$MODEL_PATH"
@@ -516,14 +526,6 @@ if ! wait_for_health; then
   die "Server failed health check within ${WAIT_TIMEOUT_SEC}s"
 fi
 log "Server is healthy"
-
-# ── Collect version snapshot ──────────────────────────────────────
-log "Collecting version snapshot"
-docker_cmd cp "${AGENT_BOX_DIR}/debug/perf-regression/version_snapshot.py" \
-  "${CONTAINER_NAME}:/tmp/version_snapshot.py"
-docker_cmd exec "$CONTAINER_NAME" python3 /tmp/version_snapshot.py \
-  --output "${CONTAINER_RESULT_DIR}/version_snapshot.json" || \
-  log "WARNING: Version snapshot collection failed (non-fatal)"
 
 if (( ACCURACY_MODE == 1 )); then
   log "Running GSM8K accuracy benchmark: num_questions=${ACCURACY_NUM_QUESTIONS}, parallel=${ACCURACY_PARALLEL}, num_shots=${ACCURACY_NUM_SHOTS}"

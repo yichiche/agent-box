@@ -56,16 +56,14 @@ def _signal_handler(signum, frame):
     sig_name = signal.Signals(signum).name
     logger.warning("Received %s, cleaning up...", sig_name)
 
-    # Kill the benchmark subprocess
+    # Kill the benchmark subprocess and its entire process group
     if _active_process and _active_process.poll() is None:
-        logger.info("Terminating benchmark subprocess (pid=%d)", _active_process.pid)
-        _active_process.terminate()
+        logger.info("Terminating benchmark process group (pid=%d)", _active_process.pid)
+        _kill_process_group(_active_process)
         try:
             _active_process.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            logger.info("Force-killing benchmark subprocess")
-            _active_process.kill()
-            _active_process.wait(timeout=5)
+            pass
 
     # Clean up the Docker container
     if _active_container:
@@ -136,6 +134,118 @@ def pull_image(image: str, retries: int = 3) -> bool:
     return False
 
 
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """Kill the process and its entire process group.
+
+    When USE_SUDO_DOCKER is enabled, docker child processes are
+    root-owned and survive a plain os.killpg from a non-root user.
+    os.killpg may *partially* succeed (killing user-owned bash but
+    not root-owned docker children) without raising PermissionError,
+    so we must always continue to docker-kill and sudo-kill regardless.
+
+    As a final safety net, closes the raw stdout fd to unblock any
+    reader waiting on the pipe.  We use os.close() on the raw fd
+    instead of proc.stdout.close() because the latter acquires
+    TextIOWrapper's internal lock, which deadlocks when the main
+    thread is blocked inside readline().
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        return
+
+    # Step 1: killpg — kills user-owned processes in the group.
+    # On Linux killpg succeeds if it can signal ANY process in the
+    # group, so root-owned docker children silently survive.
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+    # Step 2: kill the Docker container so root-owned docker-exec
+    # children exit and release the stdout pipe write-end.
+    # _docker_cmd() already includes sudo when USE_SUDO_DOCKER=True.
+    if _active_container:
+        try:
+            cmd = _docker_cmd() + ["kill", _active_container]
+            subprocess.run(cmd, timeout=10, capture_output=True)
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    # Step 3: sudo kill for any remaining root-owned children
+    try:
+        subprocess.run(
+            ["sudo", "kill", "-9", f"-{pgid}"],
+            timeout=5, capture_output=True,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    # Step 4: fallback to killing just the direct child
+    try:
+        proc.kill()
+    except (ProcessLookupError, OSError):
+        pass
+
+    # Safety net: close the raw stdout fd to unblock the main loop.
+    # We bypass proc.stdout.close() because TextIOWrapper.close()
+    # acquires an internal lock that deadlocks when the main thread
+    # is blocked inside readline() holding the same lock.
+    try:
+        os.close(proc.stdout.fileno())
+    except OSError:
+        pass
+
+
+def _monitor_server_log(server_log: Path, proc: subprocess.Popen) -> None:
+    """Background thread: tail the server log for fatal GPU errors.
+
+    If a fatal pattern is found, kills the entire process group so the
+    benchmark aborts immediately instead of hanging on a dead server.
+    """
+    import threading
+
+    FATAL_PATTERNS = [
+        "Memory access fault by GPU",
+        "Xcdna kernel error",
+        "uncorrectable ECC error",
+    ]
+
+    def _watcher():
+        # Wait for the server log file to appear (up to 5 min)
+        for _ in range(300):
+            if server_log.exists():
+                break
+            if proc.poll() is not None:
+                return
+            time.sleep(1)
+        if not server_log.exists():
+            return
+
+        # Tail the file, checking new content every second
+        with open(server_log, "r") as fh:
+            while proc.poll() is None:
+                line = fh.readline()
+                if not line:
+                    time.sleep(1)
+                    continue
+                for pat in FATAL_PATTERNS:
+                    if pat in line:
+                        logger.error(
+                            "Fatal GPU error in server log: %s", line.rstrip()
+                        )
+                        logger.error(
+                            "Killing benchmark process group (server crashed). "
+                            "Full server log: %s", server_log,
+                        )
+                        _kill_process_group(proc)
+                        return
+
+    t = threading.Thread(target=_watcher, daemon=True)
+    t.start()
+    return t
+
+
 def run_benchmark(image: str, result_dir: Path) -> tuple[str, str]:
     """Run the benchmark script and return (stdout, container_name).
 
@@ -173,17 +283,22 @@ def run_benchmark(image: str, result_dir: Path) -> tuple[str, str]:
         ])
 
     log_file = result_dir / "orchestrator_output.log"
+    server_log = result_dir / "server.log"
     logger.info("Running benchmark: %s", " ".join(cmd))
     logger.info("Output log: %s", log_file)
+    logger.info("Server log: %s", server_log)
 
     # Use Popen so we can stream stdout, detect the container name early,
     # and handle Ctrl+C cleanup properly.
+    # start_new_session=True creates a new process group so we can kill
+    # bash AND all its child docker processes at once via os.killpg().
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        start_new_session=True,
     )
     _active_process = proc
 
@@ -195,8 +310,10 @@ def run_benchmark(image: str, result_dir: Path) -> tuple[str, str]:
     except BrokenPipeError:
         pass
 
-    # Fatal patterns that indicate unrecoverable GPU/hardware errors.
-    # When detected we kill the benchmark immediately instead of hanging.
+    # Start background thread to monitor server log for GPU faults
+    watcher = _monitor_server_log(server_log, proc)
+
+    # Fatal patterns to also check in benchmark stdout/stderr
     FATAL_PATTERNS = [
         "Memory access fault by GPU",
         "Xcdna kernel error",
@@ -209,35 +326,42 @@ def run_benchmark(image: str, result_dir: Path) -> tuple[str, str]:
     fatal_hit = ""
 
     with open(log_file, "w") as log_fh:
-        for line in proc.stdout:
-            log_fh.write(line)
-            log_fh.flush()
-            stdout_lines.append(line)
+        try:
+            for line in proc.stdout:
+                log_fh.write(line)
+                log_fh.flush()
+                stdout_lines.append(line)
 
-            if not container_name:
-                match = CONTAINER_NAME_RE.search(line)
-                if match:
-                    container_name = match.group(1)
-                    _active_container = container_name
-                    logger.info("Detected container name: %s", container_name)
+                if not container_name:
+                    match = CONTAINER_NAME_RE.search(line)
+                    if match:
+                        container_name = match.group(1)
+                        _active_container = container_name
+                        logger.info("Detected container name: %s", container_name)
 
-            # Detect fatal GPU errors and abort early
-            if not fatal_hit:
-                for pat in FATAL_PATTERNS:
-                    if pat in line:
-                        fatal_hit = pat
-                        logger.error("Fatal GPU error detected: %s", line.rstrip())
-                        logger.error("Killing benchmark process immediately")
-                        proc.kill()
-                        break
+                # Detect fatal GPU errors in stdout as well
+                if not fatal_hit:
+                    for pat in FATAL_PATTERNS:
+                        if pat in line:
+                            fatal_hit = pat
+                            logger.error("Fatal GPU error in stdout: %s", line.rstrip())
+                            logger.error("Killing benchmark process group immediately")
+                            _kill_process_group(proc)
+                            break
+        except (ValueError, OSError):
+            # stdout fd was closed by the watcher thread to force-unblock us.
+            # os.close(fd) causes OSError (EBADF), while higher-level close
+            # causes ValueError.
+            pass
 
     proc.wait()
     _active_process = None
     stdout = "".join(stdout_lines)
 
-    if fatal_hit:
+    if fatal_hit or proc.returncode == -9:
+        reason = fatal_hit or "killed by server-log watcher (GPU fault)"
         raise subprocess.CalledProcessError(
-            -9, cmd, stdout, f"Fatal GPU error: {fatal_hit}"
+            proc.returncode, cmd, stdout, f"Fatal GPU error: {reason}"
         )
 
     if proc.returncode != 0:
@@ -316,9 +440,15 @@ def _salvage_version_snapshot(
             logger.warning("Failed to ingest existing version snapshot: %s", e)
         return
 
-    # Try to find and copy from container
+    # Try to find and copy from the container.
+    # The container may be stopped (e.g. after docker kill on GPU fault),
+    # so we first try docker-exec (running container), then fall back to
+    # docker-cp with the known path pattern (works on stopped containers).
+    result_dir.mkdir(parents=True, exist_ok=True)
+    container_path = None
+
+    # Method 1: docker exec find (only works on running containers)
     try:
-        # Locate the snapshot inside the container
         find_cmd = _docker_cmd() + [
             "exec", container_name, "bash", "-c",
             "find /tmp -name version_snapshot.json -maxdepth 3 2>/dev/null | head -1",
@@ -326,12 +456,27 @@ def _salvage_version_snapshot(
         find_result = subprocess.run(
             find_cmd, capture_output=True, text=True, timeout=10
         )
-        container_path = find_result.stdout.strip()
-        if not container_path:
-            logger.info("No version snapshot found in container to salvage")
-            return
+        # Only trust stdout when docker exec succeeded; on stopped
+        # containers Docker prints the OCI error to stdout, which would
+        # be mistaken for a file path.
+        if find_result.returncode == 0:
+            container_path = find_result.stdout.strip() or None
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+        pass
 
-        result_dir.mkdir(parents=True, exist_ok=True)
+    # Method 2: derive path from container name (works on stopped containers).
+    # Container name: jacky-sglang-bench-<tag>-<YYYYMMDD_HHMMSS>
+    # Container result dir: /tmp/sglang-bench-<YYYYMMDD_HHMMSS>
+    if not container_path:
+        m = re.search(r"-(\d{8}_\d{6})$", container_name)
+        if m:
+            container_path = f"/tmp/sglang-bench-{m.group(1)}/version_snapshot.json"
+
+    if not container_path:
+        logger.info("No version snapshot path found for container %s", container_name)
+        return
+
+    try:
         cp_cmd = _docker_cmd() + [
             "cp", f"{container_name}:{container_path}", str(host_path),
         ]
@@ -446,12 +591,17 @@ def process_image(conn, image_info, dry_run: bool = False) -> bool:
         return False
 
     finally:
+        # Use _active_container as fallback: run_benchmark sets the global
+        # when it detects the container name from stdout, but if it raises
+        # before returning, the local container_name stays empty.
+        cname = container_name or _active_container
+
         # Salvage version snapshot from the container before cleanup.
         # The snapshot is collected early (right after health check), so it
         # may exist even when the benchmark itself crashes.
-        if container_name and run_id:
-            _salvage_version_snapshot(conn, run_id, container_name, result_dir)
-        cleanup_container(container_name)
+        if cname and run_id:
+            _salvage_version_snapshot(conn, run_id, cname, result_dir)
+        cleanup_container(cname)
         _active_container = ""
         _active_run_id = None
         _active_conn = None
@@ -500,10 +650,15 @@ def main():
     args = parser.parse_args()
 
     # Interactive model path prompt (same pattern as run-local-benchmark-e2e.sh)
+    # Strip ANSI escape sequences to prevent garbage model names from
+    # accidental arrow-key input (e.g. \x1b[A from pressing Up).
+    def _strip_ansi(s: str) -> str:
+        return re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', s).strip()
+
     if args.model_path:
         _cfg.MODEL_PATH = args.model_path
     else:
-        user_input = input(f"Model path (default: {_cfg.MODEL_PATH}): ").strip()
+        user_input = _strip_ansi(input(f"Model path (default: {_cfg.MODEL_PATH}): "))
         if user_input:
             _cfg.MODEL_PATH = user_input
 
