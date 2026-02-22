@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from config import DB_PATH, MODEL_NAME
+import config as _cfg
+from config import DB_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -78,11 +79,24 @@ CREATE TABLE IF NOT EXISTS regression_alerts (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS version_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+    library_name TEXT NOT NULL,
+    version TEXT,
+    source_type TEXT NOT NULL DEFAULT 'pip',
+    git_commit TEXT,
+    git_commit_date TEXT,
+    git_commit_subject TEXT,
+    UNIQUE(run_id, library_name)
+);
+
 CREATE INDEX IF NOT EXISTS idx_runs_rocm_status ON benchmark_runs(rocm_version, status);
 CREATE INDEX IF NOT EXISTS idx_runs_build_date ON benchmark_runs(build_date);
 CREATE INDEX IF NOT EXISTS idx_metrics_run_id ON benchmark_metrics(run_id);
 CREATE INDEX IF NOT EXISTS idx_accuracy_run_id ON accuracy_results(run_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_run_id ON regression_alerts(run_id);
+CREATE INDEX IF NOT EXISTS idx_version_snapshots_run_id ON version_snapshots(run_id);
 """
 
 
@@ -113,7 +127,7 @@ def is_already_benchmarked(conn: sqlite3.Connection, image_tag: str) -> bool:
     """Check if this image already has a completed benchmark with existing results."""
     row = conn.execute(
         "SELECT status, result_dir FROM benchmark_runs WHERE image_tag = ? AND model_name = ?",
-        (image_tag, MODEL_NAME),
+        (image_tag, _cfg.MODEL_NAME),
     ).fetchone()
     if row is None or row["status"] != "completed":
         return False
@@ -141,7 +155,7 @@ def create_run(
     """
     existing = conn.execute(
         "SELECT id, status FROM benchmark_runs WHERE image_tag = ? AND model_name = ?",
-        (image_tag, MODEL_NAME),
+        (image_tag, _cfg.MODEL_NAME),
     ).fetchone()
 
     now = datetime.now(timezone.utc).isoformat()
@@ -152,6 +166,7 @@ def create_run(
         conn.execute("DELETE FROM benchmark_metrics WHERE run_id = ?", (run_id,))
         conn.execute("DELETE FROM accuracy_results WHERE run_id = ?", (run_id,))
         conn.execute("DELETE FROM regression_alerts WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM version_snapshots WHERE run_id = ?", (run_id,))
         conn.execute(
             """UPDATE benchmark_runs
                SET sglang_version = ?, rocm_version = ?, build_date = ?,
@@ -174,7 +189,7 @@ def create_run(
             sglang_version,
             rocm_version,
             build_date,
-            MODEL_NAME,
+            _cfg.MODEL_NAME,
             now,
             status,
             result_dir,
@@ -367,6 +382,47 @@ def ingest_accuracy(conn: sqlite3.Connection, run_id: int, log_path: Path) -> bo
         return False
 
 
+def ingest_version_snapshot(conn: sqlite3.Connection, run_id: int, snapshot_dict: dict) -> int:
+    """Insert version snapshot rows from a snapshot JSON dict. Returns number of rows inserted."""
+    libraries = snapshot_dict.get("libraries", [])
+    count = 0
+    for lib in libraries:
+        try:
+            conn.execute(
+                """INSERT OR REPLACE INTO version_snapshots
+                   (run_id, library_name, version, source_type,
+                    git_commit, git_commit_date, git_commit_subject)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    run_id,
+                    lib.get("name"),
+                    lib.get("version"),
+                    lib.get("source_type", "pip"),
+                    lib.get("git_commit"),
+                    lib.get("git_commit_date"),
+                    lib.get("git_commit_subject"),
+                ),
+            )
+            count += 1
+        except sqlite3.IntegrityError as e:
+            logger.warning("Duplicate version snapshot for run %d lib %s: %s", run_id, lib.get("name"), e)
+    conn.commit()
+    logger.info("Ingested %d version snapshot rows for run %d", count, run_id)
+    return count
+
+
+def get_version_snapshot(conn: sqlite3.Connection, run_id: int) -> list[dict]:
+    """Retrieve all version snapshot rows for a given run."""
+    rows = conn.execute(
+        """SELECT library_name, version, source_type,
+                  git_commit, git_commit_date, git_commit_subject
+           FROM version_snapshots WHERE run_id = ?
+           ORDER BY library_name""",
+        (run_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def ingest_run(
     conn: sqlite3.Connection,
     run_id: int,
@@ -378,6 +434,11 @@ def ingest_run(
 
     ingest_metrics(conn, run_id, jsonl_path)
     ingest_accuracy(conn, run_id, accuracy_path)
+
+    version_path = result_dir / "version_snapshot.json"
+    if version_path.exists():
+        snapshot = json.loads(version_path.read_text())
+        ingest_version_snapshot(conn, run_id, snapshot)
 
 
 if __name__ == "__main__":

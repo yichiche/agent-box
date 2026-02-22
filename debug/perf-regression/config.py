@@ -9,8 +9,40 @@ BASE_DIR = Path(__file__).resolve().parent
 AGENT_BOX_DIR = BASE_DIR.parent.parent
 HOST_HOME_DIR = os.getenv("AGENT_BOX_HOST_HOME", str(AGENT_BOX_DIR.parent))
 BENCH_SCRIPT = str(AGENT_BOX_DIR / "benchmark" / "run-local-benchmark-e2e.sh")
-MODEL_PATH = "/raid/models/DeepSeek-R1-MXFP4-Preview/"
-MODEL_NAME = "DeepSeek-R1-MXFP4"
+
+# ── Model defaults (overridden by saved config or CLI args) ───────────────
+_DEFAULT_MODEL_PATH = "/raid/models/DeepSeek-R1-MXFP4-Preview/"
+_DEFAULT_MODEL_NAME = "DeepSeek-R1-MXFP4"
+_CONFIG_FILE = AGENT_BOX_DIR / ".bench_config"
+
+
+def _load_saved_config() -> dict[str, str]:
+    """Load key=value pairs from the shared bench config file."""
+    saved = {}
+    if _CONFIG_FILE.is_file():
+        for line in _CONFIG_FILE.read_text().splitlines():
+            if "=" in line:
+                key, _, value = line.partition("=")
+                saved[key.strip()] = value.strip()
+    return saved
+
+
+def save_model_config(model_path: str, model_name: str) -> None:
+    """Persist model settings back to the shared config file.
+
+    Preserves any other keys (e.g. HOST_HOME_DIR) already in the file.
+    """
+    saved = _load_saved_config()
+    saved["MODEL_PATH"] = model_path
+    saved["MODEL_NAME"] = model_name
+    _CONFIG_FILE.write_text(
+        "\n".join(f"{k}={v}" for k, v in saved.items()) + "\n"
+    )
+
+
+_saved = _load_saved_config()
+MODEL_PATH = _saved.get("MODEL_PATH", _DEFAULT_MODEL_PATH)
+MODEL_NAME = _saved.get("MODEL_NAME", _DEFAULT_MODEL_NAME)
 
 # Runtime directories (auto-created)
 DATA_DIR = BASE_DIR / "data"
@@ -79,3 +111,18 @@ ACCURACY_REGRESSION_THRESHOLD = 2.0  # absolute percentage points
 DASHBOARD_PORT = 8080
 TEMPLATES_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
+
+# ── Version tracking ──────────────────────────────────────────────────────
+GIT_TRACKED_REPOS = [
+    {"name": "sglang",  "path": "/sgl-workspace/sglang"},
+    {"name": "aiter",   "path": "/sgl-workspace/aiter", "pip_name": "amd-aiter"},
+]
+
+PIP_TRACKED_PACKAGES = [
+    "torch",
+    "transformers",
+    "flashinfer",
+    "triton",
+]
+
+HIGH_PRIORITY_LIBRARIES = ["sglang", "aiter", "triton", "flashinfer"]
