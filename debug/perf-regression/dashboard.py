@@ -433,6 +433,51 @@ async def get_alerts(
         conn.close()
 
 
+@app.get("/api/variant-comparison")
+async def variant_comparison(
+    build_date: str = Query(...),
+    rocm_version: Optional[str] = Query(None),
+):
+    """Return metrics for all variants of a specific build, for side-by-side comparison."""
+    conn = _get_conn()
+    try:
+        where = "br.build_date = ? AND br.status = 'completed'"
+        params: list = [build_date]
+        if rocm_version and rocm_version != "all":
+            where += " AND br.rocm_version = ?"
+            params.append(rocm_version)
+
+        runs = conn.execute(
+            f"""
+            SELECT br.id, br.model_name, br.image_tag, br.rocm_version
+            FROM benchmark_runs br WHERE {where}
+            ORDER BY br.model_name
+            """,
+            params,
+        ).fetchall()
+
+        result = []
+        for run in runs:
+            metrics = conn.execute(
+                "SELECT * FROM benchmark_metrics WHERE run_id = ? ORDER BY concurrency",
+                (run["id"],),
+            ).fetchall()
+            accuracy = conn.execute(
+                "SELECT accuracy_pct FROM accuracy_results WHERE run_id = ?",
+                (run["id"],),
+            ).fetchone()
+            result.append({
+                "model_name": run["model_name"],
+                "image_tag": run["image_tag"],
+                "rocm_version": run["rocm_version"],
+                "metrics": [dict(m) for m in metrics],
+                "accuracy_pct": accuracy["accuracy_pct"] if accuracy else None,
+            })
+        return JSONResponse(result)
+    finally:
+        conn.close()
+
+
 @app.get("/api/health")
 async def health():
     """System health check."""

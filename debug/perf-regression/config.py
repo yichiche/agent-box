@@ -69,8 +69,28 @@ TAG_REGEX = re.compile(
 
 # ── Benchmark settings ─────────────────────────────────────────────────────
 USE_SUDO_DOCKER = True
-MTP_MODE = True
+MTP_MODE = True  # Legacy: used by run_daily.sh; orchestrator uses TP_MTP_VARIANTS
 CONCURRENCIES = "1,2,4"
+
+# ── TP / MTP variant matrix ──────────────────────────────────────────────
+TP_MTP_VARIANTS = [
+    (2, False),   # TP2
+    (2, True),    # TP2+MTP
+    (4, False),   # TP4
+    (4, True),    # TP4+MTP
+    (8, False),   # TP8
+    (8, True),    # TP8+MTP
+]
+
+
+def variant_label(tp_size: int, mtp: bool) -> str:
+    """Human-readable variant label."""
+    return f"TP{tp_size}{'+MTP' if mtp else ''}"
+
+
+def variant_model_name(base_name: str, tp_size: int, mtp: bool) -> str:
+    """Unique model_name for DB tracking per variant."""
+    return f"{base_name}-{variant_label(tp_size, mtp)}"
 
 ACCURACY_MODE = True
 ACCURACY_NUM_QUESTIONS = 2000
