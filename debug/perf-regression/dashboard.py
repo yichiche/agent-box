@@ -53,6 +53,8 @@ async def get_models():
 async def chart_data(
     rocm_version: Optional[str] = Query(None),
     model_name: Optional[str] = Query(None),
+    tp_size: Optional[str] = Query(None),
+    mtp_enabled: Optional[str] = Query(None),
     days: int = Query(30),
     concurrency: Optional[str] = Query(None),
 ):
@@ -70,6 +72,14 @@ async def chart_data(
         if rocm_version and rocm_version != "all":
             where_parts.append("br.rocm_version = ?")
             params.append(rocm_version)
+
+        if tp_size and tp_size != "all":
+            where_parts.append("br.tp_size = ?")
+            params.append(int(tp_size))
+
+        if mtp_enabled and mtp_enabled != "all":
+            where_parts.append("br.mtp_enabled = ?")
+            params.append(int(mtp_enabled))
 
         if days > 0:
             where_parts.append(
@@ -259,6 +269,8 @@ async def chart_data(
 async def get_runs(
     rocm_version: Optional[str] = Query(None),
     model_name: Optional[str] = Query(None),
+    tp_size: Optional[str] = Query(None),
+    mtp_enabled: Optional[str] = Query(None),
     days: int = Query(30),
     limit: int = Query(100),
 ):
@@ -276,6 +288,14 @@ async def get_runs(
             where_parts.append("br.rocm_version = ?")
             params.append(rocm_version)
 
+        if tp_size and tp_size != "all":
+            where_parts.append("br.tp_size = ?")
+            params.append(int(tp_size))
+
+        if mtp_enabled and mtp_enabled != "all":
+            where_parts.append("br.mtp_enabled = ?")
+            params.append(int(mtp_enabled))
+
         if days > 0:
             where_parts.append(
                 f"br.build_date >= strftime('%Y%m%d', 'now', '-{days} days')"
@@ -287,7 +307,8 @@ async def get_runs(
         query = f"""
             SELECT
                 br.id, br.image_tag, br.sglang_version, br.rocm_version,
-                br.build_date, br.model_name, br.run_timestamp, br.status,
+                br.build_date, br.model_name, br.tp_size, br.mtp_enabled,
+                br.run_timestamp, br.status,
                 br.error_message, br.duration_total_sec
             FROM benchmark_runs br
             WHERE {where_clause}
@@ -388,6 +409,8 @@ async def version_diff_api(run_a: int = Query(...), run_b: int = Query(...)):
 async def get_alerts(
     rocm_version: Optional[str] = Query(None),
     model_name: Optional[str] = Query(None),
+    tp_size: Optional[str] = Query(None),
+    mtp_enabled: Optional[str] = Query(None),
     days: int = Query(30),
     acknowledged: Optional[bool] = Query(None),
 ):
@@ -405,6 +428,14 @@ async def get_alerts(
             where_parts.append("br.rocm_version = ?")
             params.append(rocm_version)
 
+        if tp_size and tp_size != "all":
+            where_parts.append("br.tp_size = ?")
+            params.append(int(tp_size))
+
+        if mtp_enabled and mtp_enabled != "all":
+            where_parts.append("br.mtp_enabled = ?")
+            params.append(int(mtp_enabled))
+
         if days > 0:
             where_parts.append(
                 f"br.build_date >= strftime('%Y%m%d', 'now', '-{days} days')"
@@ -421,7 +452,8 @@ async def get_alerts(
                 ra.id, ra.run_id, ra.metric_name, ra.concurrency,
                 ra.current_value, ra.baseline_value, ra.regression_pct,
                 ra.acknowledged, ra.created_at,
-                br.image_tag, br.build_date, br.rocm_version, br.sglang_version
+                br.image_tag, br.build_date, br.rocm_version, br.sglang_version,
+                br.tp_size, br.mtp_enabled
             FROM regression_alerts ra
             JOIN benchmark_runs br ON ra.run_id = br.id
             WHERE {where_clause}
@@ -449,9 +481,10 @@ async def variant_comparison(
 
         runs = conn.execute(
             f"""
-            SELECT br.id, br.model_name, br.image_tag, br.rocm_version
+            SELECT br.id, br.model_name, br.image_tag, br.rocm_version,
+                   br.tp_size, br.mtp_enabled
             FROM benchmark_runs br WHERE {where}
-            ORDER BY br.model_name
+            ORDER BY br.tp_size, br.mtp_enabled
             """,
             params,
         ).fetchall()
@@ -470,6 +503,8 @@ async def variant_comparison(
                 "model_name": run["model_name"],
                 "image_tag": run["image_tag"],
                 "rocm_version": run["rocm_version"],
+                "tp_size": run["tp_size"],
+                "mtp_enabled": run["mtp_enabled"],
                 "metrics": [dict(m) for m in metrics],
                 "accuracy_pct": accuracy["accuracy_pct"] if accuracy else None,
             })

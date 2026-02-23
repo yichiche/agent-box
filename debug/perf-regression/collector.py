@@ -23,12 +23,14 @@ CREATE TABLE IF NOT EXISTS benchmark_runs (
     rocm_version TEXT,
     build_date TEXT,
     model_name TEXT NOT NULL,
+    tp_size INTEGER NOT NULL DEFAULT 8,
+    mtp_enabled INTEGER NOT NULL DEFAULT 1,
     run_timestamp TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     error_message TEXT,
     result_dir TEXT,
     duration_total_sec REAL,
-    UNIQUE(image_tag, model_name)
+    UNIQUE(image_tag, model_name, tp_size, mtp_enabled)
 );
 
 CREATE TABLE IF NOT EXISTS benchmark_metrics (
@@ -110,6 +112,20 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+def _migrate_add_tp_mtp_columns(conn: sqlite3.Connection) -> None:
+    """Add tp_size and mtp_enabled columns if they don't exist (schema migration)."""
+    cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(benchmark_runs)").fetchall()
+    }
+    if "tp_size" not in cols:
+        conn.execute("ALTER TABLE benchmark_runs ADD COLUMN tp_size INTEGER NOT NULL DEFAULT 8")
+        logger.info("Migrated: added tp_size column to benchmark_runs")
+    if "mtp_enabled" not in cols:
+        conn.execute("ALTER TABLE benchmark_runs ADD COLUMN mtp_enabled INTEGER NOT NULL DEFAULT 1")
+        logger.info("Migrated: added mtp_enabled column to benchmark_runs")
+    conn.commit()
+
+
 def init_db(conn: Optional[sqlite3.Connection] = None) -> None:
     """Create tables if they don't exist."""
     close = False
@@ -117,17 +133,24 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> None:
         conn = get_connection()
         close = True
     conn.executescript(SCHEMA_SQL)
+    _migrate_add_tp_mtp_columns(conn)
     conn.commit()
     if close:
         conn.close()
     logger.info("Database initialized: %s", DB_PATH)
 
 
-def is_already_benchmarked(conn: sqlite3.Connection, image_tag: str) -> bool:
+def is_already_benchmarked(
+    conn: sqlite3.Connection,
+    image_tag: str,
+    tp_size: int = 8,
+    mtp_enabled: bool = True,
+) -> bool:
     """Check if this image already has a completed benchmark with existing results."""
     row = conn.execute(
-        "SELECT status, result_dir FROM benchmark_runs WHERE image_tag = ? AND model_name = ?",
-        (image_tag, _cfg.MODEL_NAME),
+        "SELECT status, result_dir FROM benchmark_runs "
+        "WHERE image_tag = ? AND model_name = ? AND tp_size = ? AND mtp_enabled = ?",
+        (image_tag, _cfg.MODEL_NAME, tp_size, int(mtp_enabled)),
     ).fetchone()
     if row is None or row["status"] != "completed":
         return False
@@ -147,15 +170,18 @@ def create_run(
     build_date: str,
     result_dir: str,
     status: str = "running",
+    tp_size: int = 8,
+    mtp_enabled: bool = True,
 ) -> int:
     """Create or reset a benchmark_runs record and return its ID.
 
-    If a previous record exists for this image+model, reset it
+    If a previous record exists for this image+model+tp+mtp, reset it
     instead of inserting a duplicate.
     """
     existing = conn.execute(
-        "SELECT id, status FROM benchmark_runs WHERE image_tag = ? AND model_name = ?",
-        (image_tag, _cfg.MODEL_NAME),
+        "SELECT id, status FROM benchmark_runs "
+        "WHERE image_tag = ? AND model_name = ? AND tp_size = ? AND mtp_enabled = ?",
+        (image_tag, _cfg.MODEL_NAME, tp_size, int(mtp_enabled)),
     ).fetchone()
 
     now = datetime.now(timezone.utc).isoformat()
@@ -182,14 +208,16 @@ def create_run(
     cur = conn.execute(
         """INSERT INTO benchmark_runs
            (image_tag, sglang_version, rocm_version, build_date,
-            model_name, run_timestamp, status, result_dir)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            model_name, tp_size, mtp_enabled, run_timestamp, status, result_dir)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             image_tag,
             sglang_version,
             rocm_version,
             build_date,
             _cfg.MODEL_NAME,
+            tp_size,
+            int(mtp_enabled),
             now,
             status,
             result_dir,
