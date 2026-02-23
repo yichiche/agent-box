@@ -12,7 +12,7 @@ BENCH_SCRIPT = str(AGENT_BOX_DIR / "benchmark" / "run-local-benchmark-e2e.sh")
 
 # ── Model defaults (overridden by saved config or CLI args) ───────────────
 _DEFAULT_MODEL_PATH = "/raid/models/DeepSeek-R1-MXFP4-Preview/"
-_DEFAULT_MODEL_NAME = "DeepSeek-R1-MXFP4"
+_DEFAULT_MODEL_NAME = Path(_DEFAULT_MODEL_PATH).name or Path(_DEFAULT_MODEL_PATH).parent.name
 _CONFIG_FILE = AGENT_BOX_DIR / ".bench_config"
 
 

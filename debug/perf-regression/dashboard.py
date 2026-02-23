@@ -36,9 +36,23 @@ async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 
+@app.get("/api/models")
+async def get_models():
+    """Return distinct model names from the database."""
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT model_name FROM benchmark_runs ORDER BY model_name"
+        ).fetchall()
+        return JSONResponse([r["model_name"] for r in rows])
+    finally:
+        conn.close()
+
+
 @app.get("/api/chart-data")
 async def chart_data(
     rocm_version: Optional[str] = Query(None),
+    model_name: Optional[str] = Query(None),
     days: int = Query(30),
     concurrency: Optional[str] = Query(None),
 ):
@@ -48,6 +62,10 @@ async def chart_data(
         # Build WHERE clause
         where_parts = ["br.status = 'completed'"]
         params: list = []
+
+        if model_name and model_name != "all":
+            where_parts.append("br.model_name = ?")
+            params.append(model_name)
 
         if rocm_version and rocm_version != "all":
             where_parts.append("br.rocm_version = ?")
@@ -247,10 +265,12 @@ async def get_runs(
     """Return run history."""
     conn = _get_conn()
     try:
-        # Default to the configured model so different model runs don't mix
-        effective_model = model_name or _cfg.MODEL_NAME
-        where_parts = ["br.model_name = ?"]
-        params: list = [effective_model]
+        where_parts = []
+        params: list = []
+
+        if model_name and model_name != "all":
+            where_parts.append("br.model_name = ?")
+            params.append(model_name)
 
         if rocm_version and rocm_version != "all":
             where_parts.append("br.rocm_version = ?")
@@ -261,7 +281,7 @@ async def get_runs(
                 f"br.build_date >= strftime('%Y%m%d', 'now', '-{days} days')"
             )
 
-        where_clause = " AND ".join(where_parts)
+        where_clause = " AND ".join(where_parts) if where_parts else "1=1"
         params.append(limit)
 
         query = f"""
@@ -327,6 +347,30 @@ async def get_versions(run_id: int):
         conn.close()
 
 
+@app.delete("/api/runs/{run_id}")
+async def delete_run(run_id: int):
+    """Delete a benchmark run and all related data."""
+    conn = _get_conn()
+    try:
+        # Check the run exists
+        row = conn.execute(
+            "SELECT id, image_tag FROM benchmark_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        if not row:
+            return JSONResponse({"error": "Run not found"}, status_code=404)
+
+        conn.execute("DELETE FROM version_snapshots WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM regression_alerts WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM accuracy_results WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM benchmark_metrics WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM benchmark_runs WHERE id = ?", (run_id,))
+        conn.commit()
+        logger.info("Deleted run id=%d (%s)", run_id, row["image_tag"])
+        return JSONResponse({"ok": True})
+    finally:
+        conn.close()
+
+
 @app.get("/api/version-diff")
 async def version_diff_api(run_a: int = Query(...), run_b: int = Query(...)):
     """Compare versions between two runs."""
@@ -343,6 +387,7 @@ async def version_diff_api(run_a: int = Query(...), run_b: int = Query(...)):
 @app.get("/api/alerts")
 async def get_alerts(
     rocm_version: Optional[str] = Query(None),
+    model_name: Optional[str] = Query(None),
     days: int = Query(30),
     acknowledged: Optional[bool] = Query(None),
 ):
@@ -351,6 +396,10 @@ async def get_alerts(
     try:
         where_parts = ["1=1"]
         params: list = []
+
+        if model_name and model_name != "all":
+            where_parts.append("br.model_name = ?")
+            params.append(model_name)
 
         if rocm_version and rocm_version != "all":
             where_parts.append("br.rocm_version = ?")
