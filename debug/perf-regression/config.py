@@ -88,10 +88,6 @@ def variant_label(tp_size: int, mtp: bool) -> str:
     return f"TP{tp_size}{'+MTP' if mtp else ''}"
 
 
-def variant_model_name(base_name: str, tp_size: int, mtp: bool) -> str:
-    """Unique model_name for DB tracking per variant."""
-    return f"{base_name}-{variant_label(tp_size, mtp)}"
-
 ACCURACY_MODE = True
 ACCURACY_NUM_QUESTIONS = 2000
 ACCURACY_PARALLEL = 1000

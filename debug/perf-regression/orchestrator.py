@@ -36,7 +36,6 @@ from config import (
     save_model_config,
     TP_MTP_VARIANTS,
     variant_label,
-    variant_model_name,
 )
 from collector import get_connection, init_db, is_already_benchmarked, create_run, update_run_status, ingest_run
 from discover import discover_images
@@ -498,14 +497,13 @@ def process_image(conn, image_info, dry_run: bool = False, variants=None) -> boo
     """Process a single image: pull, benchmark, collect, detect regressions.
 
     Iterates over all TP/MTP variants (or a filtered subset), tracking
-    results independently per variant via distinct model_name values.
+    results independently per variant via tp_size/mtp_enabled columns.
     Returns True if all variants succeed.
     """
     global _active_container, _active_run_id, _active_conn
 
     tag = image_info.full_tag
     image = image_info.full_image
-    base_model_name = _cfg.MODEL_NAME
     all_success = True
     active_variants = variants or TP_MTP_VARIANTS
 
@@ -519,106 +517,101 @@ def process_image(conn, image_info, dry_run: bool = False, variants=None) -> boo
 
     for tp_size, mtp in active_variants:
         label = variant_label(tp_size, mtp)
-        vmodel = variant_model_name(base_model_name, tp_size, mtp)
 
-        saved_name = _cfg.MODEL_NAME
-        _cfg.MODEL_NAME = vmodel
+        if is_already_benchmarked(conn, tag, tp_size=tp_size, mtp_enabled=mtp):
+            logger.info("Skipping %s [%s] (already benchmarked)", tag, label)
+            continue
+
+        if dry_run:
+            logger.info("[DRY RUN] Would benchmark: %s [%s]", image, label)
+            continue
+
+        result_dir = BENCHMARK_RUNS_DIR / f"{tag}_{label}"
+        run_id = None
+        container_name = ""
+        _active_conn = conn
+
         try:
-            if is_already_benchmarked(conn, tag):
-                logger.info("Skipping %s [%s] (already benchmarked)", tag, label)
-                continue
+            # Clean up stale result dir from a previous failed attempt
+            if result_dir.exists():
+                logger.info("Removing stale result dir: %s", result_dir)
+                shutil.rmtree(result_dir)
 
-            if dry_run:
-                logger.info("[DRY RUN] Would benchmark: %s [%s]", image, label)
-                continue
+            # Create DB record
+            run_id = create_run(
+                conn,
+                image_tag=tag,
+                sglang_version=image_info.sglang_version,
+                rocm_version=image_info.rocm_version,
+                build_date=image_info.build_date,
+                result_dir=str(result_dir),
+                status="running",
+                tp_size=tp_size,
+                mtp_enabled=mtp,
+            )
+            _active_run_id = run_id
 
-            result_dir = BENCHMARK_RUNS_DIR / f"{tag}_{label}"
-            run_id = None
-            container_name = ""
-            _active_conn = conn
+            # Run benchmark
+            start_time = time.monotonic()
+            stdout, container_name = run_benchmark(
+                image, result_dir, tp_size=tp_size, mtp=mtp
+            )
+            duration = time.monotonic() - start_time
 
-            try:
-                # Clean up stale result dir from a previous failed attempt
-                if result_dir.exists():
-                    logger.info("Removing stale result dir: %s", result_dir)
-                    shutil.rmtree(result_dir)
+            # Ingest results
+            ingest_run(conn, run_id, result_dir)
 
-                # Create DB record
-                run_id = create_run(
-                    conn,
-                    image_tag=tag,
-                    sglang_version=image_info.sglang_version,
-                    rocm_version=image_info.rocm_version,
-                    build_date=image_info.build_date,
-                    result_dir=str(result_dir),
-                    status="running",
-                )
-                _active_run_id = run_id
+            # Detect regressions
+            alerts = detect_regressions(conn, run_id)
+            if alerts:
+                for a in alerts:
+                    logger.warning(
+                        "REGRESSION [%s]: %s (c=%s): %.2f vs baseline %.2f (%.1f%%)",
+                        label,
+                        a["metric_name"],
+                        a.get("concurrency", "N/A"),
+                        a["current_value"],
+                        a["baseline_value"],
+                        a["regression_pct"],
+                    )
 
-                # Run benchmark
-                start_time = time.monotonic()
-                stdout, container_name = run_benchmark(
-                    image, result_dir, tp_size=tp_size, mtp=mtp
-                )
-                duration = time.monotonic() - start_time
+            # Mark completed
+            update_run_status(conn, run_id, "completed", duration_total_sec=duration)
+            logger.info("Completed benchmark for %s [%s] in %.1f sec", tag, label, duration)
 
-                # Ingest results
-                ingest_run(conn, run_id, result_dir)
+        except subprocess.TimeoutExpired as e:
+            msg = f"Benchmark timed out [{label}]: {e}"
+            logger.error(msg)
+            if run_id:
+                update_run_status(conn, run_id, "failed", error_message=msg)
+            all_success = False
 
-                # Detect regressions
-                alerts = detect_regressions(conn, run_id)
-                if alerts:
-                    for a in alerts:
-                        logger.warning(
-                            "REGRESSION [%s]: %s (c=%s): %.2f vs baseline %.2f (%.1f%%)",
-                            label,
-                            a["metric_name"],
-                            a.get("concurrency", "N/A"),
-                            a["current_value"],
-                            a["baseline_value"],
-                            a["regression_pct"],
-                        )
+        except subprocess.CalledProcessError as e:
+            output_tail = (e.output or e.stderr or '')[-500:]
+            log_path = result_dir / "orchestrator_output.log"
+            msg = f"Benchmark failed [{label}] (rc={e.returncode}): {output_tail}"
+            logger.error(msg)
+            if log_path.exists():
+                logger.error("Full output log: %s", log_path)
+            if run_id:
+                update_run_status(conn, run_id, "failed", error_message=msg)
+            all_success = False
 
-                # Mark completed
-                update_run_status(conn, run_id, "completed", duration_total_sec=duration)
-                logger.info("Completed benchmark for %s [%s] in %.1f sec", tag, label, duration)
-
-            except subprocess.TimeoutExpired as e:
-                msg = f"Benchmark timed out [{label}]: {e}"
-                logger.error(msg)
-                if run_id:
-                    update_run_status(conn, run_id, "failed", error_message=msg)
-                all_success = False
-
-            except subprocess.CalledProcessError as e:
-                output_tail = (e.output or e.stderr or '')[-500:]
-                log_path = result_dir / "orchestrator_output.log"
-                msg = f"Benchmark failed [{label}] (rc={e.returncode}): {output_tail}"
-                logger.error(msg)
-                if log_path.exists():
-                    logger.error("Full output log: %s", log_path)
-                if run_id:
-                    update_run_status(conn, run_id, "failed", error_message=msg)
-                all_success = False
-
-            except Exception as e:
-                msg = f"Unexpected error [{label}]: {e}"
-                logger.error(msg, exc_info=True)
-                if run_id:
-                    update_run_status(conn, run_id, "failed", error_message=msg)
-                all_success = False
-
-            finally:
-                cname = container_name or _active_container
-                if cname and run_id:
-                    _salvage_version_snapshot(conn, run_id, cname, result_dir)
-                cleanup_container(cname)
-                _active_container = ""
-                _active_run_id = None
-                _active_conn = None
+        except Exception as e:
+            msg = f"Unexpected error [{label}]: {e}"
+            logger.error(msg, exc_info=True)
+            if run_id:
+                update_run_status(conn, run_id, "failed", error_message=msg)
+            all_success = False
 
         finally:
-            _cfg.MODEL_NAME = saved_name
+            cname = container_name or _active_container
+            if cname and run_id:
+                _salvage_version_snapshot(conn, run_id, cname, result_dir)
+            cleanup_container(cname)
+            _active_container = ""
+            _active_run_id = None
+            _active_conn = None
 
     return all_success
 
@@ -777,11 +770,11 @@ def main():
             rerun_variants = active_variants or TP_MTP_VARIANTS
             for tag in args.force_rerun:
                 for tp, mtp in rerun_variants:
-                    vmodel = variant_model_name(_cfg.MODEL_NAME, tp, mtp)
                     logger.info("Force re-running: %s [%s]", tag, variant_label(tp, mtp))
                     conn.execute(
-                        "DELETE FROM benchmark_runs WHERE image_tag = ? AND model_name = ?",
-                        (tag, vmodel),
+                        "DELETE FROM benchmark_runs "
+                        "WHERE image_tag = ? AND model_name = ? AND tp_size = ? AND mtp_enabled = ?",
+                        (tag, _cfg.MODEL_NAME, tp, int(mtp)),
                     )
             conn.commit()
 
