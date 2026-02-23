@@ -33,6 +33,12 @@
             </select>
         </div>
         <div class="filter-group">
+            <label>Model:</label>
+            <select id="filter-model">
+                <option value="all">All</option>
+            </select>
+        </div>
+        <div class="filter-group">
             <label>Concurrency:</label>
             <select id="filter-concurrency">
                 <option value="all">All</option>
@@ -74,6 +80,28 @@
     </div>
 
     <div class="tables-section">
+        <h2>Run History</h2>
+        <table id="runs-table">
+            <thead>
+                <tr>
+                    <th>Build Date</th>
+                    <th>Image Tag</th>
+                    <th>Model</th>
+                    <th>SGLang</th>
+                    <th>ROCm</th>
+                    <th>Status</th>
+                    <th>Duration</th>
+                    <th>Accuracy</th>
+                    <th>Versions</th>
+                    <th>Details</th>
+                    <th>Delete</th>
+                </tr>
+            </thead>
+            <tbody id="runs-body">
+                <tr><td colspan="11" class="empty">Loading...</td></tr>
+            </tbody>
+        </table>
+
         <h2>Regression Alerts</h2>
         <table id="alerts-table">
             <thead>
@@ -93,26 +121,6 @@
                 <tr><td colspan="9" class="empty">Loading...</td></tr>
             </tbody>
         </table>
-
-        <h2>Run History</h2>
-        <table id="runs-table">
-            <thead>
-                <tr>
-                    <th>Build Date</th>
-                    <th>Image Tag</th>
-                    <th>SGLang</th>
-                    <th>ROCm</th>
-                    <th>Status</th>
-                    <th>Duration</th>
-                    <th>Accuracy</th>
-                    <th>Versions</th>
-                    <th>Details</th>
-                </tr>
-            </thead>
-            <tbody id="runs-body">
-                <tr><td colspan="9" class="empty">Loading...</td></tr>
-            </tbody>
-        </table>
     </div>
 
     <script>
@@ -127,6 +135,7 @@
             return {
                 days: document.getElementById('filter-days').value,
                 rocm_version: document.getElementById('filter-rocm').value,
+                model_name: document.getElementById('filter-model').value,
                 concurrency: document.getElementById('filter-concurrency').value,
             };
         }
@@ -136,6 +145,7 @@
             const params = new URLSearchParams({
                 days: f.days,
                 rocm_version: f.rocm_version,
+                model_name: f.model_name,
                 concurrency: f.concurrency,
             });
             const resp = await fetch(`/api/chart-data?${params}`);
@@ -147,6 +157,7 @@
             const params = new URLSearchParams({
                 days: f.days,
                 rocm_version: f.rocm_version,
+                model_name: f.model_name,
             });
             const resp = await fetch(`/api/alerts?${params}`);
             return await resp.json();
@@ -157,6 +168,7 @@
             const params = new URLSearchParams({
                 days: f.days,
                 rocm_version: f.rocm_version,
+                model_name: f.model_name,
             });
             const resp = await fetch(`/api/runs?${params}`);
             return await resp.json();
@@ -254,7 +266,7 @@
         function renderRuns(runs) {
             const tbody = document.getElementById('runs-body');
             if (!runs || runs.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="9" class="empty">No benchmark runs</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="11" class="empty">No benchmark runs</td></tr>';
                 return;
             }
             tbody.innerHTML = runs.map(r => {
@@ -268,7 +280,7 @@
                 let metricsHtml = '';
                 if (r.metrics && r.metrics.length > 0) {
                     metricsHtml = `<tr id="${metricsId}" class="metrics-detail" style="display:none">
-                        <td colspan="9">
+                        <td colspan="11">
                             <table class="inner-table">
                                 <thead>
                                     <tr>
@@ -301,7 +313,7 @@
                 if (r.versions && r.versions.length > 0) {
                     const versionsId = `versions-${r.id}`;
                     versionsHtml = `<tr id="${versionsId}" class="metrics-detail" style="display:none">
-                        <td colspan="9">
+                        <td colspan="11">
                             <table class="inner-table">
                                 <thead>
                                     <tr>
@@ -327,6 +339,7 @@
                 return `<tr>
                     <td>${date}</td>
                     <td class="tag-cell" title="${r.image_tag}">${r.image_tag}</td>
+                    <td>${r.model_name || '-'}</td>
                     <td>${r.sglang_version || '-'}</td>
                     <td>${r.rocm_version || '-'}</td>
                     <td><span class="${statusClass}">${r.status}</span></td>
@@ -336,8 +349,22 @@
                         `<button class="btn-expand" onclick="toggleMetrics('versions-${r.id}', this)">Show</button>` : '-'}</td>
                     <td>${r.metrics && r.metrics.length > 0 ?
                         `<button class="btn-expand" onclick="toggleMetrics('${metricsId}', this)">Show</button>` : '-'}</td>
+                    <td><button class="btn-expand" onclick="deleteRun(${r.id}, '${r.image_tag}', this)">Delete</button></td>
                 </tr>${metricsHtml}${versionsHtml}`;
             }).join('');
+        }
+
+        async function deleteRun(runId, imageTag, btn) {
+            if (!confirm(`Delete run ${imageTag}?`)) return;
+            btn.textContent = '...';
+            try {
+                const resp = await fetch(`/api/runs/${runId}`, { method: 'DELETE' });
+                if (!resp.ok) throw new Error('Delete failed');
+                refreshAll();
+            } catch (err) {
+                alert('Failed to delete run: ' + err.message);
+                btn.textContent = 'Delete';
+            }
         }
 
         function toggleMetrics(id, btn) {
@@ -352,7 +379,7 @@
         async function compareVersions(runId, rocmVersion, btn) {
             // Find the previous completed run with the same rocm_version
             const f = getFilters();
-            const params = new URLSearchParams({ days: f.days, rocm_version: rocmVersion });
+            const params = new URLSearchParams({ days: f.days, rocm_version: rocmVersion, model_name: f.model_name });
             const runs = await (await fetch(`/api/runs?${params}`)).json();
             const completedRuns = runs.filter(r => r.status === 'completed').sort((a, b) => a.build_date.localeCompare(b.build_date));
             const currentIdx = completedRuns.findIndex(r => r.id === runId);
@@ -423,12 +450,31 @@
             document.getElementById('btn-refresh').textContent = 'Refresh';
         }
 
+        // Populate model filter dropdown from DB
+        async function loadModels() {
+            try {
+                const resp = await fetch('/api/models');
+                const models = await resp.json();
+                const select = document.getElementById('filter-model');
+                models.forEach(m => {
+                    const opt = document.createElement('option');
+                    opt.value = m;
+                    opt.textContent = m;
+                    select.appendChild(opt);
+                });
+            } catch (err) {
+                console.error('Failed to load models:', err);
+            }
+        }
+
         // Auto-refresh on filter change
         document.getElementById('filter-days').addEventListener('change', refreshAll);
         document.getElementById('filter-rocm').addEventListener('change', refreshAll);
+        document.getElementById('filter-model').addEventListener('change', refreshAll);
         document.getElementById('filter-concurrency').addEventListener('change', refreshAll);
 
         // Initial load
+        loadModels();
         refreshAll();
         // Auto-refresh every 5 minutes
         setInterval(refreshAll, 300000);
