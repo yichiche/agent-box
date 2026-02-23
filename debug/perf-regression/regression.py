@@ -27,7 +27,7 @@ def detect_regressions(
     """
     # Get current run info
     run = conn.execute(
-        "SELECT id, rocm_version, build_date FROM benchmark_runs WHERE id = ?",
+        "SELECT id, rocm_version, build_date, model_name FROM benchmark_runs WHERE id = ?",
         (run_id,),
     ).fetchone()
     if run is None:
@@ -35,6 +35,7 @@ def detect_regressions(
         return []
 
     rocm_version = run["rocm_version"]
+    model_name = run["model_name"]
     alerts = []
 
     # Get concurrencies for this run
@@ -51,13 +52,13 @@ def detect_regressions(
 
         for conc in concurrencies:
             alert = _check_metric_regression(
-                conn, run_id, rocm_version, metric_name, conc, direction, threshold
+                conn, run_id, rocm_version, model_name, metric_name, conc, direction, threshold
             )
             if alert:
                 alerts.append(alert)
 
     # Check accuracy regression
-    accuracy_alert = _check_accuracy_regression(conn, run_id, rocm_version)
+    accuracy_alert = _check_accuracy_regression(conn, run_id, rocm_version, model_name)
     if accuracy_alert:
         alerts.append(accuracy_alert)
 
@@ -90,6 +91,7 @@ def _check_metric_regression(
     conn: sqlite3.Connection,
     run_id: int,
     rocm_version: str,
+    model_name: str,
     metric_name: str,
     concurrency: int,
     direction: str,
@@ -105,7 +107,7 @@ def _check_metric_regression(
         return None
     current_value = current_row[metric_name]
 
-    # Get previous N completed runs (same rocm_version, before this run's build date)
+    # Get previous N completed runs (same rocm_version and model_name, before this run's build date)
     build_date = conn.execute(
         "SELECT build_date FROM benchmark_runs WHERE id = ?", (run_id,)
     ).fetchone()["build_date"]
@@ -115,13 +117,14 @@ def _check_metric_regression(
             FROM benchmark_metrics bm
             JOIN benchmark_runs br ON bm.run_id = br.id
             WHERE br.rocm_version = ?
+              AND br.model_name = ?
               AND br.status = 'completed'
               AND br.build_date < ?
               AND bm.concurrency = ?
               AND bm.{metric_name} IS NOT NULL
             ORDER BY br.build_date DESC
             LIMIT ?""",
-        (rocm_version, build_date, concurrency, REGRESSION_WINDOW),
+        (rocm_version, model_name, build_date, concurrency, REGRESSION_WINDOW),
     ).fetchall()
 
     if len(previous_values) < 2:
@@ -164,6 +167,7 @@ def _check_accuracy_regression(
     conn: sqlite3.Connection,
     run_id: int,
     rocm_version: str,
+    model_name: str,
 ) -> Optional[dict]:
     """Check if accuracy has regressed beyond the threshold."""
     current_row = conn.execute(
@@ -183,12 +187,13 @@ def _check_accuracy_regression(
            FROM accuracy_results ar
            JOIN benchmark_runs br ON ar.run_id = br.id
            WHERE br.rocm_version = ?
+             AND br.model_name = ?
              AND br.status = 'completed'
              AND br.build_date < ?
              AND ar.accuracy_pct IS NOT NULL
            ORDER BY br.build_date DESC
            LIMIT ?""",
-        (rocm_version, build_date, REGRESSION_WINDOW),
+        (rocm_version, model_name, build_date, REGRESSION_WINDOW),
     ).fetchall()
 
     if len(previous_values) < 2:

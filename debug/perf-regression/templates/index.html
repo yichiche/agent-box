@@ -80,6 +80,30 @@
     </div>
 
     <div class="tables-section">
+        <h2>Variant Comparison</h2>
+        <div class="filter-group" style="margin-bottom: 12px;">
+            <label>Build Date:</label>
+            <select id="variant-build-date"></select>
+            <button class="btn-expand" onclick="loadVariantComparison()">Compare</button>
+        </div>
+        <table id="variant-table">
+            <thead>
+                <tr>
+                    <th>Variant</th>
+                    <th>Conc.</th>
+                    <th>Out Throughput</th>
+                    <th>Total Throughput</th>
+                    <th>Med E2E (ms)</th>
+                    <th>Med TTFT (ms)</th>
+                    <th>Med ITL (ms)</th>
+                    <th>Accuracy</th>
+                </tr>
+            </thead>
+            <tbody id="variant-body">
+                <tr><td colspan="8" class="empty">Select a build date to compare variants</td></tr>
+            </tbody>
+        </table>
+
         <h2>Run History</h2>
         <table id="runs-table">
             <thead>
@@ -467,6 +491,64 @@
             }
         }
 
+        async function loadBuildDates() {
+            try {
+                const runs = await fetchRuns();
+                const dates = [...new Set(runs.map(r => r.build_date))].sort().reverse();
+                const select = document.getElementById('variant-build-date');
+                select.innerHTML = '';
+                dates.forEach(d => {
+                    const opt = document.createElement('option');
+                    opt.value = d;
+                    opt.textContent = `${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6)}`;
+                    select.appendChild(opt);
+                });
+            } catch (err) {
+                console.error('Failed to load build dates:', err);
+            }
+        }
+
+        async function loadVariantComparison() {
+            const buildDate = document.getElementById('variant-build-date').value;
+            if (!buildDate) return;
+            const rocm = document.getElementById('filter-rocm').value;
+            const params = new URLSearchParams({ build_date: buildDate });
+            if (rocm !== 'all') params.set('rocm_version', rocm);
+
+            const resp = await fetch(`/api/variant-comparison?${params}`);
+            const data = await resp.json();
+
+            const tbody = document.getElementById('variant-body');
+            if (!data.length) {
+                tbody.innerHTML = '<tr><td colspan="8" class="empty">No data for this build date</td></tr>';
+                return;
+            }
+
+            let html = '';
+            for (const variant of data) {
+                // Extract variant suffix (e.g. TP2, TP8+MTP) from model_name
+                const parts = variant.model_name.split('-');
+                const name = parts[parts.length - 1];
+                if (variant.metrics.length === 0) {
+                    html += `<tr><td>${name}</td><td colspan="6">-</td><td>${variant.accuracy_pct ? variant.accuracy_pct.toFixed(1) + '%' : '-'}</td></tr>`;
+                    continue;
+                }
+                for (const m of variant.metrics) {
+                    html += `<tr>
+                        <td>${name}</td>
+                        <td>${m.concurrency}</td>
+                        <td>${m.output_throughput ? m.output_throughput.toFixed(1) : '-'}</td>
+                        <td>${m.total_throughput ? m.total_throughput.toFixed(1) : '-'}</td>
+                        <td>${m.median_e2e_latency_ms ? m.median_e2e_latency_ms.toFixed(1) : '-'}</td>
+                        <td>${m.median_ttft_ms ? m.median_ttft_ms.toFixed(1) : '-'}</td>
+                        <td>${m.median_itl_ms ? m.median_itl_ms.toFixed(1) : '-'}</td>
+                        <td>${variant.accuracy_pct ? variant.accuracy_pct.toFixed(1) + '%' : '-'}</td>
+                    </tr>`;
+                }
+            }
+            tbody.innerHTML = html;
+        }
+
         // Auto-refresh on filter change
         document.getElementById('filter-days').addEventListener('change', refreshAll);
         document.getElementById('filter-rocm').addEventListener('change', refreshAll);
@@ -475,6 +557,7 @@
 
         // Initial load
         loadModels();
+        loadBuildDates();
         refreshAll();
         // Auto-refresh every 5 minutes
         setInterval(refreshAll, 300000);
