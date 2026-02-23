@@ -643,9 +643,10 @@ def main():
     parser.add_argument(
         "--force-rerun",
         type=str,
-        nargs="+",
+        nargs="*",
         default=None,
-        help="Force re-run one or more image tags (deletes existing records)",
+        help="Force re-run image tags (deletes existing records). "
+        "If no tags specified, re-runs all images found in --lookback-days.",
     )
     args = parser.parse_args()
 
@@ -720,12 +721,26 @@ def main():
         conn = get_connection()
         init_db(conn)
 
+        # Discover images
+        images = discover_images(
+            lookback_days=args.lookback_days,
+            rocm_versions=args.rocm_versions,
+        )
+
         # Handle force-rerun
         # Normalize tags: strip "repo:" prefix if present so they match DB values
-        if args.force_rerun:
-            args.force_rerun = [
-                t.split(":")[-1] if ":" in t else t for t in args.force_rerun
-            ]
+        # When --force-rerun is given with no args, re-run all discovered images
+        if args.force_rerun is not None:
+            if args.force_rerun:
+                args.force_rerun = [
+                    t.split(":")[-1] if ":" in t else t for t in args.force_rerun
+                ]
+            else:
+                args.force_rerun = [img.full_tag for img in images]
+                logger.info(
+                    "No tags specified for --force-rerun, re-running all %d discovered image(s)",
+                    len(args.force_rerun),
+                )
             for tag in args.force_rerun:
                 logger.info("Force re-running: %s", tag)
                 conn.execute(
@@ -733,12 +748,6 @@ def main():
                     (tag, _cfg.MODEL_NAME),
                 )
             conn.commit()
-
-        # Discover images
-        images = discover_images(
-            lookback_days=args.lookback_days,
-            rocm_versions=args.rocm_versions,
-        )
 
         if not images:
             logger.info("No images found. Nothing to do.")
