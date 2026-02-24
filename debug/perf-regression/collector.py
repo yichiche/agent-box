@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -141,6 +142,17 @@ def _migrate_drop_unique_constraint(conn: sqlite3.Connection) -> None:
     if table_sql is None:
         return
     if "UNIQUE" not in table_sql[0]:
+        return
+
+    # Safety guard: renaming/dropping a parent table in SQLite can rewrite child
+    # FK targets (e.g., to benchmark_runs_old) and cascade-delete child rows.
+    # Keep data safe by default; allow explicit opt-in for one-time migration.
+    if os.getenv("PERF_REGRESSION_ENABLE_UNSAFE_UNIQUE_MIGRATION") != "1":
+        logger.warning(
+            "Skipping UNIQUE-constraint migration for benchmark_runs to avoid "
+            "potential child-table data loss. "
+            "Set PERF_REGRESSION_ENABLE_UNSAFE_UNIQUE_MIGRATION=1 to force."
+        )
         return
 
     logger.info("Migrating benchmark_runs: dropping UNIQUE constraint...")
