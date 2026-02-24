@@ -462,6 +462,30 @@ async def get_versions(run_id: int):
         conn.close()
 
 
+@app.get("/api/runs/{run_id}/server-log")
+async def get_server_log(run_id: int, tail: int = Query(200)):
+    """Return the last N lines of the server.log for a failed run."""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT result_dir, status FROM benchmark_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if not row:
+            return JSONResponse({"error": "Run not found"}, status_code=404)
+        result_dir = row["result_dir"]
+        if not result_dir:
+            return JSONResponse({"log": None, "reason": "No result directory recorded"})
+        log_path = Path(result_dir) / "server.log"
+        if not log_path.exists():
+            return JSONResponse({"log": None, "reason": f"server.log not found in {result_dir}"})
+        lines = log_path.read_text(errors="replace").splitlines()
+        tail_lines = lines[-tail:] if len(lines) > tail else lines
+        return JSONResponse({"log": "\n".join(tail_lines)})
+    finally:
+        conn.close()
+
+
 @app.delete("/api/runs/{run_id}")
 async def delete_run(run_id: int):
     """Delete a benchmark run and all related data."""
