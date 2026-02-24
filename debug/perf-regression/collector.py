@@ -128,6 +128,18 @@ def _migrate_add_tp_mtp_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _has_legacy_unique_constraint(conn: sqlite3.Connection) -> bool:
+    """Return True if benchmark_runs still has legacy UNIQUE(image_tag,model,tp,mtp)."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='benchmark_runs'"
+    ).fetchone()
+    if row is None or row[0] is None:
+        return False
+    normalized = re.sub(r"\s+", "", row[0]).lower()
+    normalized = normalized.replace('"', "").replace("`", "")
+    return "unique(image_tag,model_name,tp_size,mtp_enabled)" in normalized
+
+
 def _migrate_drop_unique_constraint(conn: sqlite3.Connection) -> None:
     """Remove UNIQUE(image_tag, model_name, tp_size, mtp_enabled) from benchmark_runs.
 
@@ -138,12 +150,7 @@ def _migrate_drop_unique_constraint(conn: sqlite3.Connection) -> None:
     Idempotent: skips if the table already lacks the UNIQUE constraint.
     Uses SQLite rename-and-copy since ALTER TABLE cannot drop constraints.
     """
-    table_sql = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='benchmark_runs'"
-    ).fetchone()
-    if table_sql is None:
-        return
-    if "UNIQUE" not in table_sql[0]:
+    if not _has_legacy_unique_constraint(conn):
         return
 
     # Safety guard: renaming/dropping a parent table in SQLite can rewrite child
@@ -170,6 +177,8 @@ def _migrate_drop_unique_constraint(conn: sqlite3.Connection) -> None:
             model_name TEXT NOT NULL,
             tp_size INTEGER NOT NULL DEFAULT 8,
             mtp_enabled INTEGER NOT NULL DEFAULT 1,
+            ep_size INTEGER DEFAULT NULL,
+            dp_size INTEGER DEFAULT NULL,
             run_timestamp TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending',
             error_message TEXT,
@@ -180,11 +189,11 @@ def _migrate_drop_unique_constraint(conn: sqlite3.Connection) -> None:
     conn.execute("""
         INSERT INTO benchmark_runs
             (id, image_tag, sglang_version, rocm_version, build_date,
-             model_name, tp_size, mtp_enabled,
+             model_name, tp_size, mtp_enabled, ep_size, dp_size,
              run_timestamp, status, error_message, result_dir, duration_total_sec)
         SELECT
             id, image_tag, sglang_version, rocm_version, build_date,
-            model_name, tp_size, mtp_enabled,
+            model_name, tp_size, mtp_enabled, ep_size, dp_size,
             run_timestamp, status, error_message, result_dir, duration_total_sec
         FROM benchmark_runs_old
     """)
@@ -197,7 +206,8 @@ def _migrate_drop_unique_constraint(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_runs_build_date ON benchmark_runs(build_date)"
     )
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_runs_image_model ON benchmark_runs(image_tag, model_name, tp_size, mtp_enabled)"
+        "CREATE INDEX IF NOT EXISTS idx_runs_image_model "
+        "ON benchmark_runs(image_tag, model_name, tp_size, mtp_enabled, ep_size, dp_size)"
     )
 
     conn.commit()
@@ -291,11 +301,31 @@ def create_run(
         "AND ep_size IS ? AND dp_size IS ?",
         (image_tag, _cfg.MODEL_NAME, tp_size, int(mtp_enabled), ep_size, dp_size),
     ).fetchone()
+    used_legacy_key = False
+
+    # Backward compatibility for DBs that still keep legacy UNIQUE(image,model,tp,mtp).
+    if existing is None and _has_legacy_unique_constraint(conn):
+        existing = conn.execute(
+            "SELECT id, status FROM benchmark_runs "
+            "WHERE image_tag = ? AND model_name = ? AND tp_size = ? AND mtp_enabled = ?",
+            (image_tag, _cfg.MODEL_NAME, tp_size, int(mtp_enabled)),
+        ).fetchone()
+        used_legacy_key = existing is not None
 
     now = datetime.now(timezone.utc).isoformat()
 
     if existing:
         run_id = existing["id"]
+        if used_legacy_key:
+            logger.warning(
+                "Legacy UNIQUE key detected; reusing run id=%d for %s (tp=%s mtp=%s ep=%s dp=%s)",
+                run_id,
+                image_tag,
+                tp_size,
+                int(mtp_enabled),
+                ep_size,
+                dp_size,
+            )
         # Clean up old metrics/accuracy from the failed attempt
         conn.execute("DELETE FROM benchmark_metrics WHERE run_id = ?", (run_id,))
         conn.execute("DELETE FROM accuracy_results WHERE run_id = ?", (run_id,))
@@ -304,10 +334,21 @@ def create_run(
         conn.execute(
             """UPDATE benchmark_runs
                SET sglang_version = ?, rocm_version = ?, build_date = ?,
+                   ep_size = ?, dp_size = ?,
                    run_timestamp = ?, status = ?, result_dir = ?,
                    error_message = NULL, duration_total_sec = NULL
                WHERE id = ?""",
-            (sglang_version, rocm_version, build_date, now, status, result_dir, run_id),
+            (
+                sglang_version,
+                rocm_version,
+                build_date,
+                ep_size,
+                dp_size,
+                now,
+                status,
+                result_dir,
+                run_id,
+            ),
         )
         conn.commit()
         logger.info("Reset existing failed run %d for %s", run_id, image_tag)
