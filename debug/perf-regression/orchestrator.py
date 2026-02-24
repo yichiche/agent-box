@@ -34,7 +34,9 @@ from config import (
     LOG_DIR,
     save_model_config,
     TP_MTP_VARIANTS,
+    VariantConfig,
     variant_label,
+    parse_variant_label,
 )
 from collector import get_connection, init_db, is_already_benchmarked, create_run, update_run_status, ingest_run
 from discover import discover_images
@@ -281,7 +283,8 @@ def _monitor_server_log(server_log: Path, proc: subprocess.Popen) -> None:
     return t
 
 
-def run_benchmark(image: str, result_dir: Path, tp_size: int = 8, mtp: bool = True) -> tuple[str, str]:
+def run_benchmark(image: str, result_dir: Path, tp_size: int = 8, mtp: bool = True,
+                   ep_size: int = None, dp_size: int = None) -> tuple[str, str]:
     """Run the benchmark script and return (stdout, container_name).
 
     Passes all flags to suppress interactive prompts.
@@ -309,6 +312,14 @@ def run_benchmark(image: str, result_dir: Path, tp_size: int = 8, mtp: bool = Tr
         cmd.append("--mtp")
     else:
         cmd.append("--no-mtp")
+
+    extra_server_args = []
+    if ep_size is not None:
+        extra_server_args.extend(["--ep-size", str(ep_size)])
+    if dp_size is not None:
+        extra_server_args.extend(["--dp-size", str(dp_size)])
+    if extra_server_args:
+        cmd.extend(["--server-extra-args", " ".join(extra_server_args)])
 
     if _cfg.ACCURACY_MODE:
         if _cfg.ACCURACY_ONLY:
@@ -551,10 +562,12 @@ def process_image(conn, image_info, dry_run: bool = False, variants=None) -> boo
         if not pull_image(image):
             return False
 
-    for tp_size, mtp in active_variants:
-        label = variant_label(tp_size, mtp)
+    for v in active_variants:
+        tp_size, mtp, ep_size, dp_size = v.tp_size, v.mtp, v.ep_size, v.dp_size
+        label = variant_label(tp_size, mtp, ep_size=ep_size, dp_size=dp_size)
 
-        if is_already_benchmarked(conn, tag, tp_size=tp_size, mtp_enabled=mtp):
+        if is_already_benchmarked(conn, tag, tp_size=tp_size, mtp_enabled=mtp,
+                                  ep_size=ep_size, dp_size=dp_size):
             logger.info("Skipping %s [%s] (already benchmarked)", tag, label)
             continue
 
@@ -584,13 +597,16 @@ def process_image(conn, image_info, dry_run: bool = False, variants=None) -> boo
                 status="running",
                 tp_size=tp_size,
                 mtp_enabled=mtp,
+                ep_size=ep_size,
+                dp_size=dp_size,
             )
             _active_run_id = run_id
 
             # Run benchmark
             start_time = time.monotonic()
             stdout, container_name = run_benchmark(
-                image, result_dir, tp_size=tp_size, mtp=mtp
+                image, result_dir, tp_size=tp_size, mtp=mtp,
+                ep_size=ep_size, dp_size=dp_size,
             )
             duration = time.monotonic() - start_time
 
@@ -705,7 +721,19 @@ def main():
         "--variants",
         nargs="+",
         default=None,
-        help="Only run specific variants (e.g., TP8 TP8+MTP). Default: all",
+        help="Only run specific variants (e.g., TP8 TP8+MTP TP8+EP2+DP4). Default: all",
+    )
+    parser.add_argument(
+        "--ep-size",
+        type=int,
+        default=None,
+        help="Add EP (expert parallelism) size to all variants",
+    )
+    parser.add_argument(
+        "--dp-size",
+        type=int,
+        default=None,
+        help="Add DP (data parallelism) size to all variants",
     )
     args = parser.parse_args()
 
@@ -740,15 +768,28 @@ def main():
     lookback_max, lookback_min = _parse_lookback_days(args.lookback_days)
 
     # Parse --variants filter
+    # Variants can be specified as labels like TP4, TP8+MTP, TP4+DP2, TP8+EP2+DP4.
+    # Labels are parsed directly — no need for separate --ep-size/--dp-size flags.
+    # If --ep-size/--dp-size are given without --variants, they apply to the
+    # default variant matrix as overrides.
     active_variants = None
     if args.variants:
+        active_variants = []
+        for label in args.variants:
+            parsed = parse_variant_label(label)
+            if parsed is None:
+                parser.error(
+                    f"Invalid variant label: '{label}'. "
+                    f"Expected format: TP<n>[+MTP][+EP<n>][+DP<n>]"
+                )
+            active_variants.append(parsed)
+    elif args.ep_size is not None or args.dp_size is not None:
         active_variants = [
-            (tp, mtp) for tp, mtp in TP_MTP_VARIANTS
-            if variant_label(tp, mtp) in args.variants
+            VariantConfig(v.tp_size, v.mtp,
+                          ep_size=args.ep_size if args.ep_size is not None else v.ep_size,
+                          dp_size=args.dp_size if args.dp_size is not None else v.dp_size)
+            for v in TP_MTP_VARIANTS
         ]
-        if not active_variants:
-            available = [variant_label(t, m) for t, m in TP_MTP_VARIANTS]
-            parser.error(f"No matching variants. Available: {available}")
 
     # Validate rocm versions
     for v in args.rocm_versions:
@@ -827,12 +868,14 @@ def main():
                 )
             rerun_variants = active_variants or TP_MTP_VARIANTS
             for tag in args.force_rerun:
-                for tp, mtp in rerun_variants:
-                    logger.info("Force re-running: %s [%s]", tag, variant_label(tp, mtp))
+                for v in rerun_variants:
+                    label = variant_label(v.tp_size, v.mtp, ep_size=v.ep_size, dp_size=v.dp_size)
+                    logger.info("Force re-running: %s [%s]", tag, label)
                     conn.execute(
                         "DELETE FROM benchmark_runs "
-                        "WHERE image_tag = ? AND model_name = ? AND tp_size = ? AND mtp_enabled = ?",
-                        (tag, _cfg.MODEL_NAME, tp, int(mtp)),
+                        "WHERE image_tag = ? AND model_name = ? AND tp_size = ? AND mtp_enabled = ? "
+                        "AND ep_size IS ? AND dp_size IS ?",
+                        (tag, _cfg.MODEL_NAME, v.tp_size, int(v.mtp), v.ep_size, v.dp_size),
                     )
             conn.commit()
 

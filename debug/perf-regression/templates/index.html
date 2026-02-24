@@ -66,6 +66,26 @@
                 <option value="0">No</option>
             </select>
         </div>
+        <div class="filter-group">
+            <label>EP Size:</label>
+            <select id="filter-ep">
+                <option value="all" selected>All</option>
+                <option value="none">None</option>
+                <option value="2">2</option>
+                <option value="4">4</option>
+                <option value="8">8</option>
+            </select>
+        </div>
+        <div class="filter-group">
+            <label>DP Size:</label>
+            <select id="filter-dp">
+                <option value="all" selected>All</option>
+                <option value="none">None</option>
+                <option value="2">2</option>
+                <option value="4">4</option>
+                <option value="8">8</option>
+            </select>
+        </div>
         <button id="btn-refresh" onclick="refreshAll()">Refresh</button>
     </div>
 
@@ -130,6 +150,8 @@
                     <th>Model</th>
                     <th>TP</th>
                     <th>MTP</th>
+                    <th>EP</th>
+                    <th>DP</th>
                     <th>SGLang</th>
                     <th>ROCm</th>
                     <th>Status</th>
@@ -141,7 +163,7 @@
                 </tr>
             </thead>
             <tbody id="runs-body">
-                <tr><td colspan="13" class="empty">Loading...</td></tr>
+                <tr><td colspan="15" class="empty">Loading...</td></tr>
             </tbody>
         </table>
 
@@ -154,6 +176,8 @@
                     <th>ROCm</th>
                     <th>TP</th>
                     <th>MTP</th>
+                    <th>EP</th>
+                    <th>DP</th>
                     <th>Metric</th>
                     <th>Concurrency</th>
                     <th>Current</th>
@@ -163,7 +187,7 @@
                 </tr>
             </thead>
             <tbody id="alerts-body">
-                <tr><td colspan="11" class="empty">Loading...</td></tr>
+                <tr><td colspan="15" class="empty">Loading...</td></tr>
             </tbody>
         </table>
     </div>
@@ -184,6 +208,8 @@
                 concurrency: document.getElementById('filter-concurrency').value,
                 tp_size: document.getElementById('filter-tp').value,
                 mtp_enabled: document.getElementById('filter-mtp').value,
+                ep_size: document.getElementById('filter-ep').value,
+                dp_size: document.getElementById('filter-dp').value,
             };
         }
 
@@ -196,6 +222,8 @@
                 concurrency: f.concurrency,
                 tp_size: f.tp_size,
                 mtp_enabled: f.mtp_enabled,
+                ep_size: f.ep_size,
+                dp_size: f.dp_size,
             });
             const resp = await fetch(`/api/chart-data?${params}`);
             return await resp.json();
@@ -209,6 +237,8 @@
                 model_name: f.model_name,
                 tp_size: f.tp_size,
                 mtp_enabled: f.mtp_enabled,
+                ep_size: f.ep_size,
+                dp_size: f.dp_size,
             });
             const resp = await fetch(`/api/alerts?${params}`);
             return await resp.json();
@@ -222,6 +252,8 @@
                 model_name: f.model_name,
                 tp_size: f.tp_size,
                 mtp_enabled: f.mtp_enabled,
+                ep_size: f.ep_size,
+                dp_size: f.dp_size,
             });
             const resp = await fetch(`/api/runs?${params}`);
             return await resp.json();
@@ -307,7 +339,7 @@
         function renderAlerts(alerts) {
             const tbody = document.getElementById('alerts-body');
             if (!alerts || alerts.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="11" class="empty">No regression alerts</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="13" class="empty">No regression alerts</td></tr>';
                 return;
             }
             tbody.innerHTML = alerts.map(a => {
@@ -319,6 +351,8 @@
                     <td>${a.rocm_version}</td>
                     <td>${a.tp_size != null ? a.tp_size : '-'}</td>
                     <td>${a.mtp_enabled ? 'Yes' : 'No'}</td>
+                    <td>${a.ep_size != null ? a.ep_size : '-'}</td>
+                    <td>${a.dp_size != null ? a.dp_size : '-'}</td>
                     <td>${a.metric_name}</td>
                     <td>${a.concurrency !== null ? a.concurrency : 'N/A'}</td>
                     <td>${a.current_value !== null ? a.current_value.toFixed(2) : 'N/A'}</td>
@@ -332,7 +366,7 @@
         function renderRuns(runs) {
             const tbody = document.getElementById('runs-body');
             if (!runs || runs.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="13" class="empty">No benchmark runs</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="15" class="empty">No benchmark runs</td></tr>';
                 return;
             }
             tbody.innerHTML = runs.map(r => {
@@ -346,7 +380,7 @@
                 let metricsHtml = '';
                 if (r.metrics && r.metrics.length > 0) {
                     metricsHtml = `<tr id="${metricsId}" class="metrics-detail" style="display:none">
-                        <td colspan="13">
+                        <td colspan="15">
                             <table class="inner-table">
                                 <thead>
                                     <tr>
@@ -379,7 +413,7 @@
                 if (r.versions && r.versions.length > 0) {
                     const versionsId = `versions-${r.id}`;
                     versionsHtml = `<tr id="${versionsId}" class="metrics-detail" style="display:none">
-                        <td colspan="13">
+                        <td colspan="15">
                             <table class="inner-table">
                                 <thead>
                                     <tr>
@@ -408,6 +442,8 @@
                     <td>${r.model_name || '-'}</td>
                     <td>${r.tp_size != null ? r.tp_size : '-'}</td>
                     <td>${r.mtp_enabled ? 'Yes' : 'No'}</td>
+                    <td>${r.ep_size != null ? r.ep_size : '-'}</td>
+                    <td>${r.dp_size != null ? r.dp_size : '-'}</td>
                     <td>${r.sglang_version || '-'}</td>
                     <td>${r.rocm_version || '-'}</td>
                     <td><span class="${statusClass}">${r.status}</span></td>
@@ -573,7 +609,9 @@
 
             let html = '';
             for (const variant of data) {
-                const label = `TP${variant.tp_size}${variant.mtp_enabled ? '+MTP' : ''}`;
+                let label = `TP${variant.tp_size}${variant.mtp_enabled ? '+MTP' : ''}`;
+                if (variant.ep_size != null) label += `+EP${variant.ep_size}`;
+                if (variant.dp_size != null) label += `+DP${variant.dp_size}`;
                 if (variant.metrics.length === 0) {
                     html += `<tr><td>${label}</td><td colspan="6">-</td><td>${variant.accuracy_pct ? variant.accuracy_pct.toFixed(1) + '%' : '-'}</td></tr>`;
                     continue;
@@ -601,6 +639,8 @@
         document.getElementById('filter-concurrency').addEventListener('change', refreshAll);
         document.getElementById('filter-tp').addEventListener('change', refreshAll);
         document.getElementById('filter-mtp').addEventListener('change', refreshAll);
+        document.getElementById('filter-ep').addEventListener('change', refreshAll);
+        document.getElementById('filter-dp').addEventListener('change', refreshAll);
 
         // Initial load
         loadModels();

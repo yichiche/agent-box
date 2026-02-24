@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS benchmark_runs (
     model_name TEXT NOT NULL,
     tp_size INTEGER NOT NULL DEFAULT 8,
     mtp_enabled INTEGER NOT NULL DEFAULT 1,
+    ep_size INTEGER DEFAULT NULL,
+    dp_size INTEGER DEFAULT NULL,
     run_timestamp TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     error_message TEXT,
@@ -202,6 +204,28 @@ def _migrate_drop_unique_constraint(conn: sqlite3.Connection) -> None:
     logger.info("Migration complete: UNIQUE constraint removed from benchmark_runs")
 
 
+def _migrate_add_ep_dp_columns(conn: sqlite3.Connection) -> None:
+    """Add ep_size and dp_size columns if they don't exist (schema migration)."""
+    cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(benchmark_runs)").fetchall()
+    }
+    if "ep_size" not in cols:
+        conn.execute("ALTER TABLE benchmark_runs ADD COLUMN ep_size INTEGER DEFAULT NULL")
+        logger.info("Migrated: added ep_size column to benchmark_runs")
+    if "dp_size" not in cols:
+        conn.execute("ALTER TABLE benchmark_runs ADD COLUMN dp_size INTEGER DEFAULT NULL")
+        logger.info("Migrated: added dp_size column to benchmark_runs")
+    conn.commit()
+
+    # Recreate index to include ep_size and dp_size
+    conn.execute("DROP INDEX IF EXISTS idx_runs_image_model")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runs_image_model "
+        "ON benchmark_runs(image_tag, model_name, tp_size, mtp_enabled, ep_size, dp_size)"
+    )
+    conn.commit()
+
+
 def init_db(conn: Optional[sqlite3.Connection] = None) -> None:
     """Create tables if they don't exist."""
     close = False
@@ -211,6 +235,7 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> None:
     conn.executescript(SCHEMA_SQL)
     _migrate_add_tp_mtp_columns(conn)
     _migrate_drop_unique_constraint(conn)
+    _migrate_add_ep_dp_columns(conn)
     conn.commit()
     if close:
         conn.close()
@@ -222,12 +247,15 @@ def is_already_benchmarked(
     image_tag: str,
     tp_size: int = 8,
     mtp_enabled: bool = True,
+    ep_size: Optional[int] = None,
+    dp_size: Optional[int] = None,
 ) -> bool:
     """Check if this image already has a completed benchmark with existing results."""
     row = conn.execute(
         "SELECT status, result_dir FROM benchmark_runs "
-        "WHERE image_tag = ? AND model_name = ? AND tp_size = ? AND mtp_enabled = ?",
-        (image_tag, _cfg.MODEL_NAME, tp_size, int(mtp_enabled)),
+        "WHERE image_tag = ? AND model_name = ? AND tp_size = ? AND mtp_enabled = ? "
+        "AND ep_size IS ? AND dp_size IS ?",
+        (image_tag, _cfg.MODEL_NAME, tp_size, int(mtp_enabled), ep_size, dp_size),
     ).fetchone()
     if row is None or row["status"] != "completed":
         return False
@@ -249,16 +277,19 @@ def create_run(
     status: str = "running",
     tp_size: int = 8,
     mtp_enabled: bool = True,
+    ep_size: Optional[int] = None,
+    dp_size: Optional[int] = None,
 ) -> int:
     """Create or reset a benchmark_runs record and return its ID.
 
-    If a previous record exists for this image+model+tp+mtp, reset it
+    If a previous record exists for this image+model+tp+mtp+ep+dp, reset it
     instead of inserting a duplicate.
     """
     existing = conn.execute(
         "SELECT id, status FROM benchmark_runs "
-        "WHERE image_tag = ? AND model_name = ? AND tp_size = ? AND mtp_enabled = ?",
-        (image_tag, _cfg.MODEL_NAME, tp_size, int(mtp_enabled)),
+        "WHERE image_tag = ? AND model_name = ? AND tp_size = ? AND mtp_enabled = ? "
+        "AND ep_size IS ? AND dp_size IS ?",
+        (image_tag, _cfg.MODEL_NAME, tp_size, int(mtp_enabled), ep_size, dp_size),
     ).fetchone()
 
     now = datetime.now(timezone.utc).isoformat()
@@ -285,8 +316,9 @@ def create_run(
     cur = conn.execute(
         """INSERT INTO benchmark_runs
            (image_tag, sglang_version, rocm_version, build_date,
-            model_name, tp_size, mtp_enabled, run_timestamp, status, result_dir)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            model_name, tp_size, mtp_enabled, ep_size, dp_size,
+            run_timestamp, status, result_dir)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             image_tag,
             sglang_version,
@@ -295,6 +327,8 @@ def create_run(
             _cfg.MODEL_NAME,
             tp_size,
             int(mtp_enabled),
+            ep_size,
+            dp_size,
             now,
             status,
             result_dir,

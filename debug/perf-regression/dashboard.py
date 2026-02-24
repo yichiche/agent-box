@@ -55,6 +55,8 @@ async def chart_data(
     model_name: Optional[str] = Query(None),
     tp_size: Optional[str] = Query(None),
     mtp_enabled: Optional[str] = Query(None),
+    ep_size: Optional[str] = Query(None),
+    dp_size: Optional[str] = Query(None),
     days: int = Query(30),
     concurrency: Optional[str] = Query(None),
 ):
@@ -81,6 +83,20 @@ async def chart_data(
             where_parts.append("br.mtp_enabled = ?")
             params.append(int(mtp_enabled))
 
+        if ep_size and ep_size != "all":
+            if ep_size == "none":
+                where_parts.append("br.ep_size IS NULL")
+            else:
+                where_parts.append("br.ep_size = ?")
+                params.append(int(ep_size))
+
+        if dp_size and dp_size != "all":
+            if dp_size == "none":
+                where_parts.append("br.dp_size IS NULL")
+            else:
+                where_parts.append("br.dp_size = ?")
+                params.append(int(dp_size))
+
         if days > 0:
             where_parts.append(
                 f"br.build_date >= strftime('%Y%m%d', 'now', '-{days} days')"
@@ -105,6 +121,8 @@ async def chart_data(
                 br.sglang_version,
                 br.tp_size,
                 br.mtp_enabled,
+                br.ep_size,
+                br.dp_size,
                 bm.concurrency,
                 bm.output_throughput,
                 bm.total_throughput,
@@ -115,7 +133,7 @@ async def chart_data(
             FROM benchmark_metrics bm
             JOIN benchmark_runs br ON bm.run_id = br.id
             WHERE {where_clause}{conc_filter}
-            ORDER BY br.build_date, br.rocm_version, br.tp_size, br.mtp_enabled, bm.concurrency
+            ORDER BY br.build_date, br.rocm_version, br.tp_size, br.mtp_enabled, br.ep_size, br.dp_size, bm.concurrency
         """
         rows = conn.execute(metrics_query, params_metrics).fetchall()
 
@@ -128,11 +146,13 @@ async def chart_data(
                 br.sglang_version,
                 br.tp_size,
                 br.mtp_enabled,
+                br.ep_size,
+                br.dp_size,
                 ar.accuracy_pct
             FROM accuracy_results ar
             JOIN benchmark_runs br ON ar.run_id = br.id
             WHERE {where_clause}
-            ORDER BY br.build_date, br.rocm_version, br.tp_size, br.mtp_enabled
+            ORDER BY br.build_date, br.rocm_version, br.tp_size, br.mtp_enabled, br.ep_size, br.dp_size
         """
         accuracy_rows = conn.execute(accuracy_query, params).fetchall()
 
@@ -203,8 +223,14 @@ async def chart_data(
         for row in rows:
             mtp = row["mtp_enabled"]
             tp = row["tp_size"]
+            ep = row["ep_size"]
+            dp = row["dp_size"]
             mtp_label = "MTP" if mtp else "non-MTP"
-            key = f"rocm{row['rocm_version']}-tp{tp}-mtp{mtp}-c{row['concurrency']}"
+            ep_label = f"/EP{ep}" if ep is not None else ""
+            dp_label = f"/DP{dp}" if dp is not None else ""
+            ep_key = f"-ep{ep}" if ep is not None else ""
+            dp_key = f"-dp{dp}" if dp is not None else ""
+            key = f"rocm{row['rocm_version']}-tp{tp}-mtp{mtp}{ep_key}{dp_key}-c{row['concurrency']}"
             conc = row["concurrency"]
             color = rocm_tp_conc_colors.get(
                 (row["rocm_version"], tp, conc), "#607D8B"
@@ -220,7 +246,7 @@ async def chart_data(
                 ds = metric_charts[metric_name]["datasets"]
                 if key not in ds:
                     ds[key] = {
-                        "label": f"ROCm {row['rocm_version']} / TP{tp} / {mtp_label} / c={conc}",
+                        "label": f"ROCm {row['rocm_version']} / TP{tp} / {mtp_label}{ep_label}{dp_label} / c={conc}",
                         "data": [],
                         "borderColor": color,
                         "backgroundColor": color + "33",
@@ -262,8 +288,14 @@ async def chart_data(
         for row in accuracy_rows:
             mtp = row["mtp_enabled"]
             tp = row["tp_size"]
+            ep = row["ep_size"]
+            dp = row["dp_size"]
             mtp_label = "MTP" if mtp else "non-MTP"
-            key = f"rocm{row['rocm_version']}-tp{tp}-mtp{mtp}"
+            ep_label = f"/EP{ep}" if ep is not None else ""
+            dp_label = f"/DP{dp}" if dp is not None else ""
+            ep_key = f"-ep{ep}" if ep is not None else ""
+            dp_key = f"-dp{dp}" if dp is not None else ""
+            key = f"rocm{row['rocm_version']}-tp{tp}-mtp{mtp}{ep_key}{dp_key}"
             color = rocm_tp_base.get(
                 (row["rocm_version"], tp), "#607D8B"
             )
@@ -271,7 +303,7 @@ async def chart_data(
 
             if key not in acc_datasets:
                 acc_datasets[key] = {
-                    "label": f"ROCm {row['rocm_version']} / TP{tp} / {mtp_label}",
+                    "label": f"ROCm {row['rocm_version']} / TP{tp} / {mtp_label}{ep_label}{dp_label}",
                     "data": [],
                     "borderColor": color,
                     "backgroundColor": color + "33",
@@ -316,6 +348,8 @@ async def get_runs(
     model_name: Optional[str] = Query(None),
     tp_size: Optional[str] = Query(None),
     mtp_enabled: Optional[str] = Query(None),
+    ep_size: Optional[str] = Query(None),
+    dp_size: Optional[str] = Query(None),
     days: int = Query(30),
     limit: int = Query(100),
 ):
@@ -341,6 +375,20 @@ async def get_runs(
             where_parts.append("br.mtp_enabled = ?")
             params.append(int(mtp_enabled))
 
+        if ep_size and ep_size != "all":
+            if ep_size == "none":
+                where_parts.append("br.ep_size IS NULL")
+            else:
+                where_parts.append("br.ep_size = ?")
+                params.append(int(ep_size))
+
+        if dp_size and dp_size != "all":
+            if dp_size == "none":
+                where_parts.append("br.dp_size IS NULL")
+            else:
+                where_parts.append("br.dp_size = ?")
+                params.append(int(dp_size))
+
         if days > 0:
             where_parts.append(
                 f"br.build_date >= strftime('%Y%m%d', 'now', '-{days} days')"
@@ -353,6 +401,7 @@ async def get_runs(
             SELECT
                 br.id, br.image_tag, br.sglang_version, br.rocm_version,
                 br.build_date, br.model_name, br.tp_size, br.mtp_enabled,
+                br.ep_size, br.dp_size,
                 br.run_timestamp, br.status,
                 br.error_message, br.duration_total_sec
             FROM benchmark_runs br
@@ -456,6 +505,8 @@ async def get_alerts(
     model_name: Optional[str] = Query(None),
     tp_size: Optional[str] = Query(None),
     mtp_enabled: Optional[str] = Query(None),
+    ep_size: Optional[str] = Query(None),
+    dp_size: Optional[str] = Query(None),
     days: int = Query(30),
     acknowledged: Optional[bool] = Query(None),
 ):
@@ -481,6 +532,20 @@ async def get_alerts(
             where_parts.append("br.mtp_enabled = ?")
             params.append(int(mtp_enabled))
 
+        if ep_size and ep_size != "all":
+            if ep_size == "none":
+                where_parts.append("br.ep_size IS NULL")
+            else:
+                where_parts.append("br.ep_size = ?")
+                params.append(int(ep_size))
+
+        if dp_size and dp_size != "all":
+            if dp_size == "none":
+                where_parts.append("br.dp_size IS NULL")
+            else:
+                where_parts.append("br.dp_size = ?")
+                params.append(int(dp_size))
+
         if days > 0:
             where_parts.append(
                 f"br.build_date >= strftime('%Y%m%d', 'now', '-{days} days')"
@@ -498,7 +563,7 @@ async def get_alerts(
                 ra.current_value, ra.baseline_value, ra.regression_pct,
                 ra.acknowledged, ra.created_at,
                 br.image_tag, br.build_date, br.rocm_version, br.sglang_version,
-                br.tp_size, br.mtp_enabled
+                br.tp_size, br.mtp_enabled, br.ep_size, br.dp_size
             FROM regression_alerts ra
             JOIN benchmark_runs br ON ra.run_id = br.id
             WHERE {where_clause}
@@ -527,9 +592,9 @@ async def variant_comparison(
         runs = conn.execute(
             f"""
             SELECT br.id, br.model_name, br.image_tag, br.rocm_version,
-                   br.tp_size, br.mtp_enabled
+                   br.tp_size, br.mtp_enabled, br.ep_size, br.dp_size
             FROM benchmark_runs br WHERE {where}
-            ORDER BY br.tp_size, br.mtp_enabled
+            ORDER BY br.tp_size, br.mtp_enabled, br.ep_size, br.dp_size
             """,
             params,
         ).fetchall()
@@ -550,6 +615,8 @@ async def variant_comparison(
                 "rocm_version": run["rocm_version"],
                 "tp_size": run["tp_size"],
                 "mtp_enabled": run["mtp_enabled"],
+                "ep_size": run["ep_size"],
+                "dp_size": run["dp_size"],
                 "metrics": [dict(m) for m in metrics],
                 "accuracy_pct": accuracy["accuracy_pct"] if accuracy else None,
             })

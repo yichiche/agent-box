@@ -27,7 +27,8 @@ def detect_regressions(
     """
     # Get current run info
     run = conn.execute(
-        "SELECT id, rocm_version, build_date, model_name, tp_size, mtp_enabled "
+        "SELECT id, rocm_version, build_date, model_name, tp_size, mtp_enabled, "
+        "ep_size, dp_size "
         "FROM benchmark_runs WHERE id = ?",
         (run_id,),
     ).fetchone()
@@ -39,6 +40,8 @@ def detect_regressions(
     model_name = run["model_name"]
     tp_size = run["tp_size"]
     mtp_enabled = run["mtp_enabled"]
+    ep_size = run["ep_size"]
+    dp_size = run["dp_size"]
     alerts = []
 
     # Get concurrencies for this run
@@ -57,13 +60,15 @@ def detect_regressions(
             alert = _check_metric_regression(
                 conn, run_id, rocm_version, model_name, tp_size, mtp_enabled,
                 metric_name, conc, direction, threshold,
+                ep_size=ep_size, dp_size=dp_size,
             )
             if alert:
                 alerts.append(alert)
 
     # Check accuracy regression
     accuracy_alert = _check_accuracy_regression(
-        conn, run_id, rocm_version, model_name, tp_size, mtp_enabled
+        conn, run_id, rocm_version, model_name, tp_size, mtp_enabled,
+        ep_size=ep_size, dp_size=dp_size,
     )
     if accuracy_alert:
         alerts.append(accuracy_alert)
@@ -104,6 +109,8 @@ def _check_metric_regression(
     concurrency: int,
     direction: str,
     threshold_pct: float,
+    ep_size: Optional[int] = None,
+    dp_size: Optional[int] = None,
 ) -> Optional[dict]:
     """Check if a metric at a specific concurrency has regressed."""
     # Get current value
@@ -128,6 +135,8 @@ def _check_metric_regression(
               AND br.model_name = ?
               AND br.tp_size = ?
               AND br.mtp_enabled = ?
+              AND br.ep_size IS ?
+              AND br.dp_size IS ?
               AND br.status = 'completed'
               AND br.build_date < ?
               AND bm.concurrency = ?
@@ -135,7 +144,7 @@ def _check_metric_regression(
             ORDER BY br.build_date DESC
             LIMIT ?""",
         (rocm_version, model_name, tp_size, mtp_enabled,
-         build_date, concurrency, REGRESSION_WINDOW),
+         ep_size, dp_size, build_date, concurrency, REGRESSION_WINDOW),
     ).fetchall()
 
     if len(previous_values) < 2:
@@ -181,6 +190,8 @@ def _check_accuracy_regression(
     model_name: str,
     tp_size: int,
     mtp_enabled: int,
+    ep_size: Optional[int] = None,
+    dp_size: Optional[int] = None,
 ) -> Optional[dict]:
     """Check if accuracy has regressed beyond the threshold."""
     current_row = conn.execute(
@@ -203,13 +214,15 @@ def _check_accuracy_regression(
              AND br.model_name = ?
              AND br.tp_size = ?
              AND br.mtp_enabled = ?
+             AND br.ep_size IS ?
+             AND br.dp_size IS ?
              AND br.status = 'completed'
              AND br.build_date < ?
              AND ar.accuracy_pct IS NOT NULL
            ORDER BY br.build_date DESC
            LIMIT ?""",
         (rocm_version, model_name, tp_size, mtp_enabled,
-         build_date, REGRESSION_WINDOW),
+         ep_size, dp_size, build_date, REGRESSION_WINDOW),
     ).fetchall()
 
     if len(previous_values) < 2:
