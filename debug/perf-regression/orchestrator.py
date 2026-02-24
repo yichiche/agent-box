@@ -43,6 +43,40 @@ from regression import detect_regressions
 
 logger = logging.getLogger(__name__)
 
+
+def _parse_lookback_days(value: str) -> tuple[int, int]:
+    """Parse --lookback-days value into (lookback_max, lookback_min).
+
+    Accepts:
+      "10"    -> (10, 0)   — look back 10 days from today
+      "7-10"  -> (10, 7)   — only images between 7 and 10 days ago
+      "7:10"  -> (10, 7)   — same, alternate separator
+
+    Returns (lookback_max, lookback_min) where lookback_max >= lookback_min.
+    lookback_min=0 means no near-side cutoff (i.e. include up to today).
+    """
+    for sep in ("-", ":"):
+        if sep in value:
+            parts = value.split(sep, 1)
+            try:
+                a, b = int(parts[0]), int(parts[1])
+            except ValueError:
+                raise argparse.ArgumentTypeError(
+                    f"Invalid lookback-days range: '{value}'. "
+                    f"Expected N or MIN{sep}MAX (e.g. 7{sep}10)."
+                )
+            lo, hi = min(a, b), max(a, b)
+            return hi, lo
+
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"Invalid lookback-days value: '{value}'. "
+            "Expected an integer or a range like 7-10 or 7:10."
+        )
+    return n, 0
+
 # Pattern to extract container name from script output
 CONTAINER_NAME_RE = re.compile(r"Starting container:\s*(\S+)")
 
@@ -622,9 +656,11 @@ def main():
     )
     parser.add_argument(
         "--lookback-days",
-        type=int,
-        default=DEFAULT_LOOKBACK_DAYS,
-        help=f"Days to look back for images (default: {DEFAULT_LOOKBACK_DAYS})",
+        type=str,
+        default=str(DEFAULT_LOOKBACK_DAYS),
+        help=f"Days to look back for images. Supports a single value (e.g. 10) "
+        f"or a range MIN-MAX or MIN:MAX (e.g. 7-10 means 7 to 10 days ago). "
+        f"(default: {DEFAULT_LOOKBACK_DAYS})",
     )
     parser.add_argument(
         "--rocm-versions",
@@ -687,6 +723,9 @@ def main():
     # Persist for next run
     save_model_config(_cfg.MODEL_PATH, _cfg.MODEL_NAME)
 
+    # Parse --lookback-days (single value or range)
+    lookback_max, lookback_min = _parse_lookback_days(args.lookback_days)
+
     # Parse --variants filter
     active_variants = None
     if args.variants:
@@ -733,9 +772,14 @@ def main():
         sys.exit(1)
 
     try:
+        lookback_desc = (
+            f"{lookback_min}-{lookback_max} days ago"
+            if lookback_min
+            else f"{lookback_max} days"
+        )
         logger.info(
-            "Starting orchestrator: lookback=%d days, rocm=%s, dry_run=%s",
-            args.lookback_days,
+            "Starting orchestrator: lookback=%s, rocm=%s, dry_run=%s",
+            lookback_desc,
             args.rocm_versions,
             args.dry_run,
         )
@@ -749,7 +793,8 @@ def main():
 
         # Discover images
         images = discover_images(
-            lookback_days=args.lookback_days,
+            lookback_days=lookback_max,
+            lookback_days_min=lookback_min,
             rocm_versions=args.rocm_versions,
         )
 
