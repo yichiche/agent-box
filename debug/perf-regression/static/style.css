@@ -205,6 +205,30 @@ tr:hover {
     font-weight: 600;
 }
 
+.status-clickable {
+    cursor: pointer;
+    text-decoration: underline;
+}
+
+.error-message {
+    margin: 8px 16px;
+    padding: 12px;
+    background: #2b2b2b;
+    color: #f0f0f0;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 0.8rem;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.error-message.server-log {
+    max-height: 400px;
+    background: #1a1a2e;
+}
+
 .btn-expand {
     padding: 3px 10px;
     background: #e0e0e0;

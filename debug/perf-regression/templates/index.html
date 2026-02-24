@@ -436,6 +436,24 @@
                     </tr>`;
                 }
 
+                const errorId = `error-${r.id}`;
+                let errorHtml = '';
+                if (r.status === 'failed') {
+                    const errorText = r.error_message
+                        ? r.error_message.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+                        : '';
+                    errorHtml = `<tr id="${errorId}" class="metrics-detail" style="display:none">
+                        <td colspan="15">
+                            ${errorText ? `<pre class="error-message">${errorText}</pre>` : ''}
+                            <pre class="error-message server-log" id="serverlog-${r.id}">Loading server.log...</pre>
+                        </td>
+                    </tr>`;
+                }
+
+                const statusTd = r.status === 'failed'
+                    ? `<span class="${statusClass} status-clickable" onclick="toggleError('${errorId}', ${r.id}, this)">${r.status}</span>`
+                    : `<span class="${statusClass}">${r.status}</span>`;
+
                 return `<tr>
                     <td>${date}</td>
                     <td class="tag-cell" title="${r.image_tag}">${r.image_tag}</td>
@@ -446,7 +464,7 @@
                     <td>${r.dp_size != null ? r.dp_size : '-'}</td>
                     <td>${r.sglang_version || '-'}</td>
                     <td>${r.rocm_version || '-'}</td>
-                    <td><span class="${statusClass}">${r.status}</span></td>
+                    <td>${statusTd}</td>
                     <td>${duration}</td>
                     <td>${accuracy}</td>
                     <td>${r.versions && r.versions.length > 0 ?
@@ -454,7 +472,7 @@
                     <td>${r.metrics && r.metrics.length > 0 ?
                         `<button class="btn-expand" onclick="toggleMetrics('${metricsId}', this)">Show</button>` : '-'}</td>
                     <td><button class="btn-expand" onclick="deleteRun(${r.id}, '${r.image_tag}', this)">Delete</button></td>
-                </tr>${metricsHtml}${versionsHtml}`;
+                </tr>${metricsHtml}${versionsHtml}${errorHtml}`;
             }).join('');
         }
 
@@ -478,6 +496,30 @@
                 row.style.display = isHidden ? 'table-row' : 'none';
                 btn.textContent = isHidden ? 'Hide' : 'Show';
             }
+        }
+
+        async function toggleError(rowId, runId, btn) {
+            const row = document.getElementById(rowId);
+            if (!row) return;
+            const isHidden = row.style.display === 'none';
+            row.style.display = isHidden ? 'table-row' : 'none';
+            if (!isHidden) return;
+
+            const logEl = document.getElementById(`serverlog-${runId}`);
+            if (logEl.dataset.loaded) return;
+
+            try {
+                const resp = await fetch(`/api/runs/${runId}/server-log?tail=200`);
+                const data = await resp.json();
+                if (data.log) {
+                    logEl.textContent = data.log;
+                } else {
+                    logEl.textContent = data.reason || 'server.log not available';
+                }
+            } catch (err) {
+                logEl.textContent = 'Failed to load server.log: ' + err.message;
+            }
+            logEl.dataset.loaded = '1';
         }
 
         async function compareVersions(runId, rocmVersion, btn) {
