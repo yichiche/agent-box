@@ -28,7 +28,7 @@
             <label>ROCm Version:</label>
             <select id="filter-rocm">
                 <option value="all">All</option>
-                <option value="700">ROCm 700</option>
+                <option value="700" selected>ROCm 700</option>
                 <option value="720">ROCm 720</option>
             </select>
         </div>
@@ -62,7 +62,7 @@
             <label>MTP:</label>
             <select id="filter-mtp">
                 <option value="all">All</option>
-                <option value="1">Yes</option>
+                <option value="1" selected>Yes</option>
                 <option value="0">No</option>
             </select>
         </div>
@@ -517,12 +517,15 @@
                 const resp = await fetch('/api/models');
                 const models = await resp.json();
                 const select = document.getElementById('filter-model');
-                models.forEach(m => {
+                models.forEach((m, i) => {
                     const opt = document.createElement('option');
                     opt.value = m;
                     opt.textContent = m;
                     select.appendChild(opt);
                 });
+                if (models.length > 0) {
+                    select.value = models[0];
+                }
             } catch (err) {
                 console.error('Failed to load models:', err);
             }
