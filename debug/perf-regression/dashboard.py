@@ -103,6 +103,7 @@ async def chart_data(
                 br.image_tag,
                 br.rocm_version,
                 br.sglang_version,
+                br.mtp_enabled,
                 bm.concurrency,
                 bm.output_throughput,
                 bm.total_throughput,
@@ -113,7 +114,7 @@ async def chart_data(
             FROM benchmark_metrics bm
             JOIN benchmark_runs br ON bm.run_id = br.id
             WHERE {where_clause}{conc_filter}
-            ORDER BY br.build_date, br.rocm_version, bm.concurrency
+            ORDER BY br.build_date, br.rocm_version, br.mtp_enabled, bm.concurrency
         """
         rows = conn.execute(metrics_query, params_metrics).fetchall()
 
@@ -124,11 +125,12 @@ async def chart_data(
                 br.image_tag,
                 br.rocm_version,
                 br.sglang_version,
+                br.mtp_enabled,
                 ar.accuracy_pct
             FROM accuracy_results ar
             JOIN benchmark_runs br ON ar.run_id = br.id
             WHERE {where_clause}
-            ORDER BY br.build_date, br.rocm_version
+            ORDER BY br.build_date, br.rocm_version, br.mtp_enabled
         """
         accuracy_rows = conn.execute(accuracy_query, params).fetchall()
 
@@ -151,7 +153,7 @@ async def chart_data(
             )
 
         # Build chart datasets
-        # Group by (rocm_version, concurrency) for metric charts
+        # Group by (rocm_version, mtp_enabled, concurrency) for metric charts
         metric_charts = {
             "output_throughput": {"label": "Output Throughput (tok/s)", "datasets": {}},
             "total_throughput": {"label": "Total Throughput (tok/s)", "datasets": {}},
@@ -161,19 +163,31 @@ async def chart_data(
             "p99_e2e_latency_ms": {"label": "P99 E2E Latency (ms)", "datasets": {}},
         }
 
-        # Color palette for concurrencies
-        colors = {
-            1: "#2196F3",
-            2: "#4CAF50",
-            4: "#FF9800",
-            8: "#9C27B0",
-            16: "#F44336",
+        # Color palette: ROCm version x concurrency
+        # ROCm 700 = blue tones, ROCm 720 = orange/red tones
+        rocm_conc_colors = {
+            ("700", 1): "#1565C0",
+            ("700", 2): "#1E88E5",
+            ("700", 4): "#42A5F5",
+            ("700", 8): "#64B5F6",
+            ("700", 16): "#90CAF9",
+            ("720", 1): "#E65100",
+            ("720", 2): "#F57C00",
+            ("720", 4): "#FF9800",
+            ("720", 8): "#FFB74D",
+            ("720", 16): "#FFCC80",
         }
 
         for row in rows:
-            key = f"rocm{row['rocm_version']}-c{row['concurrency']}"
+            mtp = row["mtp_enabled"]
+            mtp_label = "MTP" if mtp else "non-MTP"
+            key = f"rocm{row['rocm_version']}-mtp{mtp}-c{row['concurrency']}"
             conc = row["concurrency"]
-            color = colors.get(conc, "#607D8B")
+            color = rocm_conc_colors.get(
+                (row["rocm_version"], conc), "#607D8B"
+            )
+            # MTP = diamond, non-MTP = circle
+            point_style = "rectRot" if mtp else "circle"
 
             for metric_name in metric_charts:
                 val = row[metric_name]
@@ -183,11 +197,13 @@ async def chart_data(
                 ds = metric_charts[metric_name]["datasets"]
                 if key not in ds:
                     ds[key] = {
-                        "label": f"ROCm {row['rocm_version']} / c={conc}",
+                        "label": f"ROCm {row['rocm_version']} / {mtp_label} / c={conc}",
                         "data": [],
                         "borderColor": color,
                         "backgroundColor": color + "33",
-                        "pointRadius": 4,
+                        "borderDash": [5, 3] if mtp else [],
+                        "pointRadius": 5 if mtp else 4,
+                        "pointStyle": point_style,
                         "pointBackgroundColor": [],
                         "tension": 0.1,
                     }
@@ -220,18 +236,24 @@ async def chart_data(
             }
 
         # Accuracy chart
+        acc_colors = {"700": "#1E88E5", "720": "#F57C00"}
         acc_datasets: dict = {}
         for row in accuracy_rows:
-            key = f"rocm{row['rocm_version']}"
-            color = "#2196F3" if row["rocm_version"] == "700" else "#FF9800"
+            mtp = row["mtp_enabled"]
+            mtp_label = "MTP" if mtp else "non-MTP"
+            key = f"rocm{row['rocm_version']}-mtp{mtp}"
+            color = acc_colors.get(row["rocm_version"], "#607D8B")
+            point_style = "rectRot" if mtp else "circle"
 
             if key not in acc_datasets:
                 acc_datasets[key] = {
-                    "label": f"ROCm {row['rocm_version']}",
+                    "label": f"ROCm {row['rocm_version']} / {mtp_label}",
                     "data": [],
                     "borderColor": color,
                     "backgroundColor": color + "33",
-                    "pointRadius": 4,
+                    "borderDash": [5, 3] if mtp else [],
+                    "pointRadius": 5 if mtp else 4,
+                    "pointStyle": point_style,
                     "pointBackgroundColor": [],
                     "tension": 0.1,
                 }
