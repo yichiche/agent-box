@@ -3,6 +3,7 @@
 import os
 import re
 from pathlib import Path
+from typing import NamedTuple, Optional
 
 # ── Paths ──────────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent
@@ -72,18 +73,53 @@ USE_SUDO_DOCKER = True
 MTP_MODE = True  # Legacy: used by run_daily.sh; orchestrator uses TP_MTP_VARIANTS
 CONCURRENCIES = "1,2,4"
 
-# ── TP / MTP variant matrix ──────────────────────────────────────────────
+# ── Variant matrix ───────────────────────────────────────────────────────
+
+
+class VariantConfig(NamedTuple):
+    tp_size: int
+    mtp: bool
+    ep_size: Optional[int] = None
+    dp_size: Optional[int] = None
+
+
 TP_MTP_VARIANTS = [
-    (4, False),   # TP4
-    (4, True),    # TP4+MTP
-    (8, False),   # TP8
-    (8, True),    # TP8+MTP
+    VariantConfig(4, False),   # TP4
+    VariantConfig(4, True),    # TP4+MTP
+    VariantConfig(8, False),   # TP8
+    VariantConfig(8, True),    # TP8+MTP
 ]
 
 
-def variant_label(tp_size: int, mtp: bool) -> str:
+def variant_label(tp_size: int, mtp: bool, ep_size: Optional[int] = None, dp_size: Optional[int] = None) -> str:
     """Human-readable variant label."""
-    return f"TP{tp_size}{'+MTP' if mtp else ''}"
+    label = f"TP{tp_size}{'+MTP' if mtp else ''}"
+    if ep_size is not None:
+        label += f"+EP{ep_size}"
+    if dp_size is not None:
+        label += f"+DP{dp_size}"
+    return label
+
+
+_VARIANT_LABEL_RE = re.compile(
+    r"^TP(\d+)(\+MTP)?(?:\+EP(\d+))?(?:\+DP(\d+))?$", re.IGNORECASE
+)
+
+
+def parse_variant_label(label: str) -> Optional[VariantConfig]:
+    """Parse a variant label like 'TP4+MTP+EP2+DP4' into a VariantConfig.
+
+    Returns None if the label doesn't match the expected format.
+    """
+    m = _VARIANT_LABEL_RE.match(label)
+    if not m:
+        return None
+    return VariantConfig(
+        tp_size=int(m.group(1)),
+        mtp=m.group(2) is not None,
+        ep_size=int(m.group(3)) if m.group(3) else None,
+        dp_size=int(m.group(4)) if m.group(4) else None,
+    )
 
 
 ACCURACY_MODE = True
