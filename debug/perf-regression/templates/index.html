@@ -239,15 +239,19 @@
                 chartInstances[canvasId].destroy();
             }
 
-            const datasets = (chartData.datasets || []).map(ds => ({
-                ...ds,
-                pointRadius: ds.data.map((_, i) =>
-                    ds.pointBackgroundColor && ds.pointBackgroundColor[i] === '#FF0000' ? 8 : 4
-                ),
-                pointStyle: ds.data.map((_, i) =>
-                    ds.pointBackgroundColor && ds.pointBackgroundColor[i] === '#FF0000' ? 'triangle' : 'circle'
-                ),
-            }));
+            const datasets = (chartData.datasets || []).map(ds => {
+                const baseStyle = ds.pointStyle || 'circle';
+                const baseRadius = ds.pointRadius || 4;
+                return {
+                    ...ds,
+                    pointRadius: ds.data.map((_, i) =>
+                        ds.pointBackgroundColor && ds.pointBackgroundColor[i] === '#FF0000' ? 8 : baseRadius
+                    ),
+                    pointStyle: ds.data.map((_, i) =>
+                        ds.pointBackgroundColor && ds.pointBackgroundColor[i] === '#FF0000' ? 'triangle' : baseStyle
+                    ),
+                };
+            });
 
             chartInstances[canvasId] = new Chart(ctx, {
                 type: 'line',
