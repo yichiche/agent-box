@@ -19,7 +19,6 @@ from config import (
     CONCURRENCIES,
     USE_SUDO_DOCKER,
     MTP_MODE,
-    ACCURACY_MODE,
     ACCURACY_NUM_QUESTIONS,
     ACCURACY_PARALLEL,
     ACCURACY_NUM_SHOTS,
@@ -311,9 +310,12 @@ def run_benchmark(image: str, result_dir: Path, tp_size: int = 8, mtp: bool = Tr
     else:
         cmd.append("--no-mtp")
 
-    if ACCURACY_MODE:
+    if _cfg.ACCURACY_MODE:
+        if _cfg.ACCURACY_ONLY:
+            cmd.append("--accuracy-only")
+        else:
+            cmd.append("--accuracy")
         cmd.extend([
-            "--accuracy",
             "--accuracy-num-questions", str(ACCURACY_NUM_QUESTIONS),
             "--accuracy-parallel", str(ACCURACY_PARALLEL),
             "--accuracy-num-shots", str(ACCURACY_NUM_SHOTS),
@@ -694,6 +696,12 @@ def main():
         "If no tags specified, re-runs all images found in --lookback-days.",
     )
     parser.add_argument(
+        "--accuracy-only",
+        action="store_true",
+        default=False,
+        help="Run accuracy benchmark only, skip perf benchmark",
+    )
+    parser.add_argument(
         "--variants",
         nargs="+",
         default=None,
@@ -722,6 +730,11 @@ def main():
 
     # Persist for next run
     save_model_config(_cfg.MODEL_PATH, _cfg.MODEL_NAME)
+
+    # Apply --accuracy-only override
+    if args.accuracy_only:
+        _cfg.ACCURACY_MODE = True
+        _cfg.ACCURACY_ONLY = True
 
     # Parse --lookback-days (single value or range)
     lookback_max, lookback_min = _parse_lookback_days(args.lookback_days)

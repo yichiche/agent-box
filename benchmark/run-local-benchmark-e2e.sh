@@ -29,6 +29,7 @@ Common options:
   --keep-container                   Do not stop/remove container on exit.
   --no-sudo-docker                   Use docker directly instead of sudo docker.
   --accuracy                         Run GSM8K accuracy benchmark after perf bench.
+  --accuracy-only                    Run GSM8K accuracy benchmark only (skip perf bench).
   --no-accuracy                      Skip accuracy benchmark (skip interactive prompt).
   --accuracy-num-questions <int>     Number of GSM8K questions. Default: 2000
   --accuracy-parallel <int>          GSM8K parallel requests. Default: 1000
@@ -106,6 +107,7 @@ USE_SUDO_DOCKER=1
 HOST_HOME_DIR=""
 MTP_MODE=""
 ACCURACY_MODE=""
+ACCURACY_ONLY=0
 ACCURACY_NUM_QUESTIONS=2000
 ACCURACY_PARALLEL=1000
 ACCURACY_NUM_SHOTS=5
@@ -187,6 +189,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --accuracy)
       ACCURACY_MODE=1
+      shift
+      ;;
+    --accuracy-only)
+      ACCURACY_MODE=1
+      ACCURACY_ONLY=1
       shift
       ;;
     --no-accuracy)
@@ -539,42 +546,46 @@ if (( ACCURACY_MODE == 1 )); then
     | tee -a "$HOST_ACCURACY_LOG"
 fi
 
-for c in "${CONCURRENCY_ARRAY[@]}"; do
-  NUM_PROMPTS=$((c * PROMPTS_MULTIPLIER))
-  CONTAINER_BENCH_LOG="${CONTAINER_RESULT_DIR}/bench_c${c}.log"
+if (( ACCURACY_ONLY == 1 )); then
+  log "Accuracy-only mode: skipping perf benchmark"
+else
+  for c in "${CONCURRENCY_ARRAY[@]}"; do
+    NUM_PROMPTS=$((c * PROMPTS_MULTIPLIER))
+    CONTAINER_BENCH_LOG="${CONTAINER_RESULT_DIR}/bench_c${c}.log"
 
-  BENCH_ARGS=(
-    python3 -m sglang.bench_serving
-    --backend sglang
-    --host localhost
-    --port "$SERVER_PORT"
-    --model "$MODEL_PATH"
-    --dataset-name "$DATASET_NAME"
-    --random-input-len "$RANDOM_INPUT_LEN"
-    --random-output-len "$RANDOM_OUTPUT_LEN"
-    --random-range-ratio "$RANDOM_RANGE_RATIO"
-    --max-concurrency "$c"
-    --num-prompts "$NUM_PROMPTS"
-    --disable-tqdm
-    --output-file "$CONTAINER_BENCH_JSONL"
-  )
+    BENCH_ARGS=(
+      python3 -m sglang.bench_serving
+      --backend sglang
+      --host localhost
+      --port "$SERVER_PORT"
+      --model "$MODEL_PATH"
+      --dataset-name "$DATASET_NAME"
+      --random-input-len "$RANDOM_INPUT_LEN"
+      --random-output-len "$RANDOM_OUTPUT_LEN"
+      --random-range-ratio "$RANDOM_RANGE_RATIO"
+      --max-concurrency "$c"
+      --num-prompts "$NUM_PROMPTS"
+      --disable-tqdm
+      --output-file "$CONTAINER_BENCH_JSONL"
+    )
 
-  if (( PROFILE_MODE == 1 )); then
-    BENCH_ARGS+=(--profile)
-  fi
+    if (( PROFILE_MODE == 1 )); then
+      BENCH_ARGS+=(--profile)
+    fi
 
-  if [[ -n "$BENCH_EXTRA_ARGS" ]]; then
-    # shellcheck disable=SC2206
-    BENCH_EXTRA_ARRAY=($BENCH_EXTRA_ARGS)
-    BENCH_ARGS+=("${BENCH_EXTRA_ARRAY[@]}")
-  fi
+    if [[ -n "$BENCH_EXTRA_ARGS" ]]; then
+      # shellcheck disable=SC2206
+      BENCH_EXTRA_ARRAY=($BENCH_EXTRA_ARGS)
+      BENCH_ARGS+=("${BENCH_EXTRA_ARRAY[@]}")
+    fi
 
-  BENCH_CMD="$(quote_join "${BENCH_ARGS[@]}")"
-  log "Running benchmark: concurrency=${c}, num_prompts=${NUM_PROMPTS}"
-  docker_cmd exec "$CONTAINER_NAME" bash -lc \
-    "cd /sgl-workspace/sglang/python && ${BENCH_CMD} 2>&1 | tee -a $(quote_one "$CONTAINER_BENCH_LOG")" \
-    | tee -a "$HOST_CLIENT_LOG"
-done
+    BENCH_CMD="$(quote_join "${BENCH_ARGS[@]}")"
+    log "Running benchmark: concurrency=${c}, num_prompts=${NUM_PROMPTS}"
+    docker_cmd exec "$CONTAINER_NAME" bash -lc \
+      "cd /sgl-workspace/sglang/python && ${BENCH_CMD} 2>&1 | tee -a $(quote_one "$CONTAINER_BENCH_LOG")" \
+      | tee -a "$HOST_CLIENT_LOG"
+  done
+fi
 
 if (( PROFILE_MODE == 1 )); then
   log "Collecting TP0 trace from /tmp"
