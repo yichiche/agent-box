@@ -29,8 +29,7 @@ CREATE TABLE IF NOT EXISTS benchmark_runs (
     status TEXT NOT NULL DEFAULT 'pending',
     error_message TEXT,
     result_dir TEXT,
-    duration_total_sec REAL,
-    UNIQUE(image_tag, model_name, tp_size, mtp_enabled)
+    duration_total_sec REAL
 );
 
 CREATE TABLE IF NOT EXISTS benchmark_metrics (
@@ -126,6 +125,71 @@ def _migrate_add_tp_mtp_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_drop_unique_constraint(conn: sqlite3.Connection) -> None:
+    """Remove UNIQUE(image_tag, model_name, tp_size, mtp_enabled) from benchmark_runs.
+
+    This allows multiple runs for the same image+model+tp+mtp combination,
+    enabling future schema extensions without unique-key conflicts.
+    Deduplication is handled in application code (is_already_benchmarked).
+
+    Idempotent: skips if the table already lacks the UNIQUE constraint.
+    Uses SQLite rename-and-copy since ALTER TABLE cannot drop constraints.
+    """
+    table_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='benchmark_runs'"
+    ).fetchone()
+    if table_sql is None:
+        return
+    if "UNIQUE" not in table_sql[0]:
+        return
+
+    logger.info("Migrating benchmark_runs: dropping UNIQUE constraint...")
+
+    conn.execute("ALTER TABLE benchmark_runs RENAME TO benchmark_runs_old")
+    conn.executescript("""
+        CREATE TABLE benchmark_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            image_tag TEXT NOT NULL,
+            sglang_version TEXT,
+            rocm_version TEXT,
+            build_date TEXT,
+            model_name TEXT NOT NULL,
+            tp_size INTEGER NOT NULL DEFAULT 8,
+            mtp_enabled INTEGER NOT NULL DEFAULT 1,
+            run_timestamp TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            error_message TEXT,
+            result_dir TEXT,
+            duration_total_sec REAL
+        );
+    """)
+    conn.execute("""
+        INSERT INTO benchmark_runs
+            (id, image_tag, sglang_version, rocm_version, build_date,
+             model_name, tp_size, mtp_enabled,
+             run_timestamp, status, error_message, result_dir, duration_total_sec)
+        SELECT
+            id, image_tag, sglang_version, rocm_version, build_date,
+            model_name, tp_size, mtp_enabled,
+            run_timestamp, status, error_message, result_dir, duration_total_sec
+        FROM benchmark_runs_old
+    """)
+    conn.execute("DROP TABLE benchmark_runs_old")
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runs_rocm_status ON benchmark_runs(rocm_version, status)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runs_build_date ON benchmark_runs(build_date)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runs_image_model ON benchmark_runs(image_tag, model_name, tp_size, mtp_enabled)"
+    )
+
+    conn.commit()
+    logger.info("Migration complete: UNIQUE constraint removed from benchmark_runs")
+
+
 def init_db(conn: Optional[sqlite3.Connection] = None) -> None:
     """Create tables if they don't exist."""
     close = False
@@ -134,6 +198,7 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> None:
         close = True
     conn.executescript(SCHEMA_SQL)
     _migrate_add_tp_mtp_columns(conn)
+    _migrate_drop_unique_constraint(conn)
     conn.commit()
     if close:
         conn.close()
