@@ -165,20 +165,40 @@ async def chart_data(
             "p99_e2e_latency_ms": {"label": "P99 E2E Latency (ms)", "datasets": {}},
         }
 
-        # Color palette: ROCm version x concurrency
-        # ROCm 700 = blue tones, ROCm 720 = orange/red tones
-        rocm_conc_colors = {
-            ("700", 1): "#1565C0",
-            ("700", 2): "#1E88E5",
-            ("700", 4): "#42A5F5",
-            ("700", 8): "#64B5F6",
-            ("700", 16): "#90CAF9",
-            ("720", 1): "#E65100",
-            ("720", 2): "#F57C00",
-            ("720", 4): "#FF9800",
-            ("720", 8): "#FFB74D",
-            ("720", 16): "#FFCC80",
+        # Color palette: ROCm version x TP size x concurrency
+        # ROCm 700 (cool): TP2=sapphire, TP4=teal, TP8=indigo
+        # ROCm 720 (warm): TP2=coral,    TP4=bronze, TP8=crimson
+        # Each (rocm, tp) has 5 shades for concurrency (dark -> light)
+        def _adjust_shade(hex_color: str, factor: float) -> str:
+            """Lighten (factor>1) or darken (factor<1) a hex color."""
+            r = int(hex_color[1:3], 16)
+            g = int(hex_color[3:5], 16)
+            b = int(hex_color[5:7], 16)
+            if factor > 1.0:
+                r = min(255, int(r + (255 - r) * (factor - 1.0)))
+                g = min(255, int(g + (255 - g) * (factor - 1.0)))
+                b = min(255, int(b + (255 - b) * (factor - 1.0)))
+            else:
+                r = max(0, int(r * factor))
+                g = max(0, int(g * factor))
+                b = max(0, int(b * factor))
+            return f"#{r:02X}{g:02X}{b:02X}"
+
+        rocm_tp_base = {
+            ("700", 2): "#2563EB",
+            ("700", 4): "#0D9488",
+            ("700", 8): "#6366F1",
+            ("720", 2): "#F97316",
+            ("720", 4): "#B45309",
+            ("720", 8): "#DC2626",
         }
+        # Concurrency shade factors: lower concurrency = darker, higher = lighter
+        conc_shade = {1: 0.70, 2: 0.85, 4: 1.0, 8: 1.25, 16: 1.50}
+
+        rocm_tp_conc_colors = {}
+        for (rocm, tp), base in rocm_tp_base.items():
+            for conc, shade in conc_shade.items():
+                rocm_tp_conc_colors[(rocm, tp, conc)] = _adjust_shade(base, shade)
 
         for row in rows:
             mtp = row["mtp_enabled"]
@@ -186,8 +206,8 @@ async def chart_data(
             mtp_label = "MTP" if mtp else "non-MTP"
             key = f"rocm{row['rocm_version']}-tp{tp}-mtp{mtp}-c{row['concurrency']}"
             conc = row["concurrency"]
-            color = rocm_conc_colors.get(
-                (row["rocm_version"], conc), "#607D8B"
+            color = rocm_tp_conc_colors.get(
+                (row["rocm_version"], tp, conc), "#607D8B"
             )
             # MTP = diamond, non-MTP = circle
             point_style = "rectRot" if mtp else "circle"
@@ -238,14 +258,15 @@ async def chart_data(
             }
 
         # Accuracy chart
-        acc_colors = {"700": "#1E88E5", "720": "#F57C00"}
         acc_datasets: dict = {}
         for row in accuracy_rows:
             mtp = row["mtp_enabled"]
             tp = row["tp_size"]
             mtp_label = "MTP" if mtp else "non-MTP"
             key = f"rocm{row['rocm_version']}-tp{tp}-mtp{mtp}"
-            color = acc_colors.get(row["rocm_version"], "#607D8B")
+            color = rocm_tp_base.get(
+                (row["rocm_version"], tp), "#607D8B"
+            )
             point_style = "rectRot" if mtp else "circle"
 
             if key not in acc_datasets:
