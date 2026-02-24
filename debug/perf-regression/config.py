@@ -74,8 +74,6 @@ CONCURRENCIES = "1,2,4"
 
 # ── TP / MTP variant matrix ──────────────────────────────────────────────
 TP_MTP_VARIANTS = [
-    (2, False),   # TP2
-    (2, True),    # TP2+MTP
     (4, False),   # TP4
     (4, True),    # TP4+MTP
     (8, False),   # TP8
@@ -89,6 +87,7 @@ def variant_label(tp_size: int, mtp: bool) -> str:
 
 
 ACCURACY_MODE = True
+ACCURACY_ONLY = False
 ACCURACY_NUM_QUESTIONS = 2000
 ACCURACY_PARALLEL = 1000
 ACCURACY_NUM_SHOTS = 1
