@@ -185,12 +185,12 @@ async def chart_data(
             return f"#{r:02X}{g:02X}{b:02X}"
 
         rocm_tp_base = {
-            ("700", 2): "#2563EB",
-            ("700", 4): "#0D9488",
-            ("700", 8): "#6366F1",
-            ("720", 2): "#F97316",
-            ("720", 4): "#B45309",
-            ("720", 8): "#DC2626",
+            ("700", 2): "#60A5FA",  # sky blue
+            ("700", 4): "#34D399",  # mint green
+            ("700", 8): "#A78BFA",  # lavender
+            ("720", 2): "#FB923C",  # light orange
+            ("720", 4): "#FACC15",  # sunny yellow
+            ("720", 8): "#F472B6",  # bubblegum pink
         }
         # Concurrency shade factors: lower concurrency = darker, higher = lighter
         conc_shade = {1: 0.70, 2: 0.85, 4: 1.0, 8: 1.25, 16: 1.50}
