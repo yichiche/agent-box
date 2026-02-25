@@ -45,6 +45,11 @@ Advanced options:
   --attention-backend <name>         Attention backend. Default: aiter
   --server-extra-args "<args>"       Extra args appended to launch_server.
   --bench-extra-args "<args>"        Extra args appended to bench_serving.
+  --pr <url_or_number>               Checkout a GitHub PR in sglang before benchmarking.
+                                     Accepts full GitHub PR URL or bare PR number.
+                                     E.g.: --pr 19216
+                                           --pr https://github.com/sgl-project/sglang/pull/19216
+                                           --pr https://...pull/19216/changes/<commit>
 
 Example:
   ./run_local_benchmark_e2e.sh \
@@ -74,6 +79,27 @@ quote_join() {
 
 quote_one() {
   printf '%q' "$1"
+}
+
+parse_pr_ref() {
+  # Accepts a full GitHub PR URL or a bare PR number.
+  # Sets globals PR_NUMBER and PR_COMMIT.
+  # Supported URL forms:
+  #   https://github.com/org/sglang/pull/19216
+  #   https://github.com/org/sglang/pull/19216/files
+  #   https://github.com/org/sglang/pull/19216/changes/<commit>
+  #   19216  (bare number)
+  local input="$1"
+  PR_NUMBER=""
+  PR_COMMIT=""
+  if [[ "$input" =~ ^[0-9]+$ ]]; then
+    PR_NUMBER="$input"
+  elif [[ "$input" =~ /pull/([0-9]+)(/changes/([a-f0-9]{6,40}))? ]]; then
+    PR_NUMBER="${BASH_REMATCH[1]}"
+    PR_COMMIT="${BASH_REMATCH[3]:-}"
+  else
+    die "Cannot parse PR URL or number: $input"
+  fi
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -114,6 +140,7 @@ ACCURACY_NUM_SHOTS=5
 
 SERVER_PORT=9000
 TP_SIZE=8
+TP_SIZE_SET=0
 MAX_RUNNING_REQUESTS=64
 CHUNKED_PREFILL_SIZE=131072
 MEM_FRACTION_STATIC="0.8"
@@ -121,6 +148,7 @@ KV_CACHE_DTYPE="fp8_e4m3"
 ATTENTION_BACKEND="aiter"
 SERVER_EXTRA_ARGS=""
 BENCH_EXTRA_ARGS=""
+PR=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -230,6 +258,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --tp-size)
       TP_SIZE="${2:-}"
+      TP_SIZE_SET=1
       shift 2
       ;;
     --max-running-requests)
@@ -258,6 +287,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --bench-extra-args)
       BENCH_EXTRA_ARGS="${2:-}"
+      shift 2
+      ;;
+    --pr)
+      PR="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -313,12 +346,24 @@ if [[ -z "$ACCURACY_MODE" ]]; then
     *)     ACCURACY_MODE=0 ;;
   esac
 fi
+if (( TP_SIZE_SET == 0 )); then
+  read -r -p "Tensor parallel size (default: ${TP_SIZE}): " TP_SIZE_INPUT
+  if [[ -n "$TP_SIZE_INPUT" ]]; then
+    TP_SIZE="$TP_SIZE_INPUT"
+  fi
+fi
 
 # Save config for next run
 {
   echo "MODEL_PATH=${MODEL_PATH}"
   echo "HOST_HOME_DIR=${HOST_HOME_DIR}"
 } > "$CONFIG_FILE"
+
+PR_NUMBER=""
+PR_COMMIT=""
+if [[ -n "$PR" ]]; then
+  parse_pr_ref "$PR"
+fi
 
 [[ -n "$IMAGE" ]] || die "--image is required"
 [[ -n "$MODEL_PATH" ]] || die "--model-path is required"
@@ -353,11 +398,13 @@ TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
 if [[ -z "$CONTAINER_NAME" ]]; then
   IMAGE_TAG="${IMAGE##*:}"
   IMAGE_TAG="${IMAGE_TAG//[^a-zA-Z0-9_.-]/_}"
-  CONTAINER_NAME="jacky-sglang-bench-${IMAGE_TAG}-${TIMESTAMP}"
+  PR_SUFFIX="${PR_NUMBER:+-pr${PR_NUMBER}}"
+  CONTAINER_NAME="jacky-sglang-bench-${IMAGE_TAG}${PR_SUFFIX}-${TIMESTAMP}"
 fi
 
 if [[ -z "$RESULT_DIR" ]]; then
-  RESULT_DIR="${HOST_HOME_DIR}/benchmark_runs/${TIMESTAMP}"
+  PR_SUFFIX="${PR_NUMBER:+-pr${PR_NUMBER}}"
+  RESULT_DIR="${HOST_HOME_DIR}/benchmark_runs/${TIMESTAMP}${PR_SUFFIX}"
 fi
 mkdir -p "$RESULT_DIR"
 
@@ -455,6 +502,33 @@ add_mount_if_exists /raid /raid
 docker_cmd run "${DOCKER_RUN_ARGS[@]}" "$IMAGE" tail -f /dev/null >/dev/null
 
 docker_cmd exec "$CONTAINER_NAME" mkdir -p "$CONTAINER_RESULT_DIR"
+
+# ── Apply GitHub PR to sglang inside container (if requested) ─────────
+if [[ -n "$PR_NUMBER" ]]; then
+  log "Fetching sglang PR #${PR_NUMBER} from GitHub"
+  docker_cmd exec "$CONTAINER_NAME" bash -lc \
+    "cd /sgl-workspace/sglang && git fetch --depth=100 origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}" \
+    || die "Failed to fetch PR #${PR_NUMBER}. Check network access inside container."
+
+  if [[ -n "$PR_COMMIT" ]]; then
+    log "Checking out commit ${PR_COMMIT} from PR #${PR_NUMBER}"
+    docker_cmd exec "$CONTAINER_NAME" bash -lc \
+      "cd /sgl-workspace/sglang && git checkout -f ${PR_COMMIT}" \
+      || die "Failed to checkout commit ${PR_COMMIT}"
+  else
+    log "Checking out PR #${PR_NUMBER} head"
+    docker_cmd exec "$CONTAINER_NAME" bash -lc \
+      "cd /sgl-workspace/sglang && git checkout -f pr-${PR_NUMBER}" \
+      || die "Failed to checkout PR #${PR_NUMBER}"
+  fi
+
+  log "Reinstalling sglang after PR checkout"
+  docker_cmd exec "$CONTAINER_NAME" bash -lc \
+    "cd /sgl-workspace/sglang/python && pip install -e . --no-deps -q" \
+    || log "WARNING: sglang reinstall failed (non-fatal if only Python files changed)"
+
+  log "PR #${PR_NUMBER} applied successfully"
+fi
 
 # ── Collect version snapshot (before server launch) ───────────────
 # Captures pip packages, system info, etc.  Runs early so the data
