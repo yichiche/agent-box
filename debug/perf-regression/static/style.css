@@ -264,3 +264,118 @@ tr:hover {
     padding: 6px 10px;
     font-family: monospace;
 }
+
+.log-section-label {
+    margin: 12px 16px 0;
+    padding: 4px 8px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+/* Target Baselines Panel */
+.btn-target {
+    padding: 6px 16px;
+    background: #e0e0e0;
+    color: #333;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+
+.btn-target:hover {
+    background: #ccc;
+}
+
+.btn-target.active {
+    background: #1a1a2e;
+    color: #fff;
+}
+
+.target-panel {
+    background: #fff;
+    border-bottom: 1px solid #ddd;
+    padding: 0;
+}
+
+.target-panel-inner {
+    padding: 16px 24px 20px;
+}
+
+.target-panel-inner h3 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #333;
+    margin-bottom: 10px;
+}
+
+.target-form {
+    background: #f9f9f9;
+    border: 1px solid #eee;
+    border-radius: 8px;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.target-form-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: flex-end;
+}
+
+.target-field {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.target-field label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #555;
+}
+
+.target-field select,
+.target-field input {
+    padding: 6px 10px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    background: #fff;
+    min-width: 100px;
+}
+
+.target-field input[type="number"] {
+    min-width: 130px;
+}
+
+.target-field input[type="text"] {
+    min-width: 80px;
+    max-width: 100px;
+}
+
+.target-field-action {
+    justify-content: flex-end;
+}
+
+.btn-save-target {
+    padding: 6px 20px;
+    background: #1a1a2e;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+
+.btn-save-target:hover {
+    background: #2a2a4e;
+}

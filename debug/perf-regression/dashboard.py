@@ -13,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 
 import config as _cfg
 from config import DASHBOARD_PORT, DB_PATH, TEMPLATES_DIR, STATIC_DIR, ROCM_VERSIONS
-from collector import get_connection, init_db, get_version_snapshot
+from collector import get_connection, init_db, get_version_snapshot, upsert_target, get_targets, delete_target
 
 logger = logging.getLogger(__name__)
 app = FastAPI(title="SGLang ROCm Perf Regression Dashboard")
@@ -337,6 +337,36 @@ async def chart_data(
             "datasets": list(acc_datasets.values()),
         }
 
+        # Fetch target baselines for chart annotations
+        target_tp = int(tp_size) if tp_size and tp_size != "all" else None
+        target_mtp = int(mtp_enabled) if mtp_enabled and mtp_enabled != "all" else None
+        target_conc = int(concurrency) if concurrency and concurrency != "all" else None
+        target_ep = ep_size if ep_size else None
+        target_dp = dp_size if dp_size else None
+        targets = get_targets(
+            conn,
+            model_name=model_name,
+            tp_size=target_tp,
+            mtp_enabled=target_mtp,
+            ep_size=target_ep,
+            dp_size=target_dp,
+            concurrency=target_conc,
+        )
+        target_lines: dict = {}
+        for t in targets:
+            for metric in ["output_throughput", "total_throughput", "median_ttft_ms",
+                           "median_itl_ms", "median_e2e_latency_ms"]:
+                val = t.get(metric)
+                if val is not None:
+                    target_lines.setdefault(metric, []).append({
+                        "value": val,
+                        "concurrency": t["concurrency"],
+                        "platform": t["platform"],
+                        "tp_size": t["tp_size"],
+                        "mtp_enabled": t["mtp_enabled"],
+                    })
+        charts_output["targets"] = target_lines
+
         return JSONResponse(charts_output)
     finally:
         conn.close()
@@ -645,6 +675,76 @@ async def variant_comparison(
                 "accuracy_pct": accuracy["accuracy_pct"] if accuracy else None,
             })
         return JSONResponse(result)
+    finally:
+        conn.close()
+
+
+@app.get("/api/targets")
+async def get_targets_api(
+    model_name: Optional[str] = Query(None),
+    tp_size: Optional[str] = Query(None),
+    mtp_enabled: Optional[str] = Query(None),
+    ep_size: Optional[str] = Query(None),
+    dp_size: Optional[str] = Query(None),
+    concurrency: Optional[str] = Query(None),
+):
+    """Return target baselines."""
+    conn = _get_conn()
+    try:
+        targets = get_targets(
+            conn,
+            model_name=model_name,
+            tp_size=int(tp_size) if tp_size and tp_size != "all" else None,
+            mtp_enabled=int(mtp_enabled) if mtp_enabled and mtp_enabled != "all" else None,
+            ep_size=ep_size,
+            dp_size=dp_size,
+            concurrency=int(concurrency) if concurrency and concurrency != "all" else None,
+        )
+        return JSONResponse(targets)
+    finally:
+        conn.close()
+
+
+@app.post("/api/targets")
+async def create_target(request: Request):
+    """Create or update a target baseline."""
+    body = await request.json()
+    conn = _get_conn()
+    try:
+        target_id = upsert_target(
+            conn,
+            platform=body.get("platform", "B200"),
+            model_name=body["model_name"],
+            tp_size=int(body["tp_size"]),
+            mtp_enabled=bool(int(body["mtp_enabled"])),
+            ep_size=int(body["ep_size"]) if body.get("ep_size") not in (None, "", "none") else None,
+            dp_size=int(body["dp_size"]) if body.get("dp_size") not in (None, "", "none") else None,
+            concurrency=int(body["concurrency"]),
+            metrics={
+                "output_throughput": float(body["output_throughput"]) if body.get("output_throughput") else None,
+                "total_throughput": float(body["total_throughput"]) if body.get("total_throughput") else None,
+                "median_ttft_ms": float(body["median_ttft_ms"]) if body.get("median_ttft_ms") else None,
+                "median_itl_ms": float(body["median_itl_ms"]) if body.get("median_itl_ms") else None,
+                "median_e2e_latency_ms": float(body["median_e2e_latency_ms"]) if body.get("median_e2e_latency_ms") else None,
+            },
+        )
+        logger.info("Upserted target baseline id=%d platform=%s", target_id, body.get("platform", "B200"))
+        return JSONResponse({"ok": True, "id": target_id})
+    except (KeyError, ValueError) as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    finally:
+        conn.close()
+
+
+@app.delete("/api/targets/{target_id}")
+async def delete_target_api(target_id: int):
+    """Delete a target baseline."""
+    conn = _get_conn()
+    try:
+        if delete_target(conn, target_id):
+            logger.info("Deleted target baseline id=%d", target_id)
+            return JSONResponse({"ok": True})
+        return JSONResponse({"error": "Target not found"}, status_code=404)
     finally:
         conn.close()
 

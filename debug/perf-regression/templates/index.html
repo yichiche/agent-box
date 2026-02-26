@@ -6,6 +6,7 @@
     <title>SGLang ROCm Perf Regression Dashboard</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3"></script>
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -86,7 +87,118 @@
                 <option value="8">8</option>
             </select>
         </div>
+        <button id="btn-target-toggle" class="btn-target" onclick="toggleTargetPanel()">Target Baselines</button>
         <button id="btn-refresh" onclick="refreshAll()">Refresh</button>
+    </div>
+
+    <div id="target-panel" class="target-panel" style="display:none;">
+        <div class="target-panel-inner">
+            <h3>Add / Update Target Baseline</h3>
+            <div class="target-form">
+                <div class="target-form-row">
+                    <div class="target-field">
+                        <label>Platform</label>
+                        <input type="text" id="target-platform" value="B200" placeholder="B200">
+                    </div>
+                    <div class="target-field">
+                        <label>Model</label>
+                        <select id="target-model"></select>
+                    </div>
+                    <div class="target-field">
+                        <label>TP Size</label>
+                        <select id="target-tp">
+                            <option value="2">2</option>
+                            <option value="4">4</option>
+                            <option value="8" selected>8</option>
+                        </select>
+                    </div>
+                    <div class="target-field">
+                        <label>MTP</label>
+                        <select id="target-mtp">
+                            <option value="1" selected>Yes</option>
+                            <option value="0">No</option>
+                        </select>
+                    </div>
+                    <div class="target-field">
+                        <label>EP Size</label>
+                        <select id="target-ep">
+                            <option value="none" selected>None</option>
+                            <option value="2">2</option>
+                            <option value="4">4</option>
+                            <option value="8">8</option>
+                        </select>
+                    </div>
+                    <div class="target-field">
+                        <label>DP Size</label>
+                        <select id="target-dp">
+                            <option value="none" selected>None</option>
+                            <option value="2">2</option>
+                            <option value="4">4</option>
+                            <option value="8">8</option>
+                        </select>
+                    </div>
+                    <div class="target-field">
+                        <label>Concurrency</label>
+                        <select id="target-concurrency">
+                            <option value="1" selected>1</option>
+                            <option value="2">2</option>
+                            <option value="4">4</option>
+                            <option value="8">8</option>
+                            <option value="16">16</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="target-form-row">
+                    <div class="target-field">
+                        <label>Output Throughput (tok/s)</label>
+                        <input type="number" id="target-output_throughput" step="any" placeholder="e.g. 1500">
+                    </div>
+                    <div class="target-field">
+                        <label>Median E2E Latency (ms)</label>
+                        <input type="number" id="target-median_e2e_latency_ms" step="any" placeholder="e.g. 500">
+                    </div>
+                    <div class="target-field">
+                        <label>Total Throughput (tok/s)</label>
+                        <input type="number" id="target-total_throughput" step="any" placeholder="e.g. 3000">
+                    </div>
+                    <div class="target-field">
+                        <label>Median TTFT (ms)</label>
+                        <input type="number" id="target-median_ttft_ms" step="any" placeholder="e.g. 50">
+                    </div>
+                    <div class="target-field">
+                        <label>Median ITL (ms)</label>
+                        <input type="number" id="target-median_itl_ms" step="any" placeholder="e.g. 10">
+                    </div>
+                    <div class="target-field target-field-action">
+                        <button id="btn-save-target" class="btn-save-target" onclick="saveTarget()">Save Target</button>
+                    </div>
+                </div>
+            </div>
+
+            <h3 style="margin-top:16px;">Current Targets</h3>
+            <table id="target-list-table">
+                <thead>
+                    <tr>
+                        <th>Platform</th>
+                        <th>Model</th>
+                        <th>TP</th>
+                        <th>MTP</th>
+                        <th>EP</th>
+                        <th>DP</th>
+                        <th>Conc.</th>
+                        <th>Out Tput</th>
+                        <th>Med E2E</th>
+                        <th>Total Tput</th>
+                        <th>Med TTFT</th>
+                        <th>Med ITL</th>
+                        <th>Delete</th>
+                    </tr>
+                </thead>
+                <tbody id="target-list-body">
+                    <tr><td colspan="13" class="empty">No targets defined</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 
     <div class="charts-grid">
@@ -193,7 +305,10 @@
     </div>
 
     <script>
+        Chart.register(window['chartjs-plugin-annotation'] || {});
+
         const chartInstances = {};
+        let currentTargets = {};
         const metricKeys = [
             'output_throughput', 'total_throughput',
             'median_ttft_ms', 'median_itl_ms',
@@ -264,7 +379,39 @@
             return await resp.json();
         }
 
-        function createChart(canvasId, chartData) {
+        // Target baseline annotation colors
+        const targetColors = [
+            '#FFB300', '#FF6F00', '#FFD54F', '#FFA726', '#FF8F00'
+        ];
+
+        function buildTargetAnnotations(metricKey, targets) {
+            const items = targets[metricKey] || [];
+            const annotations = {};
+            items.forEach((t, i) => {
+                const color = targetColors[i % targetColors.length];
+                const mtpLabel = t.mtp_enabled ? 'MTP' : 'non-MTP';
+                annotations[`target-${metricKey}-${i}`] = {
+                    type: 'line',
+                    yMin: t.value,
+                    yMax: t.value,
+                    borderColor: color,
+                    borderWidth: 2,
+                    borderDash: [8, 4],
+                    label: {
+                        display: true,
+                        content: `${t.platform} TP${t.tp_size}/${mtpLabel}/c=${t.concurrency}: ${t.value}`,
+                        position: 'start',
+                        backgroundColor: color + 'CC',
+                        color: '#000',
+                        font: { size: 11, weight: 'bold' },
+                        padding: { top: 2, bottom: 2, left: 6, right: 6 },
+                    },
+                };
+            });
+            return annotations;
+        }
+
+        function createChart(canvasId, chartData, targets) {
             const ctx = document.getElementById(canvasId).getContext('2d');
 
             if (chartInstances[canvasId]) {
@@ -284,6 +431,10 @@
                     ),
                 };
             });
+
+            // Extract metric key from canvas id
+            const metricKey = canvasId.replace('chart-', '');
+            const annotations = targets ? buildTargetAnnotations(metricKey, targets) : {};
 
             chartInstances[canvasId] = new Chart(ctx, {
                 type: 'line',
@@ -313,6 +464,9 @@
                         },
                     },
                     plugins: {
+                        annotation: {
+                            annotations: annotations,
+                        },
                         tooltip: {
                             callbacks: {
                                 title: function(items) {
@@ -444,7 +598,9 @@
                         : '';
                     errorHtml = `<tr id="${errorId}" class="metrics-detail" style="display:none">
                         <td colspan="15">
-                            ${errorText ? `<pre class="error-message">${errorText}</pre>` : ''}
+                            ${errorText ? `<div class="log-section-label">Orchestrator Output</div>
+                            <pre class="error-message">${errorText}</pre>` : ''}
+                            <div class="log-section-label">Server Log</div>
                             <pre class="error-message server-log" id="serverlog-${r.id}">Loading server.log...</pre>
                         </td>
                     </tr>`;
@@ -523,7 +679,6 @@
         }
 
         async function compareVersions(runId, rocmVersion, btn) {
-            // Find the previous completed run with the same rocm_version
             const f = getFilters();
             const params = new URLSearchParams({ days: f.days, rocm_version: rocmVersion, model_name: f.model_name });
             const runs = await (await fetch(`/api/runs?${params}`)).json();
@@ -540,7 +695,6 @@
                 const diffResp = await fetch(`/api/version-diff?run_a=${prevRun.id}&run_b=${runId}`);
                 const diffData = await diffResp.json();
 
-                // Show in a simple alert/modal
                 let msg = 'Version Diff:\n\n';
                 if (diffData.diff.changed && diffData.diff.changed.length > 0) {
                     msg += 'CHANGED:\n';
@@ -565,6 +719,119 @@
             btn.textContent = 'Compare';
         }
 
+        // ── Target Baselines ──────────────────────────────────────────
+
+        function toggleTargetPanel() {
+            const panel = document.getElementById('target-panel');
+            const btn = document.getElementById('btn-target-toggle');
+            if (panel.style.display === 'none') {
+                panel.style.display = 'block';
+                btn.classList.add('active');
+                loadTargetList();
+            } else {
+                panel.style.display = 'none';
+                btn.classList.remove('active');
+            }
+        }
+
+        async function loadTargetList() {
+            const f = getFilters();
+            const params = new URLSearchParams({
+                model_name: f.model_name,
+            });
+            try {
+                const resp = await fetch(`/api/targets?${params}`);
+                const targets = await resp.json();
+                renderTargetList(targets);
+            } catch (err) {
+                console.error('Failed to load targets:', err);
+            }
+        }
+
+        function renderTargetList(targets) {
+            const tbody = document.getElementById('target-list-body');
+            if (!targets || targets.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="13" class="empty">No targets defined</td></tr>';
+                return;
+            }
+            tbody.innerHTML = targets.map(t => `<tr>
+                <td><strong>${t.platform}</strong></td>
+                <td class="tag-cell">${t.model_name}</td>
+                <td>${t.tp_size}</td>
+                <td>${t.mtp_enabled ? 'Yes' : 'No'}</td>
+                <td>${t.ep_size != null ? t.ep_size : '-'}</td>
+                <td>${t.dp_size != null ? t.dp_size : '-'}</td>
+                <td>${t.concurrency}</td>
+                <td>${t.output_throughput != null ? t.output_throughput.toFixed(1) : '-'}</td>
+                <td>${t.median_e2e_latency_ms != null ? t.median_e2e_latency_ms.toFixed(1) : '-'}</td>
+                <td>${t.total_throughput != null ? t.total_throughput.toFixed(1) : '-'}</td>
+                <td>${t.median_ttft_ms != null ? t.median_ttft_ms.toFixed(1) : '-'}</td>
+                <td>${t.median_itl_ms != null ? t.median_itl_ms.toFixed(1) : '-'}</td>
+                <td><button class="btn-expand" onclick="deleteTarget(${t.id}, this)">Delete</button></td>
+            </tr>`).join('');
+        }
+
+        async function saveTarget() {
+            const btn = document.getElementById('btn-save-target');
+            const modelSelect = document.getElementById('target-model');
+            if (!modelSelect.value) {
+                alert('Please select a model');
+                return;
+            }
+
+            const body = {
+                platform: document.getElementById('target-platform').value || 'B200',
+                model_name: modelSelect.value,
+                tp_size: document.getElementById('target-tp').value,
+                mtp_enabled: document.getElementById('target-mtp').value,
+                ep_size: document.getElementById('target-ep').value,
+                dp_size: document.getElementById('target-dp').value,
+                concurrency: document.getElementById('target-concurrency').value,
+                output_throughput: document.getElementById('target-output_throughput').value || null,
+                total_throughput: document.getElementById('target-total_throughput').value || null,
+                median_ttft_ms: document.getElementById('target-median_ttft_ms').value || null,
+                median_itl_ms: document.getElementById('target-median_itl_ms').value || null,
+                median_e2e_latency_ms: document.getElementById('target-median_e2e_latency_ms').value || null,
+            };
+
+            btn.textContent = 'Saving...';
+            try {
+                const resp = await fetch('/api/targets', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                const result = await resp.json();
+                if (!resp.ok) throw new Error(result.error || 'Save failed');
+                document.getElementById('target-output_throughput').value = '';
+                document.getElementById('target-total_throughput').value = '';
+                document.getElementById('target-median_ttft_ms').value = '';
+                document.getElementById('target-median_itl_ms').value = '';
+                document.getElementById('target-median_e2e_latency_ms').value = '';
+                loadTargetList();
+                refreshAll();
+            } catch (err) {
+                alert('Failed to save target: ' + err.message);
+            }
+            btn.textContent = 'Save Target';
+        }
+
+        async function deleteTarget(targetId, btn) {
+            if (!confirm('Delete this target baseline?')) return;
+            btn.textContent = '...';
+            try {
+                const resp = await fetch(`/api/targets/${targetId}`, { method: 'DELETE' });
+                if (!resp.ok) throw new Error('Delete failed');
+                loadTargetList();
+                refreshAll();
+            } catch (err) {
+                alert('Failed to delete target: ' + err.message);
+                btn.textContent = 'Delete';
+            }
+        }
+
+        // ── Main refresh ──────────────────────────────────────────────
+
         async function refreshAll() {
             document.getElementById('btn-refresh').textContent = 'Loading...';
             try {
@@ -572,10 +839,13 @@
                     fetchChartData(), fetchAlerts(), fetchRuns(), fetchHealth(),
                 ]);
 
-                // Render charts
+                // Store targets from chart data response
+                currentTargets = chartData.targets || {};
+
+                // Render charts with target annotations
                 for (const key of metricKeys) {
                     if (chartData[key]) {
-                        createChart(`chart-${key}`, chartData[key]);
+                        createChart(`chart-${key}`, chartData[key], currentTargets);
                     }
                 }
 
@@ -602,14 +872,21 @@
                 const resp = await fetch('/api/models');
                 const models = await resp.json();
                 const select = document.getElementById('filter-model');
+                const targetSelect = document.getElementById('target-model');
                 models.forEach((m, i) => {
                     const opt = document.createElement('option');
                     opt.value = m;
                     opt.textContent = m;
                     select.appendChild(opt);
+
+                    const opt2 = document.createElement('option');
+                    opt2.value = m;
+                    opt2.textContent = m;
+                    targetSelect.appendChild(opt2);
                 });
                 if (models.length > 0) {
                     select.value = models[0];
+                    targetSelect.value = models[0];
                 }
             } catch (err) {
                 console.error('Failed to load models:', err);
