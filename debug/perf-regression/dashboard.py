@@ -720,6 +720,7 @@ async def create_target(request: Request):
             ep_size=int(body["ep_size"]) if body.get("ep_size") not in (None, "", "none") else None,
             dp_size=int(body["dp_size"]) if body.get("dp_size") not in (None, "", "none") else None,
             concurrency=int(body["concurrency"]),
+            image_tag=body.get("image_tag") or None,
             metrics={
                 "output_throughput": float(body["output_throughput"]) if body.get("output_throughput") else None,
                 "total_throughput": float(body["total_throughput"]) if body.get("total_throughput") else None,
