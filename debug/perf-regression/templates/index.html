@@ -108,6 +108,10 @@
                         <input type="text" id="target-platform" value="B200" placeholder="B200">
                     </div>
                     <div class="target-field">
+                        <label>Image Tag</label>
+                        <input type="text" id="target-image-tag" placeholder="e.g. v0.5.7-b200">
+                    </div>
+                    <div class="target-field">
                         <label>Model</label>
                         <select id="target-model"></select>
                     </div>
@@ -157,10 +161,6 @@
                 </div>
                 <div class="target-form-row">
                     <div class="target-field">
-                        <label>Output Throughput (tok/s)</label>
-                        <input type="number" id="target-output_throughput" step="any" placeholder="e.g. 1500">
-                    </div>
-                    <div class="target-field">
                         <label>Median E2E Latency (ms)</label>
                         <input type="number" id="target-median_e2e_latency_ms" step="any" placeholder="e.g. 500">
                     </div>
@@ -187,13 +187,13 @@
                 <thead>
                     <tr>
                         <th>Platform</th>
+                        <th>Image Tag</th>
                         <th>Model</th>
                         <th>TP</th>
                         <th>MTP</th>
                         <th>EP</th>
                         <th>DP</th>
                         <th>Conc.</th>
-                        <th>Out Tput</th>
                         <th>Med E2E</th>
                         <th>Total Tput</th>
                         <th>Med TTFT</th>
@@ -765,13 +765,13 @@
             }
             tbody.innerHTML = targets.map(t => `<tr>
                 <td><strong>${t.platform}</strong></td>
+                <td class="tag-cell" title="${t.image_tag || ''}">${t.image_tag || '-'}</td>
                 <td class="tag-cell">${t.model_name}</td>
                 <td>${t.tp_size}</td>
                 <td>${t.mtp_enabled ? 'Yes' : 'No'}</td>
                 <td>${t.ep_size != null ? t.ep_size : '-'}</td>
                 <td>${t.dp_size != null ? t.dp_size : '-'}</td>
                 <td>${t.concurrency}</td>
-                <td>${t.output_throughput != null ? t.output_throughput.toFixed(1) : '-'}</td>
                 <td>${t.median_e2e_latency_ms != null ? t.median_e2e_latency_ms.toFixed(1) : '-'}</td>
                 <td>${t.total_throughput != null ? t.total_throughput.toFixed(1) : '-'}</td>
                 <td>${t.median_ttft_ms != null ? t.median_ttft_ms.toFixed(1) : '-'}</td>
@@ -790,13 +790,13 @@
 
             const body = {
                 platform: document.getElementById('target-platform').value || 'B200',
+                image_tag: document.getElementById('target-image-tag').value || '',
                 model_name: modelSelect.value,
                 tp_size: document.getElementById('target-tp').value,
                 mtp_enabled: document.getElementById('target-mtp').value,
                 ep_size: document.getElementById('target-ep').value,
                 dp_size: document.getElementById('target-dp').value,
                 concurrency: document.getElementById('target-concurrency').value,
-                output_throughput: document.getElementById('target-output_throughput').value || null,
                 total_throughput: document.getElementById('target-total_throughput').value || null,
                 median_ttft_ms: document.getElementById('target-median_ttft_ms').value || null,
                 median_itl_ms: document.getElementById('target-median_itl_ms').value || null,
@@ -812,7 +812,6 @@
                 });
                 const result = await resp.json();
                 if (!resp.ok) throw new Error(result.error || 'Save failed');
-                document.getElementById('target-output_throughput').value = '';
                 document.getElementById('target-total_throughput').value = '';
                 document.getElementById('target-median_ttft_ms').value = '';
                 document.getElementById('target-median_itl_ms').value = '';

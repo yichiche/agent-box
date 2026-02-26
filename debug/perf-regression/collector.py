@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS version_snapshots (
 CREATE TABLE IF NOT EXISTS target_baselines (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     platform TEXT NOT NULL DEFAULT 'B200',
+    image_tag TEXT,
     model_name TEXT NOT NULL,
     tp_size INTEGER NOT NULL,
     mtp_enabled INTEGER NOT NULL,
@@ -255,6 +256,20 @@ def _migrate_add_ep_dp_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_add_target_image_tag(conn: sqlite3.Connection) -> None:
+    """Add image_tag column to target_baselines if it doesn't exist."""
+    try:
+        cols = {
+            row[1] for row in conn.execute("PRAGMA table_info(target_baselines)").fetchall()
+        }
+    except Exception:
+        return  # table doesn't exist yet
+    if "image_tag" not in cols:
+        conn.execute("ALTER TABLE target_baselines ADD COLUMN image_tag TEXT")
+        conn.commit()
+        logger.info("Migrated: added image_tag column to target_baselines")
+
+
 def init_db(conn: Optional[sqlite3.Connection] = None) -> None:
     """Create tables if they don't exist."""
     close = False
@@ -265,6 +280,7 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> None:
     _migrate_add_tp_mtp_columns(conn)
     _migrate_drop_unique_constraint(conn)
     _migrate_add_ep_dp_columns(conn)
+    _migrate_add_target_image_tag(conn)
     conn.commit()
     if close:
         conn.close()
@@ -650,16 +666,18 @@ def upsert_target(
     dp_size: Optional[int],
     concurrency: int,
     metrics: dict,
+    image_tag: Optional[str] = None,
 ) -> int:
     """Insert or update a target baseline row. Returns the row id."""
     conn.execute(
         """INSERT INTO target_baselines
-           (platform, model_name, tp_size, mtp_enabled, ep_size, dp_size,
+           (platform, image_tag, model_name, tp_size, mtp_enabled, ep_size, dp_size,
             concurrency, output_throughput, total_throughput,
             median_ttft_ms, median_itl_ms, median_e2e_latency_ms)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(platform, model_name, tp_size, mtp_enabled, ep_size, dp_size, concurrency)
            DO UPDATE SET
+            image_tag = excluded.image_tag,
             output_throughput = excluded.output_throughput,
             total_throughput = excluded.total_throughput,
             median_ttft_ms = excluded.median_ttft_ms,
@@ -668,6 +686,7 @@ def upsert_target(
             created_at = datetime('now')""",
         (
             platform,
+            image_tag,
             model_name,
             tp_size,
             int(mtp_enabled),

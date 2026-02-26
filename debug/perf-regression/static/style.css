@@ -408,7 +408,14 @@ tr:hover {
 
 .target-field input[type="text"] {
     min-width: 80px;
+}
+
+#target-platform {
     max-width: 100px;
+}
+
+#target-image-tag {
+    min-width: 180px;
 }
 
 .target-field-action {
