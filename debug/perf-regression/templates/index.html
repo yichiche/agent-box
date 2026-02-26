@@ -747,6 +747,11 @@
             const f = getFilters();
             const params = new URLSearchParams({
                 model_name: f.model_name,
+                tp_size: f.tp_size,
+                mtp_enabled: f.mtp_enabled,
+                ep_size: f.ep_size,
+                dp_size: f.dp_size,
+                concurrency: f.concurrency,
             });
             try {
                 const resp = await fetch(`/api/targets?${params}`);
@@ -860,6 +865,11 @@
                 // Render tables
                 renderAlerts(alerts);
                 renderRuns(runs);
+
+                // Refresh target list if panel is open
+                if (document.getElementById('target-panel').style.display !== 'none') {
+                    loadTargetList();
+                }
 
                 // Health badge
                 const badge = document.getElementById('health-badge');
