@@ -95,12 +95,31 @@ CREATE TABLE IF NOT EXISTS version_snapshots (
     UNIQUE(run_id, library_name)
 );
 
+CREATE TABLE IF NOT EXISTS target_baselines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform TEXT NOT NULL DEFAULT 'B200',
+    model_name TEXT NOT NULL,
+    tp_size INTEGER NOT NULL,
+    mtp_enabled INTEGER NOT NULL,
+    ep_size INTEGER DEFAULT NULL,
+    dp_size INTEGER DEFAULT NULL,
+    concurrency INTEGER NOT NULL,
+    output_throughput REAL,
+    total_throughput REAL,
+    median_ttft_ms REAL,
+    median_itl_ms REAL,
+    median_e2e_latency_ms REAL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(platform, model_name, tp_size, mtp_enabled, ep_size, dp_size, concurrency)
+);
+
 CREATE INDEX IF NOT EXISTS idx_runs_rocm_status ON benchmark_runs(rocm_version, status);
 CREATE INDEX IF NOT EXISTS idx_runs_build_date ON benchmark_runs(build_date);
 CREATE INDEX IF NOT EXISTS idx_metrics_run_id ON benchmark_metrics(run_id);
 CREATE INDEX IF NOT EXISTS idx_accuracy_run_id ON accuracy_results(run_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_run_id ON regression_alerts(run_id);
 CREATE INDEX IF NOT EXISTS idx_version_snapshots_run_id ON version_snapshots(run_id);
+CREATE INDEX IF NOT EXISTS idx_target_baselines_lookup ON target_baselines(model_name, tp_size, mtp_enabled);
 """
 
 
@@ -619,6 +638,110 @@ def ingest_run(
     if version_path.exists():
         snapshot = json.loads(version_path.read_text())
         ingest_version_snapshot(conn, run_id, snapshot)
+
+
+def upsert_target(
+    conn: sqlite3.Connection,
+    platform: str,
+    model_name: str,
+    tp_size: int,
+    mtp_enabled: bool,
+    ep_size: Optional[int],
+    dp_size: Optional[int],
+    concurrency: int,
+    metrics: dict,
+) -> int:
+    """Insert or update a target baseline row. Returns the row id."""
+    conn.execute(
+        """INSERT INTO target_baselines
+           (platform, model_name, tp_size, mtp_enabled, ep_size, dp_size,
+            concurrency, output_throughput, total_throughput,
+            median_ttft_ms, median_itl_ms, median_e2e_latency_ms)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(platform, model_name, tp_size, mtp_enabled, ep_size, dp_size, concurrency)
+           DO UPDATE SET
+            output_throughput = excluded.output_throughput,
+            total_throughput = excluded.total_throughput,
+            median_ttft_ms = excluded.median_ttft_ms,
+            median_itl_ms = excluded.median_itl_ms,
+            median_e2e_latency_ms = excluded.median_e2e_latency_ms,
+            created_at = datetime('now')""",
+        (
+            platform,
+            model_name,
+            tp_size,
+            int(mtp_enabled),
+            ep_size,
+            dp_size,
+            concurrency,
+            metrics.get("output_throughput"),
+            metrics.get("total_throughput"),
+            metrics.get("median_ttft_ms"),
+            metrics.get("median_itl_ms"),
+            metrics.get("median_e2e_latency_ms"),
+        ),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT id FROM target_baselines "
+        "WHERE platform = ? AND model_name = ? AND tp_size = ? AND mtp_enabled = ? "
+        "AND ep_size IS ? AND dp_size IS ? AND concurrency = ?",
+        (platform, model_name, tp_size, int(mtp_enabled), ep_size, dp_size, concurrency),
+    ).fetchone()
+    return row["id"]
+
+
+def get_targets(
+    conn: sqlite3.Connection,
+    model_name: Optional[str] = None,
+    tp_size: Optional[int] = None,
+    mtp_enabled: Optional[int] = None,
+    ep_size: Optional[str] = None,
+    dp_size: Optional[str] = None,
+    concurrency: Optional[int] = None,
+) -> list[dict]:
+    """Return target baselines matching the given filters."""
+    where_parts = ["1=1"]
+    params: list = []
+
+    if model_name and model_name != "all":
+        where_parts.append("model_name = ?")
+        params.append(model_name)
+    if tp_size is not None:
+        where_parts.append("tp_size = ?")
+        params.append(tp_size)
+    if mtp_enabled is not None:
+        where_parts.append("mtp_enabled = ?")
+        params.append(mtp_enabled)
+    if ep_size is not None:
+        if ep_size == "none":
+            where_parts.append("ep_size IS NULL")
+        elif ep_size != "all":
+            where_parts.append("ep_size = ?")
+            params.append(int(ep_size))
+    if dp_size is not None:
+        if dp_size == "none":
+            where_parts.append("dp_size IS NULL")
+        elif dp_size != "all":
+            where_parts.append("dp_size = ?")
+            params.append(int(dp_size))
+    if concurrency is not None:
+        where_parts.append("concurrency = ?")
+        params.append(concurrency)
+
+    rows = conn.execute(
+        f"SELECT * FROM target_baselines WHERE {' AND '.join(where_parts)} "
+        "ORDER BY platform, tp_size, mtp_enabled, concurrency",
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_target(conn: sqlite3.Connection, target_id: int) -> bool:
+    """Delete a target baseline by id. Returns True if a row was deleted."""
+    cur = conn.execute("DELETE FROM target_baselines WHERE id = ?", (target_id,))
+    conn.commit()
+    return cur.rowcount > 0
 
 
 if __name__ == "__main__":
