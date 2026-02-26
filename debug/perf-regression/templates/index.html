@@ -93,7 +93,14 @@
 
     <div id="target-panel" class="target-panel" style="display:none;">
         <div class="target-panel-inner">
-            <h3>Add / Update Target Baseline</h3>
+            <div class="target-panel-header">
+                <h3>Add / Update Target Baseline</h3>
+                <label class="target-line-switch">
+                    <span>Chart Lines</span>
+                    <input type="checkbox" id="chk-target-lines" checked onchange="toggleTargetLines()">
+                    <span class="switch-slider"></span>
+                </label>
+            </div>
             <div class="target-form">
                 <div class="target-form-row">
                     <div class="target-field">
@@ -305,6 +312,7 @@
 
         const chartInstances = {};
         let currentTargets = {};
+        let showTargetLines = true;
         const metricKeys = [
             'median_e2e_latency_ms', 'total_throughput',
             'median_ttft_ms', 'median_itl_ms',
@@ -430,7 +438,7 @@
 
             // Extract metric key from canvas id
             const metricKey = canvasId.replace('chart-', '');
-            const annotations = targets ? buildTargetAnnotations(metricKey, targets) : {};
+            const annotations = (showTargetLines && targets) ? buildTargetAnnotations(metricKey, targets) : {};
 
             chartInstances[canvasId] = new Chart(ctx, {
                 type: 'line',
@@ -728,6 +736,11 @@
                 panel.style.display = 'none';
                 btn.classList.remove('active');
             }
+        }
+
+        function toggleTargetLines() {
+            showTargetLines = document.getElementById('chk-target-lines').checked;
+            refreshAll();
         }
 
         async function loadTargetList() {

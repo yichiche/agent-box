@@ -306,11 +306,61 @@ tr:hover {
     padding: 16px 24px 20px;
 }
 
+.target-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+}
+
 .target-panel-inner h3 {
     font-size: 0.95rem;
     font-weight: 600;
     color: #333;
-    margin-bottom: 10px;
+    margin-bottom: 0;
+}
+
+.target-line-switch {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #555;
+}
+
+.target-line-switch input {
+    display: none;
+}
+
+.switch-slider {
+    position: relative;
+    width: 36px;
+    height: 20px;
+    background: #ccc;
+    border-radius: 10px;
+    transition: background 0.2s;
+}
+
+.switch-slider::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    background: #fff;
+    border-radius: 50%;
+    transition: transform 0.2s;
+}
+
+.target-line-switch input:checked + .switch-slider {
+    background: #1a1a2e;
+}
+
+.target-line-switch input:checked + .switch-slider::after {
+    transform: translateX(16px);
 }
 
 .target-form {
