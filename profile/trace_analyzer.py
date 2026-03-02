@@ -411,7 +411,7 @@ class LayerDetector:
         # Layer start markers (after ALLREDUCE)
         self._layer_start_patterns = [
             re.compile(
-                r"_fused_rms_mxfp4_quant|_fused_rms_fp8|fused_dual_residual_rmsnorm_kernel|fused_rmsnorm_kernel"
+                r"_fused_rms_mxfp4_quant|_fused_rms_fp8|fused_dual_residual_rmsnorm_kernel|fused_rmsnorm_kernel|add_rmsnorm_quant"
             ),  # Prefill/decode layernorm (quantized fused or standard)
         ]
 

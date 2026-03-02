@@ -49,7 +49,7 @@ if git diff --cached --name-only | grep -q "profile/trace_analyzer.py"; then
     echo ""
 
     # Run unit tests first (fast, no trace files needed)
-    python -m pytest "$PROFILE_DIR/tests/test_classifier_unit.py" \
+    python3 -m pytest "$PROFILE_DIR/tests/test_classifier_unit.py" \
                      "$PROFILE_DIR/tests/test_layer_detector_unit.py" \
                      -v --tb=short
     UNIT_EXIT=$?
@@ -61,7 +61,7 @@ if git diff --cached --name-only | grep -q "profile/trace_analyzer.py"; then
     fi
 
     # Run regression tests with --regen-snapshots (re-parses traces, skips pickle cache)
-    python -m pytest "$PROFILE_DIR/tests/test_regression.py" \
+    python3 -m pytest "$PROFILE_DIR/tests/test_regression.py" \
                      -v --tb=short --regen-snapshots
     REGR_EXIT=$?
 
@@ -69,7 +69,7 @@ if git diff --cached --name-only | grep -q "profile/trace_analyzer.py"; then
         echo ""
         echo "==> REGRESSION TESTS FAILED. Commit aborted."
         echo "    If failures are expected (new model support), update baselines:"
-        echo "    python tests/generate_baselines.py --all"
+        echo "    python3 tests/generate_baselines.py --all"
         exit 1
     fi
 
