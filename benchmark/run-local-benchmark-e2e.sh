@@ -55,6 +55,8 @@ Advanced options:
                                      E.g.: --aiter-pr 123
                                            --aiter-pr https://github.com/ROCm/aiter/pull/123
                                            --aiter-pr <commit-sha>
+  --resolved-config <path>           Save all resolved config values to file after prompts.
+  --load-config <path>               Load config values from file (skip interactive prompts).
 
 Example:
   ./run_local_benchmark_e2e.sh \
@@ -178,6 +180,8 @@ SERVER_EXTRA_ARGS=""
 BENCH_EXTRA_ARGS=""
 PR=""
 AITER_PR=""
+RESOLVED_CONFIG=""
+LOAD_CONFIG=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -326,6 +330,14 @@ while [[ $# -gt 0 ]]; do
       AITER_PR="${2:-}"
       shift 2
       ;;
+    --resolved-config)
+      RESOLVED_CONFIG="${2:-}"
+      shift 2
+      ;;
+    --load-config)
+      LOAD_CONFIG="${2:-}"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -335,6 +347,35 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# Load config from file if --load-config was specified (skip interactive prompts)
+if [[ -n "$LOAD_CONFIG" && -f "$LOAD_CONFIG" ]]; then
+  log "Loading config from: ${LOAD_CONFIG}"
+  [[ -z "$PROFILE_MODE" || "$PROFILE_MODE" == "0" ]] && (( PROFILE_SET == 0 )) && {
+    _val="$(grep -m1 '^PROFILE_MODE=' "$LOAD_CONFIG" 2>/dev/null | cut -d= -f2- || true)"
+    [[ -n "$_val" ]] && { PROFILE_MODE="$_val"; PROFILE_SET=1; }
+  }
+  (( CONCURRENCIES_SET == 0 )) && {
+    _val="$(grep -m1 '^CONCURRENCIES=' "$LOAD_CONFIG" 2>/dev/null | cut -d= -f2- || true)"
+    [[ -n "$_val" ]] && { CONCURRENCIES="$_val"; CONCURRENCIES_SET=1; }
+  }
+  [[ -z "$HOST_HOME_DIR" ]] && {
+    _val="$(grep -m1 '^HOST_HOME_DIR=' "$LOAD_CONFIG" 2>/dev/null | cut -d= -f2- || true)"
+    [[ -n "$_val" ]] && HOST_HOME_DIR="$_val"
+  }
+  [[ -z "$MTP_MODE" ]] && {
+    _val="$(grep -m1 '^MTP_MODE=' "$LOAD_CONFIG" 2>/dev/null | cut -d= -f2- || true)"
+    [[ -n "$_val" ]] && MTP_MODE="$_val"
+  }
+  [[ -z "$ACCURACY_MODE" ]] && {
+    _val="$(grep -m1 '^ACCURACY_MODE=' "$LOAD_CONFIG" 2>/dev/null | cut -d= -f2- || true)"
+    [[ -n "$_val" ]] && ACCURACY_MODE="$_val"
+  }
+  (( TP_SIZE_SET == 0 )) && {
+    _val="$(grep -m1 '^TP_SIZE=' "$LOAD_CONFIG" 2>/dev/null | cut -d= -f2- || true)"
+    [[ -n "$_val" ]] && { TP_SIZE="$_val"; TP_SIZE_SET=1; }
+  }
+fi
 
 if [[ -z "$IMAGE" ]]; then
   read -r -p "Docker image: " IMAGE
@@ -391,6 +432,19 @@ fi
   echo "MODEL_PATH=${MODEL_PATH}"
   echo "HOST_HOME_DIR=${HOST_HOME_DIR}"
 } > "$CONFIG_FILE"
+
+# Save resolved config if --resolved-config was specified
+if [[ -n "$RESOLVED_CONFIG" ]]; then
+  log "Saving resolved config to: ${RESOLVED_CONFIG}"
+  {
+    echo "PROFILE_MODE=${PROFILE_MODE}"
+    echo "CONCURRENCIES=${CONCURRENCIES}"
+    echo "HOST_HOME_DIR=${HOST_HOME_DIR}"
+    echo "MTP_MODE=${MTP_MODE}"
+    echo "ACCURACY_MODE=${ACCURACY_MODE}"
+    echo "TP_SIZE=${TP_SIZE}"
+  } > "$RESOLVED_CONFIG"
+fi
 
 PR_NUMBER=""
 PR_COMMIT=""

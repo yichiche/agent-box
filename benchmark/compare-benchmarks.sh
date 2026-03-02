@@ -13,9 +13,13 @@ Required:
 Comparison options:
   --label-a <label>      Display label for image A. Default: image name.
   --label-b <label>      Display label for image B. Default: image name.
+  --args-a "<args>"      Extra args passed only to Image A benchmark run.
+  --args-b "<args>"      Extra args passed only to Image B benchmark run.
+  --reconfigure-b        Re-prompt interactive config for Image B run.
+                         Default: Image B reuses the same config as Image A.
   --output-csv <path>    Write machine-readable comparison CSV.
 
-All other options are forwarded to run-local-benchmark-e2e.sh:
+All other options are forwarded to both runs of run-local-benchmark-e2e.sh:
   --model-path, --concurrencies, --home-dir, --profile, --no-profile,
   --accuracy, --no-accuracy, --mtp, --no-mtp, --port, --tp-size, etc.
 
@@ -32,6 +36,13 @@ Example:
     --no-profile \
     --mtp \
     --no-accuracy
+
+  # Compare same image with different aiter versions:
+  ./compare-benchmarks.sh \
+    --image-a rocm/sgl-dev:v0.5.9 \
+    --image-b rocm/sgl-dev:v0.5.9 \
+    --model-path /data/model/ \
+    --args-b "--aiter-pr 123"
 EOF
 }
 
@@ -57,6 +68,9 @@ IMAGE_B=""
 LABEL_A=""
 LABEL_B=""
 OUTPUT_CSV=""
+EXTRA_ARGS_A=""
+EXTRA_ARGS_B=""
+RECONFIGURE_B=0
 PASSTHROUGH_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -80,6 +94,18 @@ while [[ $# -gt 0 ]]; do
     --output-csv)
       OUTPUT_CSV="${2:-}"
       shift 2
+      ;;
+    --args-a)
+      EXTRA_ARGS_A="${2:-}"
+      shift 2
+      ;;
+    --args-b)
+      EXTRA_ARGS_B="${2:-}"
+      shift 2
+      ;;
+    --reconfigure-b)
+      RECONFIGURE_B=1
+      shift
       ;;
     -h|--help)
       usage
@@ -145,7 +171,12 @@ log "Comparison directory: ${COMPARISON_DIR}"
 log "Image A: ${LABEL_A}"
 log "Image B: ${LABEL_B}"
 
+# Resolved config file: Run A saves its config here, Run B loads it by default
+RESOLVED_CONFIG_FILE="${COMPARISON_DIR}/.resolved_config"
+
 # ─── Run A ───────────────────────────────────────────────────────────────────
+# shellcheck disable=SC2206
+EXTRA_ARGS_A_ARRAY=($EXTRA_ARGS_A)
 log "Starting benchmark for Image A: ${LABEL_A}"
 RUN_A_OK=1
 if ! "$BENCH_SCRIPT" \
@@ -153,7 +184,9 @@ if ! "$BENCH_SCRIPT" \
     --result-dir "$RESULT_DIR_A" \
     --container-name "$CONTAINER_A" \
     --keep-container \
-    "${PASSTHROUGH_ARGS[@]+"${PASSTHROUGH_ARGS[@]}"}"; then
+    --resolved-config "$RESOLVED_CONFIG_FILE" \
+    "${PASSTHROUGH_ARGS[@]+"${PASSTHROUGH_ARGS[@]}"}" \
+    "${EXTRA_ARGS_A_ARRAY[@]+"${EXTRA_ARGS_A_ARRAY[@]}"}"; then
   log "WARNING: Benchmark for Image A failed"
   RUN_A_OK=0
 fi
@@ -163,6 +196,18 @@ log "Removing container for Image A: ${CONTAINER_A}"
 sudo docker rm -f "$CONTAINER_A" 2>/dev/null || docker rm -f "$CONTAINER_A" 2>/dev/null || true
 
 # ─── Run B ───────────────────────────────────────────────────────────────────
+# shellcheck disable=SC2206
+EXTRA_ARGS_B_ARRAY=($EXTRA_ARGS_B)
+
+# By default, reuse Image A's config for Image B (no re-prompting)
+LOAD_CONFIG_ARGS=()
+if (( RECONFIGURE_B == 0 )) && [[ -f "$RESOLVED_CONFIG_FILE" ]]; then
+  log "Reusing Image A config for Image B (use --reconfigure-b to re-prompt)"
+  LOAD_CONFIG_ARGS=(--load-config "$RESOLVED_CONFIG_FILE")
+elif (( RECONFIGURE_B == 1 )); then
+  log "Re-prompting config for Image B (--reconfigure-b)"
+fi
+
 log "Starting benchmark for Image B: ${LABEL_B}"
 RUN_B_OK=1
 if ! "$BENCH_SCRIPT" \
@@ -170,7 +215,9 @@ if ! "$BENCH_SCRIPT" \
     --result-dir "$RESULT_DIR_B" \
     --container-name "$CONTAINER_B" \
     --keep-container \
-    "${PASSTHROUGH_ARGS[@]+"${PASSTHROUGH_ARGS[@]}"}"; then
+    "${LOAD_CONFIG_ARGS[@]+"${LOAD_CONFIG_ARGS[@]}"}" \
+    "${PASSTHROUGH_ARGS[@]+"${PASSTHROUGH_ARGS[@]}"}" \
+    "${EXTRA_ARGS_B_ARRAY[@]+"${EXTRA_ARGS_B_ARRAY[@]}"}"; then
   log "WARNING: Benchmark for Image B failed"
   RUN_B_OK=0
 fi
@@ -203,12 +250,14 @@ if [[ ! -f "$CSV_B" ]]; then
   die "Image B CSV not found: ${CSV_B}"
 fi
 
+SUMMARY_CSV="${COMPARISON_DIR}/summary.csv"
 COMPARE_ARGS=(
   python3 "$COMPARE_SCRIPT"
   --csv-a "$CSV_A"
   --csv-b "$CSV_B"
   --label-a "$LABEL_A"
   --label-b "$LABEL_B"
+  --summary-csv "$SUMMARY_CSV"
 )
 if [[ -n "$OUTPUT_CSV" ]]; then
   COMPARE_ARGS+=(--output-csv "$OUTPUT_CSV")
@@ -221,3 +270,4 @@ log "Comparison complete"
 log "Results directory: ${COMPARISON_DIR}"
 log "  Image A results: ${RESULT_DIR_A}"
 log "  Image B results: ${RESULT_DIR_B}"
+log "  Summary CSV:     ${SUMMARY_CSV}"
