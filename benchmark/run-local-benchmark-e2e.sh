@@ -50,6 +50,11 @@ Advanced options:
                                      E.g.: --pr 19216
                                            --pr https://github.com/sgl-project/sglang/pull/19216
                                            --pr https://...pull/19216/changes/<commit>
+  --aiter-pr <url_or_number>         Checkout a GitHub PR/commit in aiter before benchmarking.
+                                     Accepts full GitHub PR URL, bare PR number, or commit SHA.
+                                     E.g.: --aiter-pr 123
+                                           --aiter-pr https://github.com/ROCm/aiter/pull/123
+                                           --aiter-pr <commit-sha>
 
 Example:
   ./run_local_benchmark_e2e.sh \
@@ -102,6 +107,29 @@ parse_pr_ref() {
   fi
 }
 
+parse_aiter_ref() {
+  # Accepts a full GitHub PR URL, a bare PR number, or a commit SHA.
+  # Sets globals AITER_PR_NUMBER and AITER_COMMIT.
+  # Supported forms:
+  #   https://github.com/ROCm/aiter/pull/123
+  #   https://github.com/ROCm/aiter/pull/123/changes/<commit>
+  #   123  (bare number)
+  #   abc123def  (6-40 hex chars, not purely numeric => commit SHA)
+  local input="$1"
+  AITER_PR_NUMBER=""
+  AITER_COMMIT=""
+  if [[ "$input" =~ ^[0-9]+$ ]]; then
+    AITER_PR_NUMBER="$input"
+  elif [[ "$input" =~ ^[a-f0-9]{6,40}$ ]]; then
+    AITER_COMMIT="$input"
+  elif [[ "$input" =~ /pull/([0-9]+)(/changes/([a-f0-9]{6,40}))? ]]; then
+    AITER_PR_NUMBER="${BASH_REMATCH[1]}"
+    AITER_COMMIT="${BASH_REMATCH[3]:-}"
+  else
+    die "Cannot parse aiter PR URL, number, or commit SHA: $input"
+  fi
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../env.sh"
 CONFIG_FILE="${AGENT_BOX_DIR}/.bench_config"
@@ -149,6 +177,7 @@ ATTENTION_BACKEND="aiter"
 SERVER_EXTRA_ARGS=""
 BENCH_EXTRA_ARGS=""
 PR=""
+AITER_PR=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -293,6 +322,10 @@ while [[ $# -gt 0 ]]; do
       PR="${2:-}"
       shift 2
       ;;
+    --aiter-pr)
+      AITER_PR="${2:-}"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -365,6 +398,12 @@ if [[ -n "$PR" ]]; then
   parse_pr_ref "$PR"
 fi
 
+AITER_PR_NUMBER=""
+AITER_COMMIT=""
+if [[ -n "$AITER_PR" ]]; then
+  parse_aiter_ref "$AITER_PR"
+fi
+
 [[ -n "$IMAGE" ]] || die "--image is required"
 [[ -n "$MODEL_PATH" ]] || die "--model-path is required"
 [[ -d "$MODEL_PATH" ]] || die "Model path does not exist or is not a directory: $MODEL_PATH"
@@ -399,12 +438,20 @@ if [[ -z "$CONTAINER_NAME" ]]; then
   IMAGE_TAG="${IMAGE##*:}"
   IMAGE_TAG="${IMAGE_TAG//[^a-zA-Z0-9_.-]/_}"
   PR_SUFFIX="${PR_NUMBER:+-pr${PR_NUMBER}}"
-  CONTAINER_NAME="jacky-sglang-bench-${IMAGE_TAG}${PR_SUFFIX}-${TIMESTAMP}"
+  AITER_SUFFIX="${AITER_PR_NUMBER:+-aiter-pr${AITER_PR_NUMBER}}"
+  if [[ -z "$AITER_SUFFIX" && -n "$AITER_COMMIT" ]]; then
+    AITER_SUFFIX="-aiter-${AITER_COMMIT:0:8}"
+  fi
+  CONTAINER_NAME="jacky-sglang-bench-${IMAGE_TAG}${PR_SUFFIX}${AITER_SUFFIX}-${TIMESTAMP}"
 fi
 
 if [[ -z "$RESULT_DIR" ]]; then
   PR_SUFFIX="${PR_NUMBER:+-pr${PR_NUMBER}}"
-  RESULT_DIR="${HOST_HOME_DIR}/benchmark_runs/${TIMESTAMP}${PR_SUFFIX}"
+  AITER_SUFFIX="${AITER_PR_NUMBER:+-aiter-pr${AITER_PR_NUMBER}}"
+  if [[ -z "$AITER_SUFFIX" && -n "$AITER_COMMIT" ]]; then
+    AITER_SUFFIX="-aiter-${AITER_COMMIT:0:8}"
+  fi
+  RESULT_DIR="${HOST_HOME_DIR}/benchmark_runs/${TIMESTAMP}${PR_SUFFIX}${AITER_SUFFIX}"
 fi
 mkdir -p "$RESULT_DIR"
 
@@ -528,6 +575,68 @@ if [[ -n "$PR_NUMBER" ]]; then
     || log "WARNING: sglang reinstall failed (non-fatal if only Python files changed)"
 
   log "PR #${PR_NUMBER} applied successfully"
+fi
+
+# ── Apply GitHub PR/commit to aiter inside container (if requested) ──
+if [[ -n "$AITER_PR_NUMBER" || -n "$AITER_COMMIT" ]]; then
+  log "Uninstalling existing aiter"
+  docker_cmd exec "$CONTAINER_NAME" bash -lc \
+    "pip uninstall amd-aiter -y 2>/dev/null || true"
+
+  log "Moving old aiter repo to aiter_old"
+  docker_cmd exec "$CONTAINER_NAME" bash -lc \
+    "rm -rf /sgl-workspace/aiter_old && mv /sgl-workspace/aiter /sgl-workspace/aiter_old 2>/dev/null || true"
+
+  log "Cloning fresh aiter repo"
+  docker_cmd exec "$CONTAINER_NAME" bash -lc \
+    "git clone https://github.com/ROCm/aiter.git /sgl-workspace/aiter" \
+    || die "Failed to clone aiter repo"
+
+  if [[ -n "$AITER_PR_NUMBER" ]]; then
+    log "Fetching aiter PR #${AITER_PR_NUMBER} from GitHub"
+    docker_cmd exec "$CONTAINER_NAME" bash -lc \
+      "cd /sgl-workspace/aiter && git fetch --depth=100 origin pull/${AITER_PR_NUMBER}/head:pr-${AITER_PR_NUMBER}" \
+      || die "Failed to fetch aiter PR #${AITER_PR_NUMBER}"
+
+    if [[ -n "$AITER_COMMIT" ]]; then
+      log "Checking out commit ${AITER_COMMIT} from aiter PR #${AITER_PR_NUMBER}"
+      docker_cmd exec "$CONTAINER_NAME" bash -lc \
+        "cd /sgl-workspace/aiter && git checkout -f ${AITER_COMMIT}" \
+        || die "Failed to checkout aiter commit ${AITER_COMMIT}"
+    else
+      log "Checking out aiter PR #${AITER_PR_NUMBER} head"
+      docker_cmd exec "$CONTAINER_NAME" bash -lc \
+        "cd /sgl-workspace/aiter && git checkout -f pr-${AITER_PR_NUMBER}" \
+        || die "Failed to checkout aiter PR #${AITER_PR_NUMBER}"
+    fi
+  else
+    # Bare commit SHA (no PR number)
+    log "Checking out aiter commit ${AITER_COMMIT}"
+    docker_cmd exec "$CONTAINER_NAME" bash -lc \
+      "cd /sgl-workspace/aiter && git fetch --depth=100 origin && git checkout -f ${AITER_COMMIT}" \
+      || die "Failed to checkout aiter commit ${AITER_COMMIT}"
+  fi
+
+  log "Updating aiter submodules"
+  docker_cmd exec "$CONTAINER_NAME" bash -lc \
+    "cd /sgl-workspace/aiter && git submodule update --init --recursive" \
+    || log "WARNING: aiter submodule update failed (non-fatal)"
+
+  log "Installing aiter requirements"
+  docker_cmd exec "$CONTAINER_NAME" bash -lc \
+    "cd /sgl-workspace/aiter && pip install -r requirements.txt" \
+    || die "Failed to install aiter requirements"
+
+  log "Rebuilding aiter"
+  docker_cmd exec "$CONTAINER_NAME" bash -lc \
+    "cd /sgl-workspace/aiter && GPU_ARCHS=\"gfx950\" python setup.py develop" \
+    || die "Failed to rebuild aiter"
+
+  if [[ -n "$AITER_PR_NUMBER" ]]; then
+    log "Aiter PR #${AITER_PR_NUMBER} applied successfully"
+  else
+    log "Aiter commit ${AITER_COMMIT} applied successfully"
+  fi
 fi
 
 # ── Collect version snapshot (before server launch) ───────────────
