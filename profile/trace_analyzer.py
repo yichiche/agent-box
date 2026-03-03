@@ -281,7 +281,7 @@ class KernelClassifier:
             (
                 re.compile(
                     r"all_reduce|cross_device_reduce|nccl|rccl|broadcast|"
-                    r"allgather|reduce_scatter|rcclGenericKernel",
+                    r"allgather|reduce_scatter|rcclGenericKernel|quickreduce",
                     re.IGNORECASE,
                 ),
                 KernelType.COMMUNICATION,
@@ -308,7 +308,7 @@ class KernelClassifier:
 
         # Simplified name patterns for display
         self._simplify_patterns = [
-            (re.compile(r"ncclDevKernel|rcclGenericKernel|cross_device_reduce"), "ALLREDUCE"), 
+            (re.compile(r"ncclDevKernel|rcclGenericKernel|cross_device_reduce|quickreduce"), "ALLREDUCE"),
             (re.compile(r"fmha_fwd"), "FMHA"),
             (re.compile(r"mla_a8w8.*qseqlen1"), "MLA_DECODE"),
             (
@@ -519,6 +519,7 @@ class LayerDetector:
                 simplified == "ALLREDUCE"
                 or "rcclGenericKernel" in name
                 or "cross_device_reduce" in name
+                or "quickreduce" in name
             )
             is_layer_start = any(p.search(name) for p in self._layer_start_patterns)
 
