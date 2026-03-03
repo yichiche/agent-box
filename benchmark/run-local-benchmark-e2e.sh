@@ -843,6 +843,14 @@ if (( PROFILE_MODE == 1 )); then
       --export-layers 58-65 \
       --debug-layers 2-5 \
       > $(quote_one "${CONTAINER_TRACE_ANALYSIS_DIR}/trace_analyzer.log") 2>&1"
+    # Run evaluate_parsing.py on the exported xlsx
+    EXCEL_PATH_IN_CONTAINER="${TRACE_DIR_IN_CONTAINER}/profile.csv.xlsx"
+    log "Running parsing quality evaluation"
+    docker_cmd cp "${AGENT_BOX_DIR}/profile/evaluate_parsing.py" \
+      "${CONTAINER_NAME}:/tmp/evaluate_parsing.py"
+    docker_cmd exec "$CONTAINER_NAME" bash -lc \
+      "python3 /tmp/evaluate_parsing.py $(quote_one "$EXCEL_PATH_IN_CONTAINER") \
+      2>&1 | tee $(quote_one "${CONTAINER_TRACE_ANALYSIS_DIR}/evaluate_parsing.log")" || true
     mkdir -p "$HOST_TRACE_ANALYSIS_DIR"
     docker_cmd cp "${CONTAINER_NAME}:${TRACE_PATH_IN_CONTAINER}" \
       "${HOST_TRACE_ANALYSIS_DIR}/${TRACE_BASENAME}"
