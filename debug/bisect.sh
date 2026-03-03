@@ -18,22 +18,28 @@ BUILD_SCRIPT=""
 PORT="30000"
 MODEL_PATH=""
 TIMEOUT="600"
+EXPORT_LAYERS="58-65"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AGENT_BOX_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+TRACE_ANALYZER_SCRIPT="${AGENT_BOX_DIR}/profile/trace_analyzer.py"
+EVALUATE_SCRIPT="${AGENT_BOX_DIR}/profile/evaluate_parsing.py"
+PROFILE_REF_CSV=""  # auto-generated from good commit
 
 # ── Usage ────────────────────────────────────────────────────────────────────
 usage() {
     cat <<'EOF'
-Usage: bisect.sh --good <sha> --bad <sha> --mode <launch|perf|accuracy> --lib <sglang|aiter> --server-script <path> [OPTIONS]
+Usage: bisect.sh --good <sha> --bad <sha> --mode <launch|perf|accuracy|profile> --lib <sglang|aiter> --server-script <path> [OPTIONS]
 
 Required:
   --good <commit>              Known good commit SHA
   --bad  <commit>              Known bad commit SHA
-  --mode <launch|perf|accuracy> What to test
+  --mode <launch|perf|accuracy|profile> What to test
   --lib  <sglang|aiter>        Which library to rebuild after checkout
   --server-script <path>       Script to launch the server
 
 Options:
   --repo-dir <path>            Repository root (default: /sgl-workspace/sglang or /sgl-workspace/aiter)
-  --client-script <path>       perf mode: benchmark script (exit 0=GOOD, 1=BAD)
+  --client-script <path>       perf/profile mode: benchmark script (perf: exit 0=GOOD, 1=BAD)
   --accuracy-script <path>     accuracy mode: script whose stdout has "Accuracy: ..."
   --accuracy-baseline <float>  accuracy mode: expected accuracy %
   --accuracy-threshold <float> accuracy mode: allowed drop % (default: 2.0)
@@ -41,6 +47,14 @@ Options:
   --port <int>                 Server port (default: 30000)
   --model-path <path>          Model path, exported to server/client scripts
   --timeout <seconds>          Health check timeout (default: 600)
+  --export-layers <range>      profile mode: layers to export for trace analysis (default: 58-65)
+
+Modes:
+  launch    - Test if the server starts successfully
+  perf      - Run benchmark script, exit code determines GOOD/BAD
+  accuracy  - Parse accuracy from script output, compare against baseline
+  profile   - Run profiling, analyze traces, compare S1-S4 structural scores
+              against reference scores from the good commit. Any regression = BAD.
 EOF
     exit 1
 }
@@ -62,6 +76,7 @@ while [[ $# -gt 0 ]]; do
         --port)              PORT="$2";               shift 2 ;;
         --model-path)        MODEL_PATH="$2";         shift 2 ;;
         --timeout)           TIMEOUT="$2";            shift 2 ;;
+        --export-layers)     EXPORT_LAYERS="$2";      shift 2 ;;
         -h|--help)           usage ;;
         *)                   echo "Unknown option: $1"; usage ;;
     esac
@@ -75,7 +90,7 @@ fail() { echo "ERROR: $*" >&2; exit 1; }
 [[ -n "$MODE" ]] || fail "--mode is required"
 [[ -n "$LIB"  ]] || fail "--lib is required"
 
-[[ "$MODE" =~ ^(launch|perf|accuracy)$ ]] || fail "--mode must be launch, perf, or accuracy"
+[[ "$MODE" =~ ^(launch|perf|accuracy|profile)$ ]] || fail "--mode must be launch, perf, accuracy, or profile"
 [[ "$LIB"  =~ ^(sglang|aiter)$ ]]         || fail "--lib must be sglang or aiter"
 
 [[ -n "$SERVER_SCRIPT" ]] || fail "--server-script is required"
@@ -84,6 +99,13 @@ fail() { echo "ERROR: $*" >&2; exit 1; }
 if [[ "$MODE" == "perf" ]]; then
     [[ -n "$CLIENT_SCRIPT" ]] || fail "--client-script is required for perf mode"
     [[ -f "$CLIENT_SCRIPT" ]] || fail "--client-script not found: $CLIENT_SCRIPT"
+fi
+
+if [[ "$MODE" == "profile" ]]; then
+    [[ -n "$CLIENT_SCRIPT" ]] || fail "--client-script is required for profile mode"
+    [[ -f "$CLIENT_SCRIPT" ]] || fail "--client-script not found: $CLIENT_SCRIPT"
+    [[ -f "$TRACE_ANALYZER_SCRIPT" ]] || fail "trace_analyzer.py not found: $TRACE_ANALYZER_SCRIPT"
+    [[ -f "$EVALUATE_SCRIPT" ]] || fail "evaluate_parsing.py not found: $EVALUATE_SCRIPT"
 fi
 
 if [[ "$MODE" == "accuracy" ]]; then
@@ -245,6 +267,62 @@ parse_accuracy() {
     echo ""
 }
 
+# ── Profile evaluation helper ───────────────────────────────────────────────
+PROFILE_SCORES=""  # "S1:100.0 S2:60.0 S3:100.0 S4:100.0"
+REF_SCORES=""
+
+run_profile_eval() {
+    local short_sha="$1"
+    local analysis_dir="${BISECT_LOG_DIR}/profile_${short_sha}"
+    mkdir -p "$analysis_dir"
+    PROFILE_SCORES=""
+
+    # Clean any old traces
+    find /tmp -maxdepth 2 -name '*-TP-0.trace.json.gz' -delete 2>/dev/null || true
+
+    # Run profiling benchmark
+    if ! bash "$CLIENT_SCRIPT" > "${analysis_dir}/client.log" 2>&1; then
+        return 1
+    fi
+
+    # Find trace
+    local trace_file
+    trace_file=$(find /tmp -maxdepth 2 -name '*-TP-0.trace.json.gz' -type f 2>/dev/null | sort | tail -1)
+    [[ -n "$trace_file" ]] || return 2
+
+    local trace_dir
+    trace_dir=$(dirname "$trace_file")
+
+    # Run trace_analyzer
+    python3 "$TRACE_ANALYZER_SCRIPT" "$trace_file" \
+        --export-csv "${analysis_dir}/profile.csv" \
+        --export-layers "$EXPORT_LAYERS" \
+        > "${analysis_dir}/trace_analyzer.log" 2>&1 || return 3
+
+    # Run evaluate_parsing (Excel is created next to the --export-csv path)
+    local excel_path="${analysis_dir}/profile.csv.xlsx"
+    local eval_json
+    eval_json=$(python3 "$EVALUATE_SCRIPT" "$excel_path" --json 2>/dev/null) || return 4
+    echo "$eval_json" > "${analysis_dir}/evaluation.json"
+
+    # Extract S1-S4 scores from JSON (evaluate_parsing may print extra lines after JSON)
+    PROFILE_SCORES=$(echo "$eval_json" | python3 -c "
+import sys, json, json.decoder
+raw = sys.stdin.read()
+try:
+    d = json.loads(raw)
+except json.decoder.JSONDecodeError:
+    dec = json.JSONDecoder()
+    d, _ = dec.raw_decode(raw)
+sr = d['structural_rules']
+print(f\"S1:{sr['s1_prefill_ordering']['score']} S2:{sr['s2_architecture_sig']['score']} S3:{sr['s3_round_consistency']['score']} S4:{sr['s4_type_sequence']['score']}\")
+" 2>/dev/null) || return 5
+
+    # Cleanup trace file to save disk
+    rm -f "$trace_file"
+    return 0
+}
+
 # ── Evaluate a single commit ────────────────────────────────────────────────
 # Returns via global VERDICT: "GOOD", "BAD", or "SKIP"
 VERDICT=""
@@ -328,6 +406,31 @@ evaluate_commit() {
                 fi
             fi
             ;;
+        profile)
+            log "running profiling benchmark..."
+            if ! run_profile_eval "$short_sha"; then
+                VERDICT="SKIP"
+                VERDICT_DETAIL="profile evaluation failed (step returned $?)"
+            else
+                # Compare each S1-S4 score against reference
+                local regressed=""
+                for rule in S1 S2 S3 S4; do
+                    ref_val=$(echo "$REF_SCORES" | grep -oP "${rule}:\K[0-9.]+")
+                    cur_val=$(echo "$PROFILE_SCORES" | grep -oP "${rule}:\K[0-9.]+")
+                    if awk "BEGIN {exit !($cur_val < $ref_val)}"; then
+                        regressed="${regressed} ${rule}:${cur_val}<${ref_val}"
+                    fi
+                done
+
+                if [[ -z "$regressed" ]]; then
+                    VERDICT="GOOD"
+                    VERDICT_DETAIL="scores=$PROFILE_SCORES (no regression)"
+                else
+                    VERDICT="BAD"
+                    VERDICT_DETAIL="regression:${regressed} | current=$PROFILE_SCORES"
+                fi
+            fi
+            ;;
     esac
 
     kill_server
@@ -369,6 +472,27 @@ echo "  Commits to test: $NUM_COMMITS (~$STEPS steps)"
 echo "  Port: $PORT"
 echo "  Server logs: $BISECT_LOG_DIR/"
 echo ""
+
+# Generate reference profile from good commit (profile mode only)
+if [[ "$MODE" == "profile" ]]; then
+    echo "Generating reference profile from good commit ($GOOD_SHORT)..."
+    (cd "$REPO_DIR" && git checkout "$GOOD" --quiet)
+    rebuild > /tmp/bisect_build.log 2>&1 || fail "Cannot build good commit"
+    launch_server "$GOOD_SHORT"
+    step "  waiting for health check"
+    if ! wait_for_server; then
+        echo ""
+        kill_server
+        fail "Good commit server failed to start"
+    fi
+    echo ""
+
+    run_profile_eval "$GOOD_SHORT" || fail "Profile evaluation failed on good commit"
+    REF_SCORES="$PROFILE_SCORES"
+    echo "  Reference scores: $REF_SCORES"
+    kill_server
+    echo ""
+fi
 
 # Binary search
 lo=0
