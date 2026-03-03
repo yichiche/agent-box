@@ -1018,12 +1018,50 @@ class ParsingEvaluator:
         lines.append("")
         lines.append("  ── Group Diagnostics ──")
 
-        for gm in report.group_metrics:
+        # Skip (prefill, Attn) — not relevant for DeepSeek R1-mxfp4 architecture
+        core_groups = [
+            gm for gm in report.group_metrics
+            if gm.key.layer_type != "Attn"
+        ]
+        scored_groups = [gm for gm in core_groups if not gm.skipped]
+        skipped_groups = [gm for gm in core_groups if gm.skipped]
+
+        if scored_groups:
+            def _cell(score):
+                """Format a score as 'NNN(G)' compact cell."""
+                return f"{score:3.0f}({_grade(score)})"
+
+            total_layers = sum(gm.layer_count for gm in scored_groups)
+            weighted_composite = sum(
+                gm.composite_score * gm.layer_count for gm in scored_groups
+            ) / total_layers
+
+            lines.append("")
+            lines.append(f"    ┌──────────────────────┬────────┬────────┬──────────┬──────────┬───────────┐")
+            lines.append(f"    │ Group                │ Layers │ TimeCV │ KernCnt  │ KernPat  │ Composite │")
+            lines.append(f"    ├──────────────────────┼────────┼────────┼──────────┼──────────┼───────────┤")
+            for gm in scored_groups:
+                label = repr(gm.key)
+                tc = _cell(gm.time_score)
+                kc = _cell(gm.kernel_count_score)
+                kp = _cell(gm.pattern_score) if gm.pattern_available else "  —   "
+                cp = _cell(gm.composite_score)
+                lines.append(
+                    f"    │ {label:<20s} │ {gm.layer_count:>6d} │ {tc:>6s} │ {kc:>8s} │ {kp:>8s} │ {cp:>9s} │"
+                )
+            lines.append(f"    ├──────────────────────┼────────┼────────┼──────────┼──────────┼───────────┤")
+            overall_label = "Overall (weighted)"
+            cp_all = _cell(weighted_composite)
+            lines.append(
+                f"    │ {overall_label:<20s} │ {total_layers:>6d} │        │          │          │ {cp_all:>9s} │"
+            )
+            lines.append(f"    └──────────────────────┴────────┴────────┴──────────┴──────────┴───────────┘")
+
+        for gm in core_groups:
             lines.append("")
             if gm.skipped:
                 lines.append(f"  --- {gm.key}: {gm.layer_count} layers — SKIPPED ({gm.skip_reason}) ---")
                 continue
-
             lines.append(
                 f"  --- {gm.key}: {gm.layer_count} layers — Diagnostic: {gm.composite_score:.1f} ---"
             )
@@ -1038,32 +1076,6 @@ class ParsingEvaluator:
                 lines.append(f"    Kernel Pattern: {gm.pattern_mode_pct:.1f}% match")
             for note in gm.notes:
                 lines.append(f"    Note: {note}")
-
-            # Sub-score breakdown table
-            w_time = 10.0
-            w_kc = 50.0
-            w_pat = 30.0 if gm.pattern_available else 0.0
-            w_out = 10.0
-            if not gm.pattern_available:
-                w_kc += 30.0
-            lines.append(f"    ┌─────────────────┬────────┬────────┬───────┐")
-            lines.append(f"    │ Metric          │ Score  │ Weight │ Grade │")
-            lines.append(f"    ├─────────────────┼────────┼────────┼───────┤")
-            lines.append(f"    │ Time CV         │ {gm.time_score:5.1f}  │ {w_time:5.0f}% │   {_grade(gm.time_score)}   │")
-            lines.append(f"    │ Kernel Count    │ {gm.kernel_count_score:5.1f}  │ {w_kc:5.0f}% │   {_grade(gm.kernel_count_score)}   │")
-            if gm.pattern_available:
-                lines.append(f"    │ Kernel Pattern  │ {gm.pattern_score:5.1f}  │ {w_pat:5.0f}% │   {_grade(gm.pattern_score)}   │")
-            lines.append(f"    │ Outlier Penalty │ {gm.outlier_score:5.1f}  │ {w_out:5.0f}% │   {_grade(gm.outlier_score)}   │")
-            lines.append(f"    ├─────────────────┼────────┼────────┼───────┤")
-            lines.append(f"    │ Composite       │ {gm.composite_score:5.1f}  │  100%  │   {_grade(gm.composite_score)}   │")
-            lines.append(f"    └─────────────────┴────────┴────────┴───────┘")
-
-        # Outlier list
-        if report.all_outlier_indices:
-            lines.append("")
-            displayed = report.all_outlier_indices[:20]
-            suffix = ", ..." if len(report.all_outlier_indices) > 20 else ""
-            lines.append(f"  Outlier layers ({len(report.all_outlier_indices)} total): {displayed}{suffix}")
 
         lines.append("")
         return "\n".join(lines)
