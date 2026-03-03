@@ -28,12 +28,17 @@ def detect_regressions(
     # Get current run info
     run = conn.execute(
         "SELECT id, rocm_version, build_date, model_name, tp_size, mtp_enabled, "
-        "ep_size, dp_size "
+        "ep_size, dp_size, is_profile_run "
         "FROM benchmark_runs WHERE id = ?",
         (run_id,),
     ).fetchone()
     if run is None:
         logger.warning("Run %d not found", run_id)
+        return []
+
+    # Never run regression detection on profiling runs
+    if run["is_profile_run"]:
+        logger.info("Skipping regression detection for profile run %d", run_id)
         return []
 
     rocm_version = run["rocm_version"]
@@ -138,6 +143,7 @@ def _check_metric_regression(
               AND br.ep_size IS ?
               AND br.dp_size IS ?
               AND br.status = 'completed'
+              AND br.is_profile_run = 0
               AND br.build_date < ?
               AND bm.concurrency = ?
               AND bm.{metric_name} IS NOT NULL
@@ -217,6 +223,7 @@ def _check_accuracy_regression(
              AND br.ep_size IS ?
              AND br.dp_size IS ?
              AND br.status = 'completed'
+             AND br.is_profile_run = 0
              AND br.build_date < ?
              AND ar.accuracy_pct IS NOT NULL
            ORDER BY br.build_date DESC

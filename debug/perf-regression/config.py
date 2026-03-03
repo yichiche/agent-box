@@ -12,7 +12,7 @@ HOST_HOME_DIR = os.getenv("AGENT_BOX_HOST_HOME", str(AGENT_BOX_DIR.parent))
 BENCH_SCRIPT = str(AGENT_BOX_DIR / "benchmark" / "run-local-benchmark-e2e.sh")
 
 # ── Model defaults (overridden by saved config or CLI args) ───────────────
-_DEFAULT_MODEL_PATH = "/raid/models/DeepSeek-R1-MXFP4-Preview/"
+_DEFAULT_MODEL_PATH = "/data/models/amd/DeepSeek-R1-MXFP4-Preview/"
 _DEFAULT_MODEL_NAME = Path(_DEFAULT_MODEL_PATH).name or Path(_DEFAULT_MODEL_PATH).parent.name
 _CONFIG_FILE = AGENT_BOX_DIR / ".bench_config"
 
@@ -55,6 +55,12 @@ DB_PATH = Path(
         str(BENCHMARK_RUNS_DIR / "data" / "perf_regression.db"),
     )
 )
+PROFILE_DB_PATH = Path(
+    os.getenv(
+        "PERF_REGRESSION_PROFILE_DB_PATH",
+        str(BENCHMARK_RUNS_DIR / "data" / "perf_profile.db"),
+    )
+)
 LOCK_FILE = BASE_DIR / ".orchestrator.lock"
 
 # ── Docker Hub ─────────────────────────────────────────────────────────────
@@ -89,6 +95,9 @@ TP_MTP_VARIANTS = [
     VariantConfig(8, False),   # TP8
     VariantConfig(8, True),    # TP8+MTP
 ]
+
+# Profiling: only non-MTP variants are eligible
+PROFILE_VARIANTS = [v for v in TP_MTP_VARIANTS if not v.mtp]
 
 
 def variant_label(tp_size: int, mtp: bool, ep_size: Optional[int] = None, dp_size: Optional[int] = None) -> str:
