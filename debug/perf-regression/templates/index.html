@@ -287,6 +287,13 @@
         </table>
 
         <h2>Profile Runs</h2>
+        <div class="filter-group" style="margin-bottom: 12px;">
+            <label>Compare Kernel Diff:</label>
+            <select id="profile-diff-run-a" style="max-width:260px;"><option value="">-- Baseline (old) --</option></select>
+            <span style="margin:0 4px;">vs</span>
+            <select id="profile-diff-run-b" style="max-width:260px;"><option value="">-- Candidate (new) --</option></select>
+            <button class="btn-expand" onclick="onDemandKernelDiff()">Compare</button>
+        </div>
         <table id="profile-runs-table">
             <thead>
                 <tr>
@@ -299,11 +306,12 @@
                     <th>Status</th>
                     <th>Duration</th>
                     <th>Evaluation Summary</th>
+                    <th>Kernel Diff</th>
                     <th>Delete</th>
                 </tr>
             </thead>
             <tbody id="profile-runs-body">
-                <tr><td colspan="10" class="empty">Loading...</td></tr>
+                <tr><td colspan="11" class="empty">Loading...</td></tr>
             </tbody>
         </table>
 
@@ -678,9 +686,27 @@
         function renderProfileRuns(runs) {
             const tbody = document.getElementById('profile-runs-body');
             if (!runs || runs.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="10" class="empty">No profile runs</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="11" class="empty">No profile runs</td></tr>';
                 return;
             }
+
+            // Populate compare dropdowns with completed runs
+            const completedRuns = (runs || []).filter(r => r.status === 'completed');
+            const selectA = document.getElementById('profile-diff-run-a');
+            const selectB = document.getElementById('profile-diff-run-b');
+            const prevValA = selectA.value;
+            const prevValB = selectB.value;
+            selectA.innerHTML = '<option value="">-- Baseline (old) --</option>';
+            selectB.innerHTML = '<option value="">-- Candidate (new) --</option>';
+            completedRuns.forEach(r => {
+                const date = `${r.build_date.slice(0,4)}-${r.build_date.slice(4,6)}-${r.build_date.slice(6)}`;
+                const label = `${date} ${r.image_tag} TP${r.tp_size}`;
+                selectA.innerHTML += `<option value="${r.id}">${label}</option>`;
+                selectB.innerHTML += `<option value="${r.id}">${label}</option>`;
+            });
+            if (prevValA) selectA.value = prevValA;
+            if (prevValB) selectB.value = prevValB;
+
             tbody.innerHTML = runs.map(r => {
                 const date = `${r.build_date.slice(0,4)}-${r.build_date.slice(4,6)}-${r.build_date.slice(6)}`;
                 const statusClass = r.status === 'completed' ? 'status-ok' :
@@ -689,6 +715,13 @@
                 const summaryCell = r.has_evaluation_summary
                     ? `<button class="btn-expand" onclick="showEvaluationSummary(${r.id}, this)">View</button>`
                     : (r.status === 'completed' ? '<span class="status-fail">Missing</span>' : '-');
+
+                let diffCell = '-';
+                if (r.has_kernel_diff) {
+                    diffCell = `<button class="btn-expand" onclick="showKernelDiff(${r.id}, this)">View</button>`;
+                } else if (r.status === 'completed') {
+                    diffCell = '<span style="color:#999;">N/A</span>';
+                }
 
                 const statusTd = r.status === 'failed'
                     ? `<span class="${statusClass} status-clickable" onclick="toggleError('profile-error-${r.id}', ${r.id}, this)">${r.status}</span>`
@@ -700,7 +733,7 @@
                         ? r.error_message.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
                         : 'No error details';
                     errorHtml = `<tr id="profile-error-${r.id}" class="metrics-detail" style="display:none">
-                        <td colspan="10">
+                        <td colspan="11">
                             <pre class="error-message">${errorText}</pre>
                         </td>
                     </tr>`;
@@ -716,6 +749,7 @@
                     <td>${statusTd}</td>
                     <td>${duration}</td>
                     <td>${summaryCell}</td>
+                    <td>${diffCell}</td>
                     <td><button class="btn-expand" onclick="deleteProfileRun(${r.id}, '${r.image_tag}', this)">Delete</button></td>
                 </tr>${errorHtml}`;
             }).join('');
@@ -837,6 +871,157 @@
             } catch (err) {
                 alert('Failed to delete profile run: ' + err.message);
                 btn.textContent = 'Delete';
+            }
+        }
+
+        function renderKernelDiffHtml(diff) {
+            if (!diff) return '<p>No kernel diff data available.</p>';
+
+            const s = diff.summary;
+            let html = `<div class="kernel-diff-report">`;
+            html += `<div class="kernel-diff-header">`;
+            html += `<strong>Baseline:</strong> ${diff.tag_a || 'File A'} (${diff.layers_a} layers) `;
+            html += `<strong>vs Candidate:</strong> ${diff.tag_b || 'File B'} (${diff.layers_b} layers)`;
+            html += `</div>`;
+
+            // Summary badges
+            const hasChanges = diff.has_changes;
+            html += `<div class="kernel-diff-summary" style="margin:8px 0;">`;
+            html += `<span class="diff-badge diff-identical">${s.n_identical} identical</span> `;
+            if (s.n_changed > 0) html += `<span class="diff-badge diff-changed">${s.n_changed} changed</span> `;
+            if (s.n_only_a > 0) html += `<span class="diff-badge diff-removed">${s.n_only_a} only in baseline</span> `;
+            if (s.n_only_b > 0) html += `<span class="diff-badge diff-added">${s.n_only_b} only in candidate</span> `;
+            if (!hasChanges) html += `<span class="diff-badge diff-identical" style="font-weight:bold;">No kernel changes detected</span>`;
+            html += `</div>`;
+
+            // Summary table
+            html += `<table class="inner-table kernel-diff-table"><thead><tr>`;
+            html += `<th>Layer Type</th><th>Stage</th><th>Status</th><th>Pairs</th><th>Changes</th><th>Detail</th>`;
+            html += `</tr></thead><tbody>`;
+
+            (diff.groups || []).forEach((g, gi) => {
+                const statusCls = {
+                    'IDENTICAL': 'diff-status-ok',
+                    'CHANGED': 'diff-status-changed',
+                    'ONLY_IN_A': 'diff-status-removed',
+                    'ONLY_IN_B': 'diff-status-added',
+                    'LENGTH_MISMATCH': 'diff-status-skip',
+                }[g.status] || '';
+
+                const detailBtn = (g.status === 'CHANGED' && g.representative)
+                    ? `<button class="btn-expand" onclick="toggleKernelDiffDetail('kdiff-detail-${gi}', this)">Show</button>`
+                    : '-';
+
+                html += `<tr>`;
+                html += `<td>${g.layer_type}</td>`;
+                html += `<td>${g.stage}</td>`;
+                html += `<td class="${statusCls}">${g.status}</td>`;
+                html += `<td>${g.n_pairs || '-'}</td>`;
+                html += `<td>${g.change_summary}</td>`;
+                html += `<td>${detailBtn}</td>`;
+                html += `</tr>`;
+
+                // Detail row (hidden by default)
+                if (g.status === 'CHANGED' && g.representative) {
+                    const rep = g.representative;
+                    html += `<tr id="kdiff-detail-${gi}" class="metrics-detail" style="display:none"><td colspan="6">`;
+                    html += `<div style="padding:6px 0;font-size:0.85em;color:#666;">`;
+                    html += `Representative: Layer_${rep.layer_a_idx} vs Layer_${rep.layer_b_idx} `;
+                    html += `(similarity: ${(rep.similarity * 100).toFixed(1)}%, match: ${rep.match_method})`;
+                    html += `</div>`;
+                    html += `<table class="inner-table" style="font-size:0.85em;"><thead><tr>`;
+                    html += `<th>#</th><th>Baseline Kernel</th><th>Candidate Kernel</th><th>Status</th>`;
+                    html += `</tr></thead><tbody>`;
+                    (rep.entries || []).forEach(e => {
+                        const rowCls = {
+                            'SAME': '',
+                            'REPLACED': 'diff-row-replaced',
+                            'ADDED': 'diff-row-added',
+                            'REMOVED': 'diff-row-removed',
+                        }[e.status] || '';
+                        html += `<tr class="${rowCls}">`;
+                        html += `<td>${e.pos}</td>`;
+                        html += `<td title="${e.file_a_kernel || ''}">${e.file_a_short || '-'}</td>`;
+                        html += `<td title="${e.file_b_kernel || ''}">${e.file_b_short || '-'}</td>`;
+                        html += `<td>${e.status}</td>`;
+                        html += `</tr>`;
+                    });
+                    html += `</tbody></table></td></tr>`;
+                }
+            });
+
+            html += `</tbody></table></div>`;
+            return html;
+        }
+
+        function toggleKernelDiffDetail(id, btn) {
+            const row = document.getElementById(id);
+            if (row) {
+                const isHidden = row.style.display === 'none';
+                row.style.display = isHidden ? 'table-row' : 'none';
+                btn.textContent = isHidden ? 'Hide' : 'Show';
+            }
+        }
+
+        async function showKernelDiff(runId, btn) {
+            const detailId = `kdiff-${runId}`;
+            let detailRow = document.getElementById(detailId);
+            if (detailRow) {
+                const isHidden = detailRow.style.display === 'none';
+                detailRow.style.display = isHidden ? 'table-row' : 'none';
+                btn.textContent = isHidden ? 'Hide' : 'View';
+                return;
+            }
+
+            btn.textContent = 'Loading...';
+            try {
+                const resp = await fetch(`/api/profile-runs/${runId}/kernel-diff`);
+                const data = await resp.json();
+                const html = data.diff ? renderKernelDiffHtml(data.diff) : `<p>${data.reason || 'No kernel diff available'}</p>`;
+
+                detailRow = document.createElement('tr');
+                detailRow.id = detailId;
+                detailRow.className = 'metrics-detail';
+                detailRow.innerHTML = `<td colspan="11">${html}</td>`;
+                btn.closest('tr').insertAdjacentElement('afterend', detailRow);
+                btn.textContent = 'Hide';
+            } catch (err) {
+                alert('Failed to load kernel diff: ' + err.message);
+                btn.textContent = 'View';
+            }
+        }
+
+        async function onDemandKernelDiff() {
+            const runA = document.getElementById('profile-diff-run-a').value;
+            const runB = document.getElementById('profile-diff-run-b').value;
+            if (!runA || !runB) {
+                alert('Select both baseline and candidate runs');
+                return;
+            }
+            if (runA === runB) {
+                alert('Select two different runs');
+                return;
+            }
+
+            const existingRow = document.getElementById('on-demand-kdiff-row');
+            if (existingRow) existingRow.remove();
+
+            try {
+                const resp = await fetch(`/api/profile-diff?run_a=${runA}&run_b=${runB}`);
+                const data = await resp.json();
+                const html = data.diff ? renderKernelDiffHtml(data.diff)
+                    : `<p>${data.reason || 'Comparison failed'}</p>`;
+
+                const row = document.createElement('tr');
+                row.id = 'on-demand-kdiff-row';
+                row.className = 'metrics-detail';
+                row.style.display = 'table-row';
+                row.innerHTML = `<td colspan="11">${html}</td>`;
+
+                const tbody = document.getElementById('profile-runs-body');
+                tbody.insertBefore(row, tbody.firstChild);
+            } catch (err) {
+                alert('Kernel diff comparison failed: ' + err.message);
             }
         }
 

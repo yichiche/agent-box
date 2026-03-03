@@ -753,6 +753,8 @@ async def get_profile_runs(
             rd = run_dict.get("result_dir") or ""
             summary_path = Path(rd) / "trace_analysis" / "evaluation_summary.csv" if rd else None
             run_dict["has_evaluation_summary"] = bool(summary_path and summary_path.exists())
+            diff_path = Path(rd) / "trace_analysis" / "kernel_diff.json" if rd else None
+            run_dict["has_kernel_diff"] = bool(diff_path and diff_path.exists())
             run_dict.pop("result_dir", None)
             result.append(run_dict)
 
@@ -891,6 +893,80 @@ async def profile_chart_data(
             "label": "Profile Structural Scores",
             "datasets": list(datasets.values()),
         })
+    finally:
+        conn.close()
+
+
+@app.get("/api/profile-runs/{run_id}/kernel-diff")
+async def get_kernel_diff(run_id: int):
+    """Return the pre-computed kernel_diff.json for a profile run."""
+    import json as _json
+
+    conn = get_profile_connection()
+    try:
+        row = conn.execute(
+            "SELECT result_dir FROM benchmark_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if not row:
+            return JSONResponse({"error": "Run not found"}, status_code=404)
+
+        result_dir = row["result_dir"]
+        if not result_dir:
+            return JSONResponse({"diff": None, "reason": "No result directory recorded"})
+
+        diff_path = Path(result_dir) / "trace_analysis" / "kernel_diff.json"
+        if not diff_path.exists():
+            return JSONResponse({"diff": None, "reason": "No kernel diff available (no previous run to compare)"})
+
+        diff = _json.loads(diff_path.read_text(errors="replace"))
+        return JSONResponse({"diff": diff})
+    finally:
+        conn.close()
+
+
+@app.get("/api/profile-diff")
+async def profile_diff_on_demand(
+    run_a: int = Query(..., description="Profile run ID for baseline (old)"),
+    run_b: int = Query(..., description="Profile run ID for candidate (new)"),
+):
+    """On-demand kernel diff between any two profile runs."""
+    from trace_diff import compare_trace_files
+
+    conn = get_profile_connection()
+    try:
+        row_a = conn.execute(
+            "SELECT id, image_tag, result_dir FROM benchmark_runs WHERE id = ?",
+            (run_a,),
+        ).fetchone()
+        row_b = conn.execute(
+            "SELECT id, image_tag, result_dir FROM benchmark_runs WHERE id = ?",
+            (run_b,),
+        ).fetchone()
+
+        if not row_a or not row_b:
+            return JSONResponse({"error": "One or both runs not found"}, status_code=404)
+
+        dir_a = row_a["result_dir"]
+        dir_b = row_b["result_dir"]
+        if not dir_a or not dir_b:
+            return JSONResponse({"error": "Missing result directory for one or both runs"}, status_code=400)
+
+        xlsx_a = str(Path(dir_a) / "trace_analysis" / "profile.csv.xlsx")
+        xlsx_b = str(Path(dir_b) / "trace_analysis" / "profile.csv.xlsx")
+
+        diff = compare_trace_files(xlsx_a, xlsx_b)
+        if diff is None:
+            return JSONResponse({
+                "diff": None,
+                "reason": "Comparison failed (missing xlsx files or parse error)",
+            })
+
+        diff["tag_a"] = row_a["image_tag"]
+        diff["tag_b"] = row_b["image_tag"]
+        diff["run_id_a"] = run_a
+        diff["run_id_b"] = run_b
+        return JSONResponse({"diff": diff})
     finally:
         conn.close()
 
