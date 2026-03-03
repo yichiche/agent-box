@@ -826,9 +826,12 @@ fi
 
 if (( PROFILE_MODE == 1 )); then
   log "Collecting TP0 trace from /tmp"
-  TRACE_PATH_IN_CONTAINER="$(docker_cmd exec "$CONTAINER_NAME" bash -lc "ls -t /tmp/*-TP-0.trace.json.gz 2>/dev/null | head -n 1" || true)"
+  # Trace files may be directly under /tmp/ or inside a subdirectory (newer sglang versions)
+  TRACE_PATH_IN_CONTAINER="$(docker_cmd exec "$CONTAINER_NAME" bash -lc "find /tmp -maxdepth 2 -name '*-TP-0.trace.json.gz' -type f 2>/dev/null | head -n 1" || true)"
   if [[ -n "$TRACE_PATH_IN_CONTAINER" ]]; then
     TRACE_BASENAME="$(basename "$TRACE_PATH_IN_CONTAINER")"
+    TRACE_DIR_IN_CONTAINER="$(dirname "$TRACE_PATH_IN_CONTAINER")"
+    log "Found TP0 trace: ${TRACE_PATH_IN_CONTAINER}"
     log "Running trace analyzer in container"
     docker_cmd exec "$CONTAINER_NAME" mkdir -p "$CONTAINER_TRACE_ANALYSIS_DIR"
     docker_cmd exec "$CONTAINER_NAME" pip install openpyxl -q
