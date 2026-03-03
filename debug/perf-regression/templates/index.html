@@ -229,6 +229,10 @@
             <h3>GSM8K Accuracy (%)</h3>
             <canvas id="chart-accuracy_pct"></canvas>
         </div>
+        <div class="chart-container">
+            <h3>Profile Structural Scores</h3>
+            <canvas id="chart-profile_scores"></canvas>
+        </div>
     </div>
 
     <div class="tables-section">
@@ -279,6 +283,27 @@
             </thead>
             <tbody id="runs-body">
                 <tr><td colspan="15" class="empty">Loading...</td></tr>
+            </tbody>
+        </table>
+
+        <h2>Profile Runs</h2>
+        <table id="profile-runs-table">
+            <thead>
+                <tr>
+                    <th>Build Date</th>
+                    <th>Image Tag</th>
+                    <th>Model</th>
+                    <th>TP</th>
+                    <th>SGLang</th>
+                    <th>ROCm</th>
+                    <th>Status</th>
+                    <th>Duration</th>
+                    <th>Evaluation Summary</th>
+                    <th>Delete</th>
+                </tr>
+            </thead>
+            <tbody id="profile-runs-body">
+                <tr><td colspan="10" class="empty">Loading...</td></tr>
             </tbody>
         </table>
 
@@ -636,6 +661,259 @@
             }).join('');
         }
 
+        async function fetchProfileRuns() {
+            const f = getFilters();
+            const params = new URLSearchParams({
+                days: f.days,
+                rocm_version: f.rocm_version,
+                model_name: f.model_name,
+                tp_size: f.tp_size,
+                ep_size: f.ep_size,
+                dp_size: f.dp_size,
+            });
+            const resp = await fetch(`/api/profile-runs?${params}`);
+            return await resp.json();
+        }
+
+        function renderProfileRuns(runs) {
+            const tbody = document.getElementById('profile-runs-body');
+            if (!runs || runs.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="10" class="empty">No profile runs</td></tr>';
+                return;
+            }
+            tbody.innerHTML = runs.map(r => {
+                const date = `${r.build_date.slice(0,4)}-${r.build_date.slice(4,6)}-${r.build_date.slice(6)}`;
+                const statusClass = r.status === 'completed' ? 'status-ok' :
+                                    r.status === 'failed' ? 'status-fail' : 'status-pending';
+                const duration = r.duration_total_sec ? `${(r.duration_total_sec / 60).toFixed(1)} min` : '-';
+                const summaryCell = r.has_evaluation_summary
+                    ? `<button class="btn-expand" onclick="showEvaluationSummary(${r.id}, this)">View</button>`
+                    : (r.status === 'completed' ? '<span class="status-fail">Missing</span>' : '-');
+
+                const statusTd = r.status === 'failed'
+                    ? `<span class="${statusClass} status-clickable" onclick="toggleError('profile-error-${r.id}', ${r.id}, this)">${r.status}</span>`
+                    : `<span class="${statusClass}">${r.status}</span>`;
+
+                let errorHtml = '';
+                if (r.status === 'failed') {
+                    const errorText = r.error_message
+                        ? r.error_message.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+                        : 'No error details';
+                    errorHtml = `<tr id="profile-error-${r.id}" class="metrics-detail" style="display:none">
+                        <td colspan="10">
+                            <pre class="error-message">${errorText}</pre>
+                        </td>
+                    </tr>`;
+                }
+
+                return `<tr>
+                    <td>${date}</td>
+                    <td class="tag-cell" title="${r.image_tag}">${r.image_tag}</td>
+                    <td>${r.model_name || '-'}</td>
+                    <td>${r.tp_size != null ? r.tp_size : '-'}</td>
+                    <td>${r.sglang_version || '-'}</td>
+                    <td>${r.rocm_version || '-'}</td>
+                    <td>${statusTd}</td>
+                    <td>${duration}</td>
+                    <td>${summaryCell}</td>
+                    <td><button class="btn-expand" onclick="deleteProfileRun(${r.id}, '${r.image_tag}', this)">Delete</button></td>
+                </tr>${errorHtml}`;
+            }).join('');
+        }
+
+        const profileMetricColors = {
+            'S1 Prefill Ordering': '#3B82F6',
+            'S2 Architecture Sig': '#10B981',
+            'S3 Round Consistency': '#F59E0B',
+            'S4 Type Sequence':    '#8B5CF6',
+            'Overall (weighted)':  '#EF4444',
+        };
+        const profileVariantDash = {};
+        let profileDashIdx = 0;
+        const dashPatterns = [[], [8, 4], [4, 4], [12, 4, 4, 4]];
+
+        function getProfileDash(variantKey) {
+            if (!(variantKey in profileVariantDash)) {
+                profileVariantDash[variantKey] = dashPatterns[profileDashIdx % dashPatterns.length];
+                profileDashIdx++;
+            }
+            return profileVariantDash[variantKey];
+        }
+
+        async function fetchProfileChartData() {
+            const f = getFilters();
+            const params = new URLSearchParams({
+                days: f.days,
+                rocm_version: f.rocm_version,
+                model_name: f.model_name,
+                tp_size: f.tp_size,
+            });
+            const resp = await fetch(`/api/profile-chart-data?${params}`);
+            return await resp.json();
+        }
+
+        function createProfileChart(chartData) {
+            const canvasId = 'chart-profile_scores';
+            const ctx = document.getElementById(canvasId).getContext('2d');
+
+            if (chartInstances[canvasId]) {
+                chartInstances[canvasId].destroy();
+            }
+
+            profileDashIdx = 0;
+            for (const k in profileVariantDash) delete profileVariantDash[k];
+
+            const datasets = (chartData.datasets || []).map(ds => {
+                const color = profileMetricColors[ds.metric] || '#607D8B';
+                const dash = getProfileDash(ds.variant);
+                const isOverall = ds.metric === 'Overall (weighted)';
+                return {
+                    label: ds.label,
+                    data: ds.data,
+                    borderColor: color,
+                    backgroundColor: color + '33',
+                    borderDash: dash,
+                    borderWidth: isOverall ? 3 : 2,
+                    pointRadius: isOverall ? 5 : 4,
+                    pointStyle: isOverall ? 'rectRot' : 'circle',
+                    tension: 0.1,
+                };
+            });
+
+            chartInstances[canvasId] = new Chart(ctx, {
+                type: 'line',
+                data: { datasets },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'nearest', intersect: false },
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: {
+                                unit: 'day',
+                                tooltipFormat: 'yyyy-MM-dd',
+                                displayFormats: { day: 'yyyy-MM-dd' },
+                            },
+                            title: { display: true, text: 'Build Date' },
+                        },
+                        y: {
+                            title: { display: true, text: 'Score' },
+                            min: 90,
+                            max: 101,
+                        },
+                    },
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                title: function(items) {
+                                    const d = items[0].raw;
+                                    return d.tag || d.x;
+                                },
+                                label: function(ctx) {
+                                    const d = ctx.raw;
+                                    let label = `${ctx.dataset.label}: ${d.y}`;
+                                    if (d.sglang) label += ` (${d.sglang})`;
+                                    return label;
+                                },
+                            },
+                        },
+                        legend: {
+                            position: 'bottom',
+                            labels: { usePointStyle: true, font: { size: 10 } },
+                        },
+                    },
+                },
+            });
+        }
+
+        async function deleteProfileRun(runId, imageTag, btn) {
+            if (!confirm(`Delete profile run ${imageTag}?`)) return;
+            btn.textContent = '...';
+            try {
+                const resp = await fetch(`/api/profile-runs/${runId}`, { method: 'DELETE' });
+                if (!resp.ok) throw new Error('Delete failed');
+                refreshAll();
+            } catch (err) {
+                alert('Failed to delete profile run: ' + err.message);
+                btn.textContent = 'Delete';
+            }
+        }
+
+        function parseCSVRow(row) {
+            const fields = [];
+            let current = '';
+            let inQuotes = false;
+            for (let i = 0; i < row.length; i++) {
+                const ch = row[i];
+                if (inQuotes) {
+                    if (ch === '"' && row[i + 1] === '"') {
+                        current += '"';
+                        i++;
+                    } else if (ch === '"') {
+                        inQuotes = false;
+                    } else {
+                        current += ch;
+                    }
+                } else {
+                    if (ch === '"') {
+                        inQuotes = true;
+                    } else if (ch === ',') {
+                        fields.push(current.trim());
+                        current = '';
+                    } else {
+                        current += ch;
+                    }
+                }
+            }
+            fields.push(current.trim());
+            return fields;
+        }
+
+        async function showEvaluationSummary(runId, btn) {
+            btn.textContent = 'Loading...';
+            try {
+                const resp = await fetch(`/api/profile-runs/${runId}/evaluation-summary`);
+                const data = await resp.json();
+                if (data.csv) {
+                    const rows = data.csv.trim().split('\n');
+                    let html = '<table class="inner-table eval-summary-table"><thead><tr>';
+                    if (rows.length > 0) {
+                        parseCSVRow(rows[0]).forEach(h => { html += `<th>${h}</th>`; });
+                        html += '</tr></thead><tbody>';
+                        for (let i = 1; i < rows.length; i++) {
+                            html += '<tr>';
+                            parseCSVRow(rows[i]).forEach(c => {
+                                const escaped = c.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+                                html += `<td title="${escaped}">${escaped}</td>`;
+                            });
+                            html += '</tr>';
+                        }
+                        html += '</tbody></table>';
+                    }
+                    const detailId = `profile-summary-${runId}`;
+                    let detailRow = document.getElementById(detailId);
+                    if (detailRow) {
+                        detailRow.style.display = detailRow.style.display === 'none' ? 'table-row' : 'none';
+                        btn.textContent = detailRow.style.display === 'none' ? 'View' : 'Hide';
+                        return;
+                    }
+                    detailRow = document.createElement('tr');
+                    detailRow.id = detailId;
+                    detailRow.className = 'metrics-detail';
+                    detailRow.innerHTML = `<td colspan="10">${html}</td>`;
+                    btn.closest('tr').insertAdjacentElement('afterend', detailRow);
+                    btn.textContent = 'Hide';
+                } else {
+                    alert(data.reason || 'No evaluation summary available');
+                    btn.textContent = 'View';
+                }
+            } catch (err) {
+                alert('Failed to load evaluation summary: ' + err.message);
+                btn.textContent = 'View';
+            }
+        }
+
         async function deleteRun(runId, imageTag, btn) {
             if (!confirm(`Delete run ${imageTag}?`)) return;
             btn.textContent = '...';
@@ -848,8 +1126,8 @@
         async function refreshAll() {
             document.getElementById('btn-refresh').textContent = 'Loading...';
             try {
-                const [chartData, alerts, runs, health] = await Promise.all([
-                    fetchChartData(), fetchAlerts(), fetchRuns(), fetchHealth(),
+                const [chartData, alerts, runs, profileRuns, profileChartData, health] = await Promise.all([
+                    fetchChartData(), fetchAlerts(), fetchRuns(), fetchProfileRuns(), fetchProfileChartData(), fetchHealth(),
                 ]);
 
                 // Store targets from chart data response
@@ -862,9 +1140,15 @@
                     }
                 }
 
+                // Render profile scores chart
+                if (profileChartData && profileChartData.datasets) {
+                    createProfileChart(profileChartData);
+                }
+
                 // Render tables
                 renderAlerts(alerts);
                 renderRuns(runs);
+                renderProfileRuns(profileRuns);
 
                 // Refresh target list if panel is open
                 if (document.getElementById('target-panel').style.display !== 'none') {

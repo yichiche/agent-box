@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 import config as _cfg
-from config import DB_PATH
+from config import DB_PATH, PROFILE_DB_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS benchmark_runs (
     status TEXT NOT NULL DEFAULT 'pending',
     error_message TEXT,
     result_dir TEXT,
-    duration_total_sec REAL
+    duration_total_sec REAL,
+    is_profile_run INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS benchmark_metrics (
@@ -203,18 +204,21 @@ def _migrate_drop_unique_constraint(conn: sqlite3.Connection) -> None:
             status TEXT NOT NULL DEFAULT 'pending',
             error_message TEXT,
             result_dir TEXT,
-            duration_total_sec REAL
+            duration_total_sec REAL,
+            is_profile_run INTEGER NOT NULL DEFAULT 0
         );
     """)
     conn.execute("""
         INSERT INTO benchmark_runs
             (id, image_tag, sglang_version, rocm_version, build_date,
              model_name, tp_size, mtp_enabled, ep_size, dp_size,
-             run_timestamp, status, error_message, result_dir, duration_total_sec)
+             run_timestamp, status, error_message, result_dir, duration_total_sec,
+             is_profile_run)
         SELECT
             id, image_tag, sglang_version, rocm_version, build_date,
             model_name, tp_size, mtp_enabled, ep_size, dp_size,
-            run_timestamp, status, error_message, result_dir, duration_total_sec
+            run_timestamp, status, error_message, result_dir, duration_total_sec,
+            0
         FROM benchmark_runs_old
     """)
     conn.execute("DROP TABLE benchmark_runs_old")
@@ -270,6 +274,19 @@ def _migrate_add_target_image_tag(conn: sqlite3.Connection) -> None:
         logger.info("Migrated: added image_tag column to target_baselines")
 
 
+def _migrate_add_profile_column(conn: sqlite3.Connection) -> None:
+    """Add is_profile_run column if it doesn't exist (schema migration)."""
+    cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(benchmark_runs)").fetchall()
+    }
+    if "is_profile_run" not in cols:
+        conn.execute(
+            "ALTER TABLE benchmark_runs ADD COLUMN is_profile_run INTEGER NOT NULL DEFAULT 0"
+        )
+        conn.commit()
+        logger.info("Migrated: added is_profile_run column to benchmark_runs")
+
+
 def init_db(conn: Optional[sqlite3.Connection] = None) -> None:
     """Create tables if they don't exist."""
     close = False
@@ -281,10 +298,152 @@ def init_db(conn: Optional[sqlite3.Connection] = None) -> None:
     _migrate_drop_unique_constraint(conn)
     _migrate_add_ep_dp_columns(conn)
     _migrate_add_target_image_tag(conn)
+    _migrate_add_profile_column(conn)
     conn.commit()
     if close:
         conn.close()
     logger.info("Database initialized: %s", DB_PATH)
+
+
+# ── Profile Database ───────────────────────────────────────────────────────
+
+PROFILE_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS benchmark_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    image_tag TEXT NOT NULL,
+    sglang_version TEXT,
+    rocm_version TEXT,
+    build_date TEXT,
+    model_name TEXT NOT NULL,
+    tp_size INTEGER NOT NULL DEFAULT 8,
+    mtp_enabled INTEGER NOT NULL DEFAULT 0,
+    ep_size INTEGER DEFAULT NULL,
+    dp_size INTEGER DEFAULT NULL,
+    run_timestamp TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    error_message TEXT,
+    result_dir TEXT,
+    duration_total_sec REAL
+);
+
+CREATE TABLE IF NOT EXISTS version_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+    library_name TEXT NOT NULL,
+    version TEXT,
+    source_type TEXT NOT NULL DEFAULT 'pip',
+    git_commit TEXT,
+    git_commit_date TEXT,
+    git_commit_subject TEXT,
+    UNIQUE(run_id, library_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_profile_runs_lookup
+    ON benchmark_runs(image_tag, model_name, tp_size, mtp_enabled, ep_size, dp_size);
+CREATE INDEX IF NOT EXISTS idx_profile_version_snapshots_run_id ON version_snapshots(run_id);
+"""
+
+
+def get_profile_connection() -> sqlite3.Connection:
+    """Get a SQLite connection to the profile database."""
+    PROFILE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(PROFILE_DB_PATH), timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_profile_db(conn: Optional[sqlite3.Connection] = None) -> None:
+    """Create profile database tables if they don't exist."""
+    close = False
+    if conn is None:
+        conn = get_profile_connection()
+        close = True
+    conn.executescript(PROFILE_SCHEMA_SQL)
+    conn.commit()
+    if close:
+        conn.close()
+    logger.info("Profile database initialized: %s", PROFILE_DB_PATH)
+
+
+def create_profile_run(
+    conn: sqlite3.Connection,
+    image_tag: str,
+    sglang_version: str,
+    rocm_version: str,
+    build_date: str,
+    result_dir: str,
+    tp_size: int = 8,
+    ep_size: Optional[int] = None,
+    dp_size: Optional[int] = None,
+) -> int:
+    """Create or reset a profile run record in the profile database."""
+    existing = conn.execute(
+        "SELECT id, status FROM benchmark_runs "
+        "WHERE image_tag = ? AND model_name = ? AND tp_size = ? AND mtp_enabled = 0 "
+        "AND ep_size IS ? AND dp_size IS ?",
+        (image_tag, _cfg.MODEL_NAME, tp_size, ep_size, dp_size),
+    ).fetchone()
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    if existing:
+        run_id = existing["id"]
+        conn.execute("DELETE FROM version_snapshots WHERE run_id = ?", (run_id,))
+        conn.execute(
+            """UPDATE benchmark_runs
+               SET sglang_version = ?, rocm_version = ?, build_date = ?,
+                   ep_size = ?, dp_size = ?,
+                   run_timestamp = ?, status = 'running', result_dir = ?,
+                   error_message = NULL, duration_total_sec = NULL
+               WHERE id = ?""",
+            (sglang_version, rocm_version, build_date, ep_size, dp_size,
+             now, result_dir, run_id),
+        )
+        conn.commit()
+        logger.info("Reset existing profile run %d for %s", run_id, image_tag)
+        return run_id
+
+    cur = conn.execute(
+        """INSERT INTO benchmark_runs
+           (image_tag, sglang_version, rocm_version, build_date,
+            model_name, tp_size, mtp_enabled, ep_size, dp_size,
+            run_timestamp, status, result_dir)
+           VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 'running', ?)""",
+        (image_tag, sglang_version, rocm_version, build_date,
+         _cfg.MODEL_NAME, tp_size, ep_size, dp_size, now, result_dir),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def is_already_profiled(
+    conn: sqlite3.Connection,
+    image_tag: str,
+    tp_size: int = 8,
+    ep_size: Optional[int] = None,
+    dp_size: Optional[int] = None,
+) -> bool:
+    """Check if this image already has a completed profile run with evaluation_summary.csv.
+
+    conn should be a profile database connection.
+    """
+    row = conn.execute(
+        "SELECT status, result_dir FROM benchmark_runs "
+        "WHERE image_tag = ? AND model_name = ? AND tp_size = ? AND mtp_enabled = 0 "
+        "AND ep_size IS ? AND dp_size IS ?",
+        (image_tag, _cfg.MODEL_NAME, tp_size, ep_size, dp_size),
+    ).fetchone()
+    if row is None or row["status"] != "completed":
+        return False
+    result_dir = row["result_dir"]
+    if result_dir and Path(result_dir).is_dir():
+        summary = Path(result_dir) / "trace_analysis" / "evaluation_summary.csv"
+        if summary.exists():
+            return True
+    logger.info("Profile result dir/evaluation_summary.csv missing for %s, will re-profile", image_tag)
+    return False
 
 
 def is_already_benchmarked(
@@ -299,7 +458,7 @@ def is_already_benchmarked(
     row = conn.execute(
         "SELECT status, result_dir FROM benchmark_runs "
         "WHERE image_tag = ? AND model_name = ? AND tp_size = ? AND mtp_enabled = ? "
-        "AND ep_size IS ? AND dp_size IS ?",
+        "AND ep_size IS ? AND dp_size IS ? AND is_profile_run = 0",
         (image_tag, _cfg.MODEL_NAME, tp_size, int(mtp_enabled), ep_size, dp_size),
     ).fetchone()
     if row is None or row["status"] != "completed":
@@ -324,22 +483,23 @@ def create_run(
     mtp_enabled: bool = True,
     ep_size: Optional[int] = None,
     dp_size: Optional[int] = None,
+    is_profile_run: bool = False,
 ) -> int:
     """Create or reset a benchmark_runs record and return its ID.
 
-    If a previous record exists for this image+model+tp+mtp+ep+dp, reset it
+    If a previous record exists for this image+model+tp+mtp+ep+dp+profile, reset it
     instead of inserting a duplicate.
     """
     existing = conn.execute(
         "SELECT id, status FROM benchmark_runs "
         "WHERE image_tag = ? AND model_name = ? AND tp_size = ? AND mtp_enabled = ? "
-        "AND ep_size IS ? AND dp_size IS ?",
-        (image_tag, _cfg.MODEL_NAME, tp_size, int(mtp_enabled), ep_size, dp_size),
+        "AND ep_size IS ? AND dp_size IS ? AND is_profile_run = ?",
+        (image_tag, _cfg.MODEL_NAME, tp_size, int(mtp_enabled), ep_size, dp_size, int(is_profile_run)),
     ).fetchone()
     used_legacy_key = False
 
     # Backward compatibility for DBs that still keep legacy UNIQUE(image,model,tp,mtp).
-    if existing is None and _has_legacy_unique_constraint(conn):
+    if existing is None and not is_profile_run and _has_legacy_unique_constraint(conn):
         existing = conn.execute(
             "SELECT id, status FROM benchmark_runs "
             "WHERE image_tag = ? AND model_name = ? AND tp_size = ? AND mtp_enabled = ?",
@@ -393,8 +553,8 @@ def create_run(
         """INSERT INTO benchmark_runs
            (image_tag, sglang_version, rocm_version, build_date,
             model_name, tp_size, mtp_enabled, ep_size, dp_size,
-            run_timestamp, status, result_dir)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            run_timestamp, status, result_dir, is_profile_run)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             image_tag,
             sglang_version,
@@ -408,6 +568,7 @@ def create_run(
             now,
             status,
             result_dir,
+            int(is_profile_run),
         ),
     )
     conn.commit()

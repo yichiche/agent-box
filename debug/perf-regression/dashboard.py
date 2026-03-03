@@ -13,7 +13,10 @@ from fastapi.templating import Jinja2Templates
 
 import config as _cfg
 from config import DASHBOARD_PORT, DB_PATH, TEMPLATES_DIR, STATIC_DIR, ROCM_VERSIONS
-from collector import get_connection, init_db, get_version_snapshot, upsert_target, get_targets, delete_target
+from collector import (
+    get_connection, init_db, get_version_snapshot, upsert_target, get_targets, delete_target,
+    get_profile_connection, init_profile_db,
+)
 
 logger = logging.getLogger(__name__)
 app = FastAPI(title="SGLang ROCm Perf Regression Dashboard")
@@ -24,6 +27,7 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 @app.on_event("startup")
 def startup():
     init_db()
+    init_profile_db()
     logger.info("Dashboard database path: %s", DB_PATH)
 
 
@@ -63,8 +67,8 @@ async def chart_data(
     """Return pre-formatted Chart.js data for the 6 metric charts + accuracy."""
     conn = _get_conn()
     try:
-        # Build WHERE clause
-        where_parts = ["br.status = 'completed'"]
+        # Build WHERE clause (exclude profile runs from charts)
+        where_parts = ["br.status = 'completed'", "br.is_profile_run = 0"]
         params: list = []
 
         if model_name and model_name != "all":
@@ -386,7 +390,7 @@ async def get_runs(
     """Return run history."""
     conn = _get_conn()
     try:
-        where_parts = []
+        where_parts = ["br.is_profile_run = 0"]
         params: list = []
 
         if model_name and model_name != "all":
@@ -424,7 +428,7 @@ async def get_runs(
                 f"br.build_date >= strftime('%Y%m%d', 'now', '-{days} days')"
             )
 
-        where_clause = " AND ".join(where_parts) if where_parts else "1=1"
+        where_clause = " AND ".join(where_parts)
         params.append(limit)
 
         query = f"""
@@ -567,7 +571,7 @@ async def get_alerts(
     """Return regression alerts."""
     conn = _get_conn()
     try:
-        where_parts = ["1=1"]
+        where_parts = ["br.is_profile_run = 0"]
         params: list = []
 
         if model_name and model_name != "all":
@@ -637,7 +641,7 @@ async def variant_comparison(
     """Return metrics for all variants of a specific build, for side-by-side comparison."""
     conn = _get_conn()
     try:
-        where = "br.build_date = ? AND br.status = 'completed'"
+        where = "br.build_date = ? AND br.status = 'completed' AND br.is_profile_run = 0"
         params: list = [build_date]
         if rocm_version and rocm_version != "all":
             where += " AND br.rocm_version = ?"
@@ -675,6 +679,238 @@ async def variant_comparison(
                 "accuracy_pct": accuracy["accuracy_pct"] if accuracy else None,
             })
         return JSONResponse(result)
+    finally:
+        conn.close()
+
+
+@app.get("/api/profile-runs")
+async def get_profile_runs(
+    rocm_version: Optional[str] = Query(None),
+    model_name: Optional[str] = Query(None),
+    tp_size: Optional[str] = Query(None),
+    ep_size: Optional[str] = Query(None),
+    dp_size: Optional[str] = Query(None),
+    days: int = Query(30),
+    limit: int = Query(100),
+):
+    """Return profile run history from the profile database."""
+    conn = get_profile_connection()
+    try:
+        where_parts = ["1=1"]
+        params: list = []
+
+        if model_name and model_name != "all":
+            where_parts.append("br.model_name = ?")
+            params.append(model_name)
+
+        if rocm_version and rocm_version != "all":
+            where_parts.append("br.rocm_version = ?")
+            params.append(rocm_version)
+
+        if tp_size and tp_size != "all":
+            where_parts.append("br.tp_size = ?")
+            params.append(int(tp_size))
+
+        if ep_size and ep_size != "all":
+            if ep_size == "none":
+                where_parts.append("br.ep_size IS NULL")
+            else:
+                where_parts.append("br.ep_size = ?")
+                params.append(int(ep_size))
+
+        if dp_size and dp_size != "all":
+            if dp_size == "none":
+                where_parts.append("br.dp_size IS NULL")
+            else:
+                where_parts.append("br.dp_size = ?")
+                params.append(int(dp_size))
+
+        if days > 0:
+            where_parts.append(
+                f"br.build_date >= strftime('%Y%m%d', 'now', '-{days} days')"
+            )
+
+        where_clause = " AND ".join(where_parts)
+        params.append(limit)
+
+        query = f"""
+            SELECT
+                br.id, br.image_tag, br.sglang_version, br.rocm_version,
+                br.build_date, br.model_name, br.tp_size, br.mtp_enabled,
+                br.ep_size, br.dp_size,
+                br.run_timestamp, br.status,
+                br.error_message, br.duration_total_sec, br.result_dir
+            FROM benchmark_runs br
+            WHERE {where_clause}
+            ORDER BY br.build_date DESC
+            LIMIT ?
+        """
+        runs = conn.execute(query, params).fetchall()
+
+        result = []
+        for run in runs:
+            run_dict = dict(run)
+            rd = run_dict.get("result_dir") or ""
+            summary_path = Path(rd) / "trace_analysis" / "evaluation_summary.csv" if rd else None
+            run_dict["has_evaluation_summary"] = bool(summary_path and summary_path.exists())
+            run_dict.pop("result_dir", None)
+            result.append(run_dict)
+
+        return JSONResponse(result)
+    finally:
+        conn.close()
+
+
+@app.get("/api/profile-runs/{run_id}/evaluation-summary")
+async def get_evaluation_summary(run_id: int):
+    """Return the evaluation_summary.csv content for a profile run."""
+    conn = get_profile_connection()
+    try:
+        row = conn.execute(
+            "SELECT result_dir FROM benchmark_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if not row:
+            return JSONResponse({"error": "Run not found"}, status_code=404)
+
+        result_dir = row["result_dir"]
+        if not result_dir:
+            return JSONResponse({"csv": None, "reason": "No result directory recorded"})
+        summary_path = Path(result_dir) / "trace_analysis" / "evaluation_summary.csv"
+        if not summary_path.exists():
+            return JSONResponse({"csv": None, "reason": "evaluation_summary.csv not found"})
+        return JSONResponse({"csv": summary_path.read_text(errors="replace")})
+    finally:
+        conn.close()
+
+
+@app.get("/api/profile-chart-data")
+async def profile_chart_data(
+    rocm_version: Optional[str] = Query(None),
+    model_name: Optional[str] = Query(None),
+    tp_size: Optional[str] = Query(None),
+    days: int = Query(30),
+):
+    """Return Chart.js data for profile structural scores (S1-S4) over time."""
+    import csv
+    import io
+
+    conn = get_profile_connection()
+    try:
+        where_parts = ["br.status = 'completed'"]
+        params: list = []
+
+        if model_name and model_name != "all":
+            where_parts.append("br.model_name = ?")
+            params.append(model_name)
+        if rocm_version and rocm_version != "all":
+            where_parts.append("br.rocm_version = ?")
+            params.append(rocm_version)
+        if tp_size and tp_size != "all":
+            where_parts.append("br.tp_size = ?")
+            params.append(int(tp_size))
+        if days > 0:
+            where_parts.append(
+                f"br.build_date >= strftime('%Y%m%d', 'now', '-{days} days')"
+            )
+
+        where_clause = " AND ".join(where_parts)
+        runs = conn.execute(
+            f"""
+            SELECT br.id, br.build_date, br.image_tag, br.rocm_version,
+                   br.sglang_version, br.tp_size, br.result_dir
+            FROM benchmark_runs br
+            WHERE {where_clause}
+            ORDER BY br.build_date, br.rocm_version, br.tp_size
+            """,
+            params,
+        ).fetchall()
+
+        STRUCTURAL_METRICS = [
+            "S1 Prefill Ordering",
+            "S2 Architecture Sig",
+            "S3 Round Consistency",
+            "S4 Type Sequence",
+        ]
+        OVERALL_METRIC = "Overall (weighted)"
+
+        datasets: dict = {}
+
+        for run in runs:
+            rd = run["result_dir"]
+            if not rd:
+                continue
+            summary_path = Path(rd) / "trace_analysis" / "evaluation_summary.csv"
+            if not summary_path.exists():
+                continue
+
+            scores: dict = {}
+            try:
+                reader = csv.DictReader(
+                    io.StringIO(summary_path.read_text(errors="replace"))
+                )
+                for row in reader:
+                    metric = row.get("metric", "").strip()
+                    if metric in STRUCTURAL_METRICS or metric == OVERALL_METRIC:
+                        try:
+                            scores[metric] = float(row["score"])
+                        except (ValueError, KeyError):
+                            pass
+            except Exception:
+                continue
+
+            if not scores:
+                continue
+
+            date_str = run["build_date"]
+            x_val = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
+            rocm = run["rocm_version"]
+            tp = run["tp_size"]
+            variant_key = f"rocm{rocm}-tp{tp}"
+            variant_label = f"ROCm {rocm} / TP{tp}"
+
+            for metric in STRUCTURAL_METRICS + [OVERALL_METRIC]:
+                if metric not in scores:
+                    continue
+                key = f"{variant_key}-{metric}"
+                if key not in datasets:
+                    datasets[key] = {
+                        "label": f"{variant_label} / {metric}",
+                        "variant": variant_key,
+                        "metric": metric,
+                        "data": [],
+                    }
+                datasets[key]["data"].append({
+                    "x": x_val,
+                    "y": round(scores[metric], 2),
+                    "tag": run["image_tag"],
+                    "sglang": run["sglang_version"],
+                })
+
+        return JSONResponse({
+            "label": "Profile Structural Scores",
+            "datasets": list(datasets.values()),
+        })
+    finally:
+        conn.close()
+
+
+@app.delete("/api/profile-runs/{run_id}")
+async def delete_profile_run(run_id: int):
+    """Delete a profile run from the profile database."""
+    conn = get_profile_connection()
+    try:
+        row = conn.execute(
+            "SELECT id, image_tag FROM benchmark_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        if not row:
+            return JSONResponse({"error": "Profile run not found"}, status_code=404)
+
+        conn.execute("DELETE FROM version_snapshots WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM benchmark_runs WHERE id = ?", (run_id,))
+        conn.commit()
+        logger.info("Deleted profile run id=%d (%s)", run_id, row["image_tag"])
+        return JSONResponse({"ok": True})
     finally:
         conn.close()
 
@@ -787,4 +1023,5 @@ if __name__ == "__main__":
     import uvicorn
 
     init_db()
+    init_profile_db()
     uvicorn.run(app, host="0.0.0.0", port=DASHBOARD_PORT)

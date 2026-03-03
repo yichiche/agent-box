@@ -34,11 +34,16 @@ from config import (
     LOG_DIR,
     save_model_config,
     TP_MTP_VARIANTS,
+    PROFILE_VARIANTS,
     VariantConfig,
     variant_label,
     parse_variant_label,
 )
-from collector import get_connection, init_db, is_already_benchmarked, create_run, update_run_status, ingest_run
+from collector import (
+    get_connection, init_db, is_already_benchmarked,
+    create_run, update_run_status, ingest_run, ingest_version_snapshot,
+    get_profile_connection, init_profile_db, is_already_profiled, create_profile_run,
+)
 from discover import discover_images
 from regression import detect_regressions
 
@@ -284,11 +289,12 @@ def _monitor_server_log(server_log: Path, proc: subprocess.Popen) -> None:
 
 
 def run_benchmark(image: str, result_dir: Path, tp_size: int = 8, mtp: bool = True,
-                   ep_size: int = None, dp_size: int = None) -> tuple[str, str]:
+                   ep_size: int = None, dp_size: int = None,
+                   profile: bool = False) -> tuple[str, str]:
     """Run the benchmark script and return (stdout, container_name).
 
     Passes all flags to suppress interactive prompts.
-    Pipes a newline to stdin to answer the profile mode prompt with 'N'.
+    Uses --profile or --no-profile to control trace profiling mode.
     Uses Popen to stream output in real time for container name detection
     and to allow clean interruption via signals.
     """
@@ -321,7 +327,13 @@ def run_benchmark(image: str, result_dir: Path, tp_size: int = 8, mtp: bool = Tr
     if extra_server_args:
         cmd.extend(["--server-extra-args", " ".join(extra_server_args)])
 
-    if _cfg.ACCURACY_MODE:
+    if profile:
+        cmd.append("--profile")
+        cmd.append("--no-accuracy")
+    else:
+        cmd.append("--no-profile")
+
+    if not profile and _cfg.ACCURACY_MODE:
         if _cfg.ACCURACY_ONLY:
             cmd.append("--accuracy-only")
         else:
@@ -352,10 +364,8 @@ def run_benchmark(image: str, result_dir: Path, tp_size: int = 8, mtp: bool = Tr
     )
     _active_process = proc
 
-    # Send newline to answer the profile mode prompt, then close stdin
+    # Close stdin immediately since prompts are suppressed via explicit flags
     try:
-        proc.stdin.write("\n")
-        proc.stdin.flush()
         proc.stdin.close()
     except BrokenPipeError:
         pass
@@ -466,6 +476,139 @@ def prune_old_images() -> None:
                 logger.warning("Failed to remove image: %s", image)
 
 
+def run_profiling_for_variant(
+    profile_conn, image_info, tp_size: int, ep_size: int = None, dp_size: int = None,
+) -> bool:
+    """Run a profiling pass for a single non-MTP variant.
+
+    Creates a separate result directory ({tag}_{label}_profile/), records the
+    run in the profile database, and ingests only the version snapshot.
+    Failures are logged as warnings and do NOT affect overall success.
+
+    Returns True if the profile run completed successfully.
+    """
+    global _active_container, _active_run_id, _active_conn
+
+    tag = image_info.full_tag
+    image = image_info.full_image
+    label = variant_label(tp_size, False, ep_size=ep_size, dp_size=dp_size)
+
+    if is_already_profiled(profile_conn, tag, tp_size=tp_size, ep_size=ep_size, dp_size=dp_size):
+        logger.info("Skipping profiling %s [%s] (already profiled)", tag, label)
+        return True
+
+    result_dir = BENCHMARK_RUNS_DIR / f"{tag}_{label}_profile"
+    run_id = None
+    container_name = ""
+    _active_conn = profile_conn
+
+    try:
+        if result_dir.exists():
+            logger.info("Removing stale profile result dir: %s", result_dir)
+            shutil.rmtree(result_dir)
+
+        run_id = create_profile_run(
+            profile_conn,
+            image_tag=tag,
+            sglang_version=image_info.sglang_version,
+            rocm_version=image_info.rocm_version,
+            build_date=image_info.build_date,
+            result_dir=str(result_dir),
+            tp_size=tp_size,
+            ep_size=ep_size,
+            dp_size=dp_size,
+        )
+        _active_run_id = run_id
+
+        start_time = time.monotonic()
+        stdout, container_name = run_benchmark(
+            image, result_dir, tp_size=tp_size, mtp=False,
+            ep_size=ep_size, dp_size=dp_size, profile=True,
+        )
+        duration = time.monotonic() - start_time
+
+        # Ingest only the version snapshot (NOT metrics, NOT regression detection)
+        import json as _json
+        version_path = result_dir / "version_snapshot.json"
+        if version_path.exists():
+            snapshot = _json.loads(version_path.read_text())
+            ingest_version_snapshot(profile_conn, run_id, snapshot)
+
+        # Verify evaluation_summary.csv exists
+        summary_path = result_dir / "trace_analysis" / "evaluation_summary.csv"
+        if summary_path.exists():
+            logger.info("Profile evaluation_summary.csv produced: %s", summary_path)
+        else:
+            logger.warning(
+                "Profile run completed but evaluation_summary.csv not found: %s",
+                summary_path,
+            )
+
+        update_run_status(profile_conn, run_id, "completed", duration_total_sec=duration)
+        logger.info("Completed profiling for %s [%s] in %.1f sec", tag, label, duration)
+        return True
+
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        msg = f"Profiling failed [{label}]: {e}"
+        logger.warning(msg)
+        if run_id:
+            update_run_status(profile_conn, run_id, "failed", error_message=msg)
+        return False
+
+    except Exception as e:
+        msg = f"Unexpected profiling error [{label}]: {e}"
+        logger.warning(msg, exc_info=True)
+        if run_id:
+            update_run_status(profile_conn, run_id, "failed", error_message=msg)
+        return False
+
+    finally:
+        cname = container_name or _active_container
+        if cname and run_id:
+            _salvage_version_snapshot(profile_conn, run_id, cname, result_dir)
+        cleanup_container(cname)
+        _active_container = ""
+        _active_run_id = None
+        _active_conn = None
+
+
+def run_profiling_pass(image_info, active_variants=None, dry_run: bool = False) -> None:
+    """Run profiling for all eligible (non-MTP) variants of an image.
+
+    Intersects the active variants with PROFILE_VARIANTS to determine which
+    variants to profile. Opens its own connection to the profile database.
+    Failures are logged as warnings and are non-blocking.
+    """
+    profile_eligible = set(PROFILE_VARIANTS)
+    if active_variants:
+        candidates = [v for v in active_variants if v in profile_eligible]
+    else:
+        candidates = list(PROFILE_VARIANTS)
+
+    if not candidates:
+        logger.info("No profiling-eligible variants for %s", image_info.full_tag)
+        return
+
+    profile_conn = get_profile_connection()
+    init_profile_db(profile_conn)
+
+    try:
+        for v in candidates:
+            tp_size, _, ep_size, dp_size = v.tp_size, v.mtp, v.ep_size, v.dp_size
+            label = variant_label(tp_size, False, ep_size=ep_size, dp_size=dp_size)
+
+            if dry_run:
+                logger.info("[DRY RUN] Would profile: %s [%s]", image_info.full_image, label)
+                continue
+
+            run_profiling_for_variant(
+                profile_conn, image_info, tp_size=tp_size,
+                ep_size=ep_size, dp_size=dp_size,
+            )
+    finally:
+        profile_conn.close()
+
+
 def _salvage_version_snapshot(
     conn, run_id: int, container_name: str, result_dir: Path
 ) -> None:
@@ -540,11 +683,14 @@ def _salvage_version_snapshot(
         logger.warning("Failed to salvage version snapshot: %s", e)
 
 
-def process_image(conn, image_info, dry_run: bool = False, variants=None) -> bool:
+def process_image(conn, image_info, dry_run: bool = False, variants=None,
+                   no_profile: bool = False, profile_only: bool = False) -> bool:
     """Process a single image: pull, benchmark, collect, detect regressions.
 
     Iterates over all TP/MTP variants (or a filtered subset), tracking
     results independently per variant via tp_size/mtp_enabled columns.
+    After normal benchmarks, runs profiling for non-MTP variants unless
+    no_profile is set.
     Returns True if all variants succeed.
     """
     global _active_container, _active_run_id, _active_conn
@@ -561,6 +707,12 @@ def process_image(conn, image_info, dry_run: bool = False, variants=None) -> boo
             return False
         if not pull_image(image):
             return False
+
+    # Skip normal benchmarks when --profile-only is set
+    if profile_only:
+        if not no_profile:
+            run_profiling_pass(image_info, active_variants=active_variants, dry_run=dry_run)
+        return True
 
     for v in active_variants:
         tp_size, mtp, ep_size, dp_size = v.tp_size, v.mtp, v.ep_size, v.dp_size
@@ -665,6 +817,10 @@ def process_image(conn, image_info, dry_run: bool = False, variants=None) -> boo
             _active_run_id = None
             _active_conn = None
 
+    # Run profiling pass for non-MTP variants after normal benchmarks
+    if not no_profile:
+        run_profiling_pass(image_info, active_variants=active_variants, dry_run=dry_run)
+
     return all_success
 
 
@@ -734,6 +890,19 @@ def main():
         type=int,
         default=None,
         help="Add DP (data parallelism) size to all variants",
+    )
+    profile_group = parser.add_mutually_exclusive_group()
+    profile_group.add_argument(
+        "--no-profile",
+        action="store_true",
+        default=False,
+        help="Skip profiling pass entirely (default: profiling enabled)",
+    )
+    profile_group.add_argument(
+        "--profile-only",
+        action="store_true",
+        default=False,
+        help="Skip normal benchmarks, only run profiling for non-MTP variants",
     )
     args = parser.parse_args()
 
@@ -874,10 +1043,29 @@ def main():
                     conn.execute(
                         "DELETE FROM benchmark_runs "
                         "WHERE image_tag = ? AND model_name = ? AND tp_size = ? AND mtp_enabled = ? "
-                        "AND ep_size IS ? AND dp_size IS ?",
+                        "AND ep_size IS ? AND dp_size IS ? AND is_profile_run = 0",
                         (tag, _cfg.MODEL_NAME, v.tp_size, int(v.mtp), v.ep_size, v.dp_size),
                     )
             conn.commit()
+
+            # Also delete profile run records from the profile DB for non-MTP variants
+            if not args.no_profile:
+                profile_conn = get_profile_connection()
+                init_profile_db(profile_conn)
+                try:
+                    profile_variants = [v for v in rerun_variants if not v.mtp]
+                    for v in profile_variants:
+                        label = variant_label(v.tp_size, False, ep_size=v.ep_size, dp_size=v.dp_size)
+                        logger.info("Force re-profiling: %s [%s]", tag, label)
+                        profile_conn.execute(
+                            "DELETE FROM benchmark_runs "
+                            "WHERE image_tag = ? AND model_name = ? AND tp_size = ? AND mtp_enabled = 0 "
+                            "AND ep_size IS ? AND dp_size IS ?",
+                            (tag, _cfg.MODEL_NAME, v.tp_size, v.ep_size, v.dp_size),
+                        )
+                    profile_conn.commit()
+                finally:
+                    profile_conn.close()
 
         if not images:
             logger.info("No images found. Nothing to do.")
@@ -890,7 +1078,8 @@ def main():
         fail_count = 0
 
         for img in images:
-            if process_image(conn, img, dry_run=args.dry_run, variants=active_variants):
+            if process_image(conn, img, dry_run=args.dry_run, variants=active_variants,
+                             no_profile=args.no_profile, profile_only=args.profile_only):
                 success_count += 1
             else:
                 fail_count += 1
