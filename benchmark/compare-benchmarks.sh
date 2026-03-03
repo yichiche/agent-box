@@ -59,6 +59,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../env.sh"
 BENCH_SCRIPT="${SCRIPT_DIR}/run-local-benchmark-e2e.sh"
 COMPARE_SCRIPT="${SCRIPT_DIR}/compare_bench_results.py"
+TRACE_COMPARE_SCRIPT="${SCRIPT_DIR}/compare_traces.py"
 
 [[ -x "$BENCH_SCRIPT" ]] || die "Benchmark script not found: $BENCH_SCRIPT"
 [[ -f "$COMPARE_SCRIPT" ]] || die "Comparison script not found: $COMPARE_SCRIPT"
@@ -266,8 +267,41 @@ fi
 log "Running comparison"
 "${COMPARE_ARGS[@]}"
 
+# ─── Trace kernel diff (when profiling was enabled) ───────────────────────────
+PROFILE_ENABLED=0
+for arg in "${PASSTHROUGH_ARGS[@]+"${PASSTHROUGH_ARGS[@]}"}"; do
+  [[ "$arg" == "--profile" ]] && PROFILE_ENABLED=1
+done
+
+XLSX_A="${RESULT_DIR_A}/trace_analysis/profile.csv.xlsx"
+XLSX_B="${RESULT_DIR_B}/trace_analysis/profile.csv.xlsx"
+
+if (( PROFILE_ENABLED )); then
+  if [[ ! -f "$TRACE_COMPARE_SCRIPT" ]]; then
+    log "WARNING: Trace compare script not found: ${TRACE_COMPARE_SCRIPT} — skipping kernel diff"
+  elif [[ ! -f "$XLSX_A" ]]; then
+    log "WARNING: Image A trace analysis not found: ${XLSX_A} — skipping kernel diff"
+  elif [[ ! -f "$XLSX_B" ]]; then
+    log "WARNING: Image B trace analysis not found: ${XLSX_B} — skipping kernel diff"
+  else
+    TRACE_DIFF_XLSX="${COMPARISON_DIR}/kernel_diff.xlsx"
+    log "Running trace kernel diff"
+    log "  File A: ${XLSX_A}"
+    log "  File B: ${XLSX_B}"
+    if python3 "$TRACE_COMPARE_SCRIPT" "$XLSX_A" "$XLSX_B" \
+        --output "$TRACE_DIFF_XLSX" --verbose; then
+      log "Trace kernel diff complete: ${TRACE_DIFF_XLSX}"
+    else
+      log "WARNING: Trace kernel diff failed (non-fatal)"
+    fi
+  fi
+fi
+
 log "Comparison complete"
 log "Results directory: ${COMPARISON_DIR}"
 log "  Image A results: ${RESULT_DIR_A}"
 log "  Image B results: ${RESULT_DIR_B}"
 log "  Summary CSV:     ${SUMMARY_CSV}"
+if (( PROFILE_ENABLED )) && [[ -f "${COMPARISON_DIR}/kernel_diff.xlsx" ]]; then
+  log "  Kernel diff:     ${COMPARISON_DIR}/kernel_diff.xlsx"
+fi

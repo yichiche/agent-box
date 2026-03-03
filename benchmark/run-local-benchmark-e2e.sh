@@ -375,6 +375,10 @@ if [[ -n "$LOAD_CONFIG" && -f "$LOAD_CONFIG" ]]; then
     _val="$(grep -m1 '^TP_SIZE=' "$LOAD_CONFIG" 2>/dev/null | cut -d= -f2- || true)"
     [[ -n "$_val" ]] && { TP_SIZE="$_val"; TP_SIZE_SET=1; }
   }
+  [[ -z "$MODEL_PATH" ]] && {
+    _val="$(grep -m1 '^MODEL_PATH=' "$LOAD_CONFIG" 2>/dev/null | cut -d= -f2- || true)"
+    [[ -n "$_val" ]] && MODEL_PATH="$_val"
+  }
 fi
 
 if [[ -z "$IMAGE" ]]; then
@@ -443,6 +447,7 @@ if [[ -n "$RESOLVED_CONFIG" ]]; then
     echo "MTP_MODE=${MTP_MODE}"
     echo "ACCURACY_MODE=${ACCURACY_MODE}"
     echo "TP_SIZE=${TP_SIZE}"
+    echo "MODEL_PATH=${MODEL_PATH}"
   } > "$RESOLVED_CONFIG"
 fi
 
@@ -766,7 +771,11 @@ wait_for_health() {
 }
 
 log "Waiting for server health on port ${SERVER_PORT}"
-if ! wait_for_health; then
+set +e
+wait_for_health
+_health_rc=$?
+set -e
+if (( _health_rc != 0 )); then
   die "Server failed health check within ${WAIT_TIMEOUT_SEC}s"
 fi
 log "Server is healthy"
