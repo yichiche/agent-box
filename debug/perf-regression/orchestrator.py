@@ -476,6 +476,66 @@ def prune_old_images() -> None:
                 logger.warning("Failed to remove image: %s", image)
 
 
+def _auto_kernel_diff(
+    profile_conn, run_id: int, result_dir: Path,
+    tag: str, tp_size: int, ep_size: int = None, dp_size: int = None,
+) -> None:
+    """Compare trace xlsx against the previous profile run for the same variant.
+
+    Finds the most recent completed profile run (excluding the current one),
+    runs the kernel diff, and saves kernel_diff.json in the current result dir.
+    Non-fatal: failures are logged as warnings.
+    """
+    from trace_diff import compare_and_save
+
+    current_xlsx = result_dir / "trace_analysis" / "profile.csv.xlsx"
+    if not current_xlsx.exists():
+        logger.info("No trace xlsx for kernel diff: %s", current_xlsx)
+        return
+
+    # Find the previous completed profile run for the same variant
+    prev = profile_conn.execute(
+        """SELECT id, image_tag, result_dir FROM benchmark_runs
+           WHERE model_name = ? AND tp_size = ? AND mtp_enabled = 0
+             AND ep_size IS ? AND dp_size IS ?
+             AND status = 'completed' AND id != ?
+           ORDER BY build_date DESC, id DESC
+           LIMIT 1""",
+        (_cfg.MODEL_NAME, tp_size, ep_size, dp_size, run_id),
+    ).fetchone()
+
+    if not prev:
+        logger.info("No previous profile run found for kernel diff comparison")
+        return
+
+    prev_xlsx = Path(prev["result_dir"]) / "trace_analysis" / "profile.csv.xlsx"
+    if not prev_xlsx.exists():
+        logger.info("Previous profile run %d has no trace xlsx: %s", prev["id"], prev_xlsx)
+        return
+
+    output_path = result_dir / "trace_analysis" / "kernel_diff.json"
+    logger.info(
+        "Running kernel diff: %s (prev: %s) vs %s (current: %s)",
+        prev["image_tag"], prev_xlsx, tag, current_xlsx,
+    )
+
+    try:
+        diff = compare_and_save(
+            str(prev_xlsx), str(current_xlsx), str(output_path),
+            tag_a=prev["image_tag"], tag_b=tag,
+        )
+        if diff and diff.get("has_changes"):
+            changed = diff["summary"]["n_changed"]
+            logger.warning(
+                "Kernel diff detected %d changed layer group(s) between %s and %s",
+                changed, prev["image_tag"], tag,
+            )
+        elif diff:
+            logger.info("Kernel diff: no kernel changes between %s and %s", prev["image_tag"], tag)
+    except Exception as e:
+        logger.warning("Kernel diff failed (non-fatal): %s", e)
+
+
 def run_profiling_for_variant(
     profile_conn, image_info, tp_size: int, ep_size: int = None, dp_size: int = None,
 ) -> bool:
@@ -543,6 +603,12 @@ def run_profiling_for_variant(
                 "Profile run completed but evaluation_summary.csv not found: %s",
                 summary_path,
             )
+
+        # Auto-compare kernel diff against the previous profile run
+        _auto_kernel_diff(
+            profile_conn, run_id, result_dir,
+            tag=tag, tp_size=tp_size, ep_size=ep_size, dp_size=dp_size,
+        )
 
         update_run_status(profile_conn, run_id, "completed", duration_total_sec=duration)
         logger.info("Completed profiling for %s [%s] in %.1f sec", tag, label, duration)

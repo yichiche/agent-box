@@ -454,3 +454,47 @@ tr:hover {
 .btn-save-target:hover {
     background: #2a2a4e;
 }
+
+/* Kernel Diff Styles */
+
+.kernel-diff-report {
+    padding: 8px 0;
+}
+
+.kernel-diff-header {
+    margin-bottom: 8px;
+    font-size: 0.85rem;
+    color: #333;
+}
+
+.diff-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    margin-right: 4px;
+}
+
+.diff-identical { background: #C6EFCE; color: #1B5E20; }
+.diff-changed   { background: #FFF3CD; color: #856404; }
+.diff-removed   { background: #F8D7DA; color: #721C24; }
+.diff-added     { background: #CCE5FF; color: #004085; }
+
+.diff-status-ok      { color: #1B5E20; font-weight: 600; }
+.diff-status-changed  { color: #856404; font-weight: 600; }
+.diff-status-removed  { color: #721C24; font-weight: 600; }
+.diff-status-added    { color: #004085; font-weight: 600; }
+.diff-status-skip     { color: #666; }
+
+.diff-row-replaced td { background: #FFF3CD !important; }
+.diff-row-added td    { background: #CCE5FF !important; }
+.diff-row-removed td  { background: #F8D7DA !important; }
+
+.kernel-diff-table th {
+    font-size: 0.82rem;
+}
+
+.kernel-diff-table td {
+    font-size: 0.82rem;
+}
