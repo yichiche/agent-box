@@ -13,8 +13,10 @@ Usage:
 
 import argparse
 import collections
+import csv
 import json
 import math
+import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -1148,6 +1150,99 @@ class ParsingEvaluator:
 
         return json.dumps(data, indent=2)
 
+    def export_csv(self, report: EvaluationReport, output_path: str) -> str:
+        """Export evaluation summary to CSV beside the input Excel file.
+
+        The CSV contains one row per metric:
+          section, metric, score, grade, detail
+        covering S1-S4 structural rules and per-group diagnostics.
+
+        Returns the path to the created CSV file.
+        """
+        sm = report.structural_metrics
+
+        rows = []
+        # ── Structural rules ──
+        s1d = sm.s1_details
+        rows.append({
+            "section": "structural",
+            "metric": "S1 Prefill Ordering",
+            "score": round(sm.s1_score, 1),
+            "grade": _grade(sm.s1_score),
+            "detail": f"violations={s1d.get('violations', 0)}",
+        })
+        s2d = sm.s2_details
+        rows.append({
+            "section": "structural",
+            "metric": "S2 Architecture Sig",
+            "score": round(sm.s2_score, 1),
+            "grade": _grade(sm.s2_score),
+            "detail": f"pattern={s2d.get('detected_pattern', [])}",
+        })
+        s3d = sm.s3_details
+        rows.append({
+            "section": "structural",
+            "metric": "S3 Round Consistency",
+            "score": round(sm.s3_score, 1),
+            "grade": _grade(sm.s3_score),
+            "detail": (
+                f"decode_rounds={s3d.get('decode_rounds', 0)}, "
+                f"mode_size={s3d.get('mode_size', 0)}, "
+                f"match={s3d.get('match_pct', 0)}%"
+            ),
+        })
+        s4d = sm.s4_details
+        rows.append({
+            "section": "structural",
+            "metric": "S4 Type Sequence",
+            "score": round(sm.s4_score, 1),
+            "grade": _grade(sm.s4_score),
+            "detail": f"rounds={s4d.get('rounds', 0)}, match={s4d.get('match_pct', 0)}%",
+        })
+
+        # ── Per-group diagnostics (skip Attn) ──
+        core_groups = [
+            gm for gm in report.group_metrics
+            if gm.key.layer_type != "Attn" and not gm.skipped
+        ]
+        for gm in core_groups:
+            label = repr(gm.key)
+            kp_str = f"{gm.pattern_mode_pct:.1f}%" if gm.pattern_available else "—"
+            rows.append({
+                "section": "group",
+                "metric": label,
+                "score": round(gm.composite_score, 1),
+                "grade": _grade(gm.composite_score),
+                "detail": (
+                    f"layers={gm.layer_count}, "
+                    f"time_cv={gm.time_cv:.3f}, "
+                    f"kern_cnt_mode={gm.kernel_count_mode}({gm.kernel_count_mode_pct:.1f}%), "
+                    f"kern_pat={kp_str}"
+                ),
+            })
+
+        # ── Overall ──
+        if core_groups:
+            total_layers = sum(gm.layer_count for gm in core_groups)
+            weighted_composite = sum(
+                gm.composite_score * gm.layer_count for gm in core_groups
+            ) / total_layers
+            rows.append({
+                "section": "overall",
+                "metric": "Overall (weighted)",
+                "score": round(weighted_composite, 1),
+                "grade": _grade(weighted_composite),
+                "detail": f"layers={total_layers}",
+            })
+
+        fieldnames = ["section", "metric", "score", "grade", "detail"]
+        with open(output_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        return output_path
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -1212,6 +1307,12 @@ Examples:
         print(evaluator.format_json_report(report))
     else:
         print(evaluator.format_terminal_report(report))
+
+    # Export CSV beside the input Excel file
+    input_dir = os.path.dirname(os.path.abspath(args.filepath))
+    csv_path = os.path.join(input_dir, "evaluation_summary.csv")
+    evaluator.export_csv(report, csv_path)
+    print(f"  Exported CSV: {csv_path}")
 
     sys.exit(0 if report.passed else 1)
 
