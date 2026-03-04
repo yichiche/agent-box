@@ -369,7 +369,8 @@ class KernelClassifier:
         ]
 
     def classify_stage(
-        self, name: str, grid: Optional[Tuple[int, int, int]] = None
+        self, name: str, grid: Optional[Tuple[int, int, int]] = None,
+        kernel_type: Optional[KernelType] = None,
     ) -> Stage:
         """Classify kernel stage based on name and grid dimensions."""
         for pattern in self._stage_force_unknown_patterns:
@@ -379,7 +380,13 @@ class KernelClassifier:
             if pattern.search(name):
                 return stage
 
-        if grid is not None and len(grid) >= 1:
+        # Grid-based fallback: only apply to compute kernels (attention,
+        # quantization, linear, moe).  Small utility/scheduling kernels
+        # (type OTHER/MEMORY) always have tiny grids regardless of stage,
+        # so using grid[0] on them produces false PREFILL votes.
+        if grid is not None and len(grid) >= 1 and kernel_type not in (
+            KernelType.OTHER, KernelType.MEMORY,
+        ):
             grid_0 = grid[0]
             if grid_0 > self.grid_threshold:
                 return Stage.DECODE
@@ -835,8 +842,8 @@ class TraceAnalyzer:
             block = self._parse_grid(args.get("block"))
 
             # Classify
-            stage = self.classifier.classify_stage(name, grid)
             kernel_type = self.classifier.classify_type(name)
+            stage = self.classifier.classify_stage(name, grid, kernel_type)
             simplified_name = self.classifier.simplify_name(name)
 
             if kernel_type in (
