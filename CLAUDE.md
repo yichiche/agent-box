@@ -91,13 +91,13 @@ configs/     — Shared model configuration files
 env.sh       — Central environment config (HOST_HOME, AGENT_BOX_DIR)
 ```
 
-## Trace Analyzer
+## Profiling & Trace Analysis
 
-When debugging or adding features to `trace_analyzer.py`, use the `/trace-analyzer` skill command for detailed guidance on pattern tables, half-layer handling, and diagnostic steps. See `profile/trace-analyzer.md`.
+- When analyzing profiling outputs (trace Excel, evaluation CSV, raw traces, kernel performance), use `/profile` or see `profile/profile.md`.
+- When debugging or adding features to `trace_analyzer.py` (pattern tables, half-layer handling, diagnostics), see `profile/trace-analyzer.md`.
 
-## Git Workflow Skills
-
-Two slash commands are available for streamlined git workflows:
+## Skills (Slash Commands)
 
 - **`/commit`** — Stage changes, ensure you're on a feature branch (creates one if on main), and commit with an `[AMD]` prefixed message. Usage: `/commit` or `/commit <description>`.
 - **`/pr`** — Push the branch and create a GitHub PR with the full SGLang template (Motivation, Modifications, Accuracy Tests, Benchmarking, Checklist, Review Process). Usage: `/pr` or `/pr <title>`.
+- **`/profile`** — Analyze profiling outputs (trace Excel, evaluation CSV, raw traces) for kernel performance, layer breakdown, and model behavior. Usage: `/profile` or `/profile <question or path>`. Full guide at `profile/profile.md`.
