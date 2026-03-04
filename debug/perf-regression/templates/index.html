@@ -236,27 +236,32 @@
     </div>
 
     <div class="tables-section">
-        <h2>Variant Comparison</h2>
+        <h2>Profile Runs</h2>
         <div class="filter-group" style="margin-bottom: 12px;">
-            <label>Build Date:</label>
-            <select id="variant-build-date"></select>
-            <button class="btn-expand" onclick="loadVariantComparison()">Compare</button>
+            <label>Compare Kernel Diff:</label>
+            <select id="profile-diff-run-a" style="max-width:260px;"><option value="">-- Baseline (old) --</option></select>
+            <span style="margin:0 4px;">vs</span>
+            <select id="profile-diff-run-b" style="max-width:260px;"><option value="">-- Candidate (new) --</option></select>
+            <button class="btn-expand" onclick="onDemandKernelDiff()">Compare</button>
         </div>
-        <table id="variant-table">
+        <table id="profile-runs-table">
             <thead>
                 <tr>
-                    <th>Variant</th>
-                    <th>Conc.</th>
-                    <th>Out Throughput</th>
-                    <th>Total Throughput</th>
-                    <th>Med E2E (ms)</th>
-                    <th>Med TTFT (ms)</th>
-                    <th>Med ITL (ms)</th>
-                    <th>Accuracy</th>
+                    <th>Build Date</th>
+                    <th>Image Tag</th>
+                    <th>Model</th>
+                    <th>TP</th>
+                    <th>SGLang</th>
+                    <th>ROCm</th>
+                    <th>Status</th>
+                    <th>Duration</th>
+                    <th>Evaluation Summary</th>
+                    <th>Kernel Diff</th>
+                    <th>Delete</th>
                 </tr>
             </thead>
-            <tbody id="variant-body">
-                <tr><td colspan="8" class="empty">Select a build date to compare variants</td></tr>
+            <tbody id="profile-runs-body">
+                <tr><td colspan="11" class="empty">Loading...</td></tr>
             </tbody>
         </table>
 
@@ -286,32 +291,27 @@
             </tbody>
         </table>
 
-        <h2>Profile Runs</h2>
+        <h2>Variant Comparison</h2>
         <div class="filter-group" style="margin-bottom: 12px;">
-            <label>Compare Kernel Diff:</label>
-            <select id="profile-diff-run-a" style="max-width:260px;"><option value="">-- Baseline (old) --</option></select>
-            <span style="margin:0 4px;">vs</span>
-            <select id="profile-diff-run-b" style="max-width:260px;"><option value="">-- Candidate (new) --</option></select>
-            <button class="btn-expand" onclick="onDemandKernelDiff()">Compare</button>
+            <label>Build Date:</label>
+            <select id="variant-build-date"></select>
+            <button class="btn-expand" onclick="loadVariantComparison()">Compare</button>
         </div>
-        <table id="profile-runs-table">
+        <table id="variant-table">
             <thead>
                 <tr>
-                    <th>Build Date</th>
-                    <th>Image Tag</th>
-                    <th>Model</th>
-                    <th>TP</th>
-                    <th>SGLang</th>
-                    <th>ROCm</th>
-                    <th>Status</th>
-                    <th>Duration</th>
-                    <th>Evaluation Summary</th>
-                    <th>Kernel Diff</th>
-                    <th>Delete</th>
+                    <th>Variant</th>
+                    <th>Conc.</th>
+                    <th>Out Throughput</th>
+                    <th>Total Throughput</th>
+                    <th>Med E2E (ms)</th>
+                    <th>Med TTFT (ms)</th>
+                    <th>Med ITL (ms)</th>
+                    <th>Accuracy</th>
                 </tr>
             </thead>
-            <tbody id="profile-runs-body">
-                <tr><td colspan="11" class="empty">Loading...</td></tr>
+            <tbody id="variant-body">
+                <tr><td colspan="8" class="empty">Select a build date to compare variants</td></tr>
             </tbody>
         </table>
 
@@ -930,7 +930,7 @@
                     html += `(similarity: ${(rep.similarity * 100).toFixed(1)}%, match: ${rep.match_method})`;
                     html += `</div>`;
                     html += `<table class="inner-table" style="font-size:0.85em;"><thead><tr>`;
-                    html += `<th>#</th><th>Baseline Kernel</th><th>Candidate Kernel</th><th>Status</th>`;
+                    html += `<th>#</th><th>Baseline Kernel</th><th>Baseline Dur (us)</th><th>Candidate Kernel</th><th>Candidate Dur (us)</th><th>Status</th>`;
                     html += `</tr></thead><tbody>`;
                     (rep.entries || []).forEach(e => {
                         const rowCls = {
@@ -939,10 +939,14 @@
                             'ADDED': 'diff-row-added',
                             'REMOVED': 'diff-row-removed',
                         }[e.status] || '';
+                        const aDur = e.file_a_duration != null ? e.file_a_duration.toFixed(3) : '-';
+                        const bDur = e.file_b_duration != null ? e.file_b_duration.toFixed(3) : '-';
                         html += `<tr class="${rowCls}">`;
                         html += `<td>${e.pos}</td>`;
                         html += `<td title="${e.file_a_kernel || ''}">${e.file_a_short || '-'}</td>`;
+                        html += `<td style="text-align:right;">${aDur}</td>`;
                         html += `<td title="${e.file_b_kernel || ''}">${e.file_b_short || '-'}</td>`;
+                        html += `<td style="text-align:right;">${bDur}</td>`;
                         html += `<td>${e.status}</td>`;
                         html += `</tr>`;
                     });

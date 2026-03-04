@@ -40,6 +40,7 @@ class KernelInfo:
     short_name: str
     kernel_name: str
     kernel_type: str
+    duration_us: float = 0.0
 
 
 @dataclass
@@ -63,8 +64,10 @@ class DiffEntry:
     pos: int
     file_a_short: Optional[str]
     file_a_kernel: Optional[str]
+    file_a_duration: Optional[float]
     file_b_short: Optional[str]
     file_b_kernel: Optional[str]
+    file_b_duration: Optional[float]
     status: str  # SAME, REPLACED, ADDED, REMOVED
 
 
@@ -168,7 +171,11 @@ def parse_excel(filepath: str, verbose: bool = False) -> Dict[int, LayerInfo]:
             short_name = str(row[4]) if row[4] else ""
             kernel_name = str(row[5]) if row[5] else ""
             kernel_type = str(row[3]) if row[3] else ""
-            kernels.append(KernelInfo(short_name, kernel_name, kernel_type))
+            try:
+                duration_us = float(row[1]) if row[1] is not None else 0.0
+            except (ValueError, TypeError):
+                duration_us = 0.0
+            kernels.append(KernelInfo(short_name, kernel_name, kernel_type, duration_us))
 
         layers[layer_idx] = LayerInfo(layer_idx, layer_type, stage, kernels)
 
@@ -315,8 +322,10 @@ def _diff_kernel_sequences(a: LayerInfo, b: LayerInfo) -> List[DiffEntry]:
                     pos=pos,
                     file_a_short=seq_a[ai],
                     file_a_kernel=infos_a[ai].kernel_name,
+                    file_a_duration=infos_a[ai].duration_us,
                     file_b_short=seq_b[bi],
                     file_b_kernel=infos_b[bi].kernel_name,
+                    file_b_duration=infos_b[bi].duration_us,
                     status="SAME",
                 ))
         elif tag == "replace":
@@ -331,8 +340,10 @@ def _diff_kernel_sequences(a: LayerInfo, b: LayerInfo) -> List[DiffEntry]:
                         pos=pos,
                         file_a_short=seq_a[a_idx],
                         file_a_kernel=infos_a[a_idx].kernel_name,
+                        file_a_duration=infos_a[a_idx].duration_us,
                         file_b_short=seq_b[b_idx],
                         file_b_kernel=infos_b[b_idx].kernel_name,
+                        file_b_duration=infos_b[b_idx].duration_us,
                         status="REPLACED",
                     ))
                 elif a_idx is not None:
@@ -340,15 +351,19 @@ def _diff_kernel_sequences(a: LayerInfo, b: LayerInfo) -> List[DiffEntry]:
                         pos=pos,
                         file_a_short=seq_a[a_idx],
                         file_a_kernel=infos_a[a_idx].kernel_name,
+                        file_a_duration=infos_a[a_idx].duration_us,
                         file_b_short=None, file_b_kernel=None,
+                        file_b_duration=None,
                         status="REMOVED",
                     ))
                 else:
                     entries.append(DiffEntry(
                         pos=pos,
                         file_a_short=None, file_a_kernel=None,
+                        file_a_duration=None,
                         file_b_short=seq_b[b_idx],
                         file_b_kernel=infos_b[b_idx].kernel_name,
+                        file_b_duration=infos_b[b_idx].duration_us,
                         status="ADDED",
                     ))
         elif tag == "insert":
@@ -357,8 +372,10 @@ def _diff_kernel_sequences(a: LayerInfo, b: LayerInfo) -> List[DiffEntry]:
                 entries.append(DiffEntry(
                     pos=pos,
                     file_a_short=None, file_a_kernel=None,
+                    file_a_duration=None,
                     file_b_short=seq_b[bi],
                     file_b_kernel=infos_b[bi].kernel_name,
+                    file_b_duration=infos_b[bi].duration_us,
                     status="ADDED",
                 ))
         elif tag == "delete":
@@ -368,7 +385,9 @@ def _diff_kernel_sequences(a: LayerInfo, b: LayerInfo) -> List[DiffEntry]:
                     pos=pos,
                     file_a_short=seq_a[ai],
                     file_a_kernel=infos_a[ai].kernel_name,
+                    file_a_duration=infos_a[ai].duration_us,
                     file_b_short=None, file_b_kernel=None,
+                    file_b_duration=None,
                     status="REMOVED",
                 ))
 
@@ -566,14 +585,19 @@ def output_terminal_report(
         print()
 
         col_w = 25
+        dur_w = 14
         hdr_a = f"{'File A (old)':<{col_w}}"
+        hdr_a_dur = f"{'A Dur (us)':>{dur_w}}"
         hdr_b = f"{'File B (new)':<{col_w}}"
-        print(f"  {'#':>3} | {hdr_a} | {hdr_b} | Status")
-        print(f"  {'-' * 3}-+-{'-' * col_w}-+-{'-' * col_w}-+-{'-' * 10}")
+        hdr_b_dur = f"{'B Dur (us)':>{dur_w}}"
+        print(f"  {'#':>3} | {hdr_a} | {hdr_a_dur} | {hdr_b} | {hdr_b_dur} | Status")
+        print(f"  {'-' * 3}-+-{'-' * col_w}-+-{'-' * dur_w}-+-{'-' * col_w}-+-{'-' * dur_w}-+-{'-' * 10}")
         for e in rep.entries:
             a_str = _truncate(e.file_a_short, col_w)
+            a_dur = f"{e.file_a_duration:>{dur_w}.3f}" if e.file_a_duration is not None else f"{'-':>{dur_w}}"
             b_str = _truncate(e.file_b_short, col_w)
-            print(f"  {e.pos:3d} | {a_str:<{col_w}} | {b_str:<{col_w}} | {e.status}")
+            b_dur = f"{e.file_b_duration:>{dur_w}.3f}" if e.file_b_duration is not None else f"{'-':>{dur_w}}"
+            print(f"  {e.pos:3d} | {a_str:<{col_w}} | {a_dur} | {b_str:<{col_w}} | {b_dur} | {e.status}")
 
         if g.n_skipped and g.skipped_pairs:
             print()
@@ -716,7 +740,9 @@ def output_excel_report(
         ws.append([])
 
         detail_headers = ["Pos", "FileA_ShortName", "FileA_KernelName",
-                          "FileB_ShortName", "FileB_KernelName", "Status"]
+                          "FileA_Duration (us)",
+                          "FileB_ShortName", "FileB_KernelName",
+                          "FileB_Duration (us)", "Status"]
         ws.append(detail_headers)
         header_row = ws.max_row
         for ci in range(1, len(detail_headers) + 1):
@@ -728,8 +754,10 @@ def output_excel_report(
                 e.pos,
                 e.file_a_short or "-",
                 e.file_a_kernel or "-",
+                round(e.file_a_duration, 3) if e.file_a_duration is not None else "-",
                 e.file_b_short or "-",
                 e.file_b_kernel or "-",
+                round(e.file_b_duration, 3) if e.file_b_duration is not None else "-",
                 e.status,
             ])
             fill = _STATUS_FILLS.get(e.status)
