@@ -44,8 +44,10 @@ def _serialize_group(g) -> dict:
                     "pos": e.pos,
                     "file_a_short": e.file_a_short,
                     "file_a_kernel": e.file_a_kernel,
+                    "file_a_duration": e.file_a_duration,
                     "file_b_short": e.file_b_short,
                     "file_b_kernel": e.file_b_kernel,
+                    "file_b_duration": e.file_b_duration,
                     "status": e.status,
                 }
                 for e in rep.entries
