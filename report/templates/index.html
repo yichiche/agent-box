@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kernel Profile Regression Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <h1>Kernel Profile Regression Dashboard</h1>
+        <div class="health-badge" id="health-badge">Loading...</div>
+    </header>
+
+    <div class="filter-bar">
+        <div class="filter-group">
+            <label>Report:</label>
+            <select id="filter-report">
+                <option value="">Loading...</option>
+            </select>
+        </div>
+        <div class="filter-group">
+            <label>Config Group:</label>
+            <select id="filter-group">
+                <option value="">Loading...</option>
+            </select>
+        </div>
+        <div class="filter-group">
+            <label>Stage:</label>
+            <select id="filter-stage">
+                <option value="all">All</option>
+                <option value="prefill">Prefill</option>
+                <option value="decode">Decode</option>
+            </select>
+        </div>
+        <button id="btn-refresh" onclick="refreshAll()">Refresh</button>
+    </div>
+
+    <div class="summary-cards" id="summary-cards">
+        <div class="summary-card">
+            <div class="card-value" id="card-runs">-</div>
+            <div class="card-label">Runs</div>
+        </div>
+        <div class="summary-card">
+            <div class="card-value" id="card-changes">-</div>
+            <div class="card-label">Total Changes</div>
+        </div>
+        <div class="summary-card alert">
+            <div class="card-value" id="card-significant">-</div>
+            <div class="card-label">Significant</div>
+        </div>
+        <div class="summary-card">
+            <div class="card-value" id="card-threshold">-</div>
+            <div class="card-label">Threshold</div>
+        </div>
+    </div>
+
+    <div class="charts-grid" id="charts-grid">
+    </div>
+
+    <div class="tables-section">
+        <h2>Significant Changes</h2>
+        <table id="changes-table">
+            <thead>
+                <tr>
+                    <th>Stage</th>
+                    <th>Layer Type</th>
+                    <th>Old Run</th>
+                    <th>New Run</th>
+                    <th>Old Time</th>
+                    <th>New Time</th>
+                    <th>Change</th>
+                    <th>Kernel Diff</th>
+                </tr>
+            </thead>
+            <tbody id="changes-body">
+                <tr><td colspan="8" class="empty">Loading...</td></tr>
+            </tbody>
+        </table>
+
+        <h2>All Runs</h2>
+        <table id="runs-table">
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Directory</th>
+                    <th>ROCm</th>
+                    <th>TP</th>
+                    <th>Model</th>
+                </tr>
+            </thead>
+            <tbody id="runs-body">
+                <tr><td colspan="5" class="empty">Loading...</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        const chartInstances = {};
+        let kernelDiffsCache = null;
+        let currentGroup = '';
+
+        function getReport() {
+            return document.getElementById('filter-report').value;
+        }
+
+        function getGroup() {
+            return document.getElementById('filter-group').value;
+        }
+
+        function getStage() {
+            return document.getElementById('filter-stage').value;
+        }
+
+        function reportParam() {
+            const r = getReport();
+            return r ? `report=${encodeURIComponent(r)}` : '';
+        }
+
+        function appendReport(qs) {
+            const rp = reportParam();
+            if (!rp) return qs;
+            return qs ? `${qs}&${rp}` : rp;
+        }
+
+        function fmtUs(val) {
+            if (val >= 1000000) return (val / 1000000).toFixed(2) + 's';
+            if (val >= 1000) return (val / 1000).toFixed(1) + 'ms';
+            return val.toFixed(0) + 'us';
+        }
+
+        function fmtPct(pct) {
+            const sign = pct >= 0 ? '+' : '';
+            return sign + (pct * 100).toFixed(1) + '%';
+        }
+
+        // ── Load reports ─────────────────────────────────────────────
+        async function loadReports() {
+            const resp = await fetch('/api/reports');
+            const reports = await resp.json();
+            const sel = document.getElementById('filter-report');
+            const prev = sel.value;
+            sel.innerHTML = '';
+            reports.forEach((r, i) => {
+                const opt = document.createElement('option');
+                opt.value = r.name;
+                const ts = r.name.replace(/(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/, '$1-$2-$3 $4:$5:$6');
+                opt.textContent = `${ts} (${r.n_groups} groups)`;
+                sel.appendChild(opt);
+            });
+            if (prev && [...sel.options].some(o => o.value === prev)) {
+                sel.value = prev;
+            }
+        }
+
+        // ── Load groups ──────────────────────────────────────────────
+        async function loadGroups() {
+            const rp = reportParam();
+            const resp = await fetch(`/api/groups${rp ? '?' + rp : ''}`);
+            const groups = await resp.json();
+            const sel = document.getElementById('filter-group');
+            sel.innerHTML = '';
+            groups.forEach((g, i) => {
+                const opt = document.createElement('option');
+                opt.value = g.name;
+                opt.textContent = `${g.name} (${g.n_runs} runs, ${g.n_significant} alerts)`;
+                sel.appendChild(opt);
+            });
+            if (groups.length > 0) {
+                currentGroup = groups[0].name;
+            }
+        }
+
+        // ── Summary cards ────────────────────────────────────────────
+        async function loadMeta() {
+            const group = getGroup();
+            if (!group) return;
+            const qs = appendReport('');
+            const resp = await fetch(`/api/${group}/meta${qs ? '?' + qs : ''}`);
+            const meta = await resp.json();
+            document.getElementById('card-runs').textContent = meta.n_runs || 0;
+            document.getElementById('card-changes').textContent = meta.n_changes || 0;
+            document.getElementById('card-significant').textContent = meta.n_significant || 0;
+            const thr = meta.threshold ? (meta.threshold * 100).toFixed(0) + '%' : '-';
+            document.getElementById('card-threshold').textContent = thr;
+        }
+
+        // ── Charts ───────────────────────────────────────────────────
+        async function loadCharts() {
+            const group = getGroup();
+            if (!group) return;
+            const stage = getStage();
+            const qs = appendReport(`stage=${encodeURIComponent(stage)}`);
+            const resp = await fetch(`/api/${group}/chart-data?${qs}`);
+            const charts = await resp.json();
+
+            const grid = document.getElementById('charts-grid');
+            grid.innerHTML = '';
+
+            for (const id in chartInstances) {
+                chartInstances[id].destroy();
+                delete chartInstances[id];
+            }
+
+            for (const [stg, chartData] of Object.entries(charts)) {
+                const totalId = `chart-${stg}-total`;
+                const totalDiv = document.createElement('div');
+                totalDiv.className = 'chart-container';
+                totalDiv.innerHTML = `<h3>${stg.charAt(0).toUpperCase() + stg.slice(1)} — Total Layer Time</h3>
+                    <canvas id="${totalId}"></canvas>`;
+                grid.appendChild(totalDiv);
+                createTimeChart(totalId, chartData.label, chartData.total_datasets);
+
+                if (chartData.component_datasets && chartData.component_datasets.length > 0) {
+                    const compId = `chart-${stg}-components`;
+                    const compDiv = document.createElement('div');
+                    compDiv.className = 'chart-container';
+                    compDiv.innerHTML = `<h3>${stg.charAt(0).toUpperCase() + stg.slice(1)} — Component Breakdown</h3>
+                        <canvas id="${compId}"></canvas>`;
+                    grid.appendChild(compDiv);
+                    createTimeChart(compId, 'Component Time (us)', chartData.component_datasets);
+                }
+            }
+        }
+
+        function createTimeChart(canvasId, yLabel, datasets) {
+            const ctx = document.getElementById(canvasId).getContext('2d');
+            chartInstances[canvasId] = new Chart(ctx, {
+                type: 'line',
+                data: { datasets },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'nearest', intersect: false },
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: {
+                                unit: 'day',
+                                tooltipFormat: 'yyyy-MM-dd',
+                                displayFormats: { day: 'MM-dd' },
+                            },
+                            title: { display: true, text: 'Date' },
+                        },
+                        y: {
+                            title: { display: true, text: yLabel },
+                            beginAtZero: false,
+                        },
+                    },
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                title: function(items) {
+                                    const d = items[0].raw;
+                                    return d.dir || d.x;
+                                },
+                                label: function(ctx) {
+                                    const d = ctx.raw;
+                                    let label = `${ctx.dataset.label}: ${fmtUs(d.y)}`;
+                                    if (d.layers) label += ` (${d.layers} layers)`;
+                                    return label;
+                                },
+                            },
+                        },
+                        legend: {
+                            position: 'bottom',
+                            labels: { usePointStyle: true, font: { size: 10 } },
+                        },
+                    },
+                },
+            });
+        }
+
+        // ── Changes table ────────────────────────────────────────────
+        async function loadChanges() {
+            const group = getGroup();
+            if (!group) return;
+            const qs = appendReport('significant_only=true');
+            const resp = await fetch(`/api/${group}/changes?${qs}`);
+            const changes = await resp.json();
+
+            const dqs = appendReport('');
+            const diffResp = await fetch(`/api/${group}/kernel-diffs${dqs ? '?' + dqs : ''}`);
+            kernelDiffsCache = await diffResp.json();
+            const diffs = kernelDiffsCache || [];
+
+            const diffMap = {};
+            diffs.forEach(d => {
+                diffMap[`${d.old_dir}|${d.new_dir}|${d.layer_type}|${d.stage}`] = d;
+            });
+
+            const tbody = document.getElementById('changes-body');
+            if (!changes || changes.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" class="empty">No significant changes detected</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = changes.map((c, idx) => {
+                const pctClass = c.pct_change > 0 ? 'regression-val' : 'improvement-val';
+                const oldDate = `${c.old_date.slice(0,4)}-${c.old_date.slice(4,6)}-${c.old_date.slice(6)}`;
+                const newDate = `${c.new_date.slice(0,4)}-${c.new_date.slice(4,6)}-${c.new_date.slice(6)}`;
+
+                const diffKey = `${c.old_dir}|${c.new_dir}|${c.layer_type}|${c.stage}`;
+                const diff = diffMap[diffKey];
+                let diffCell = '-';
+                if (diff && diff.entries && diff.entries.length > 0) {
+                    diffCell = `<button class="btn-expand" onclick="toggleDiffDetail('diff-${idx}', this)">Show (${diff.n_replaced}R/${diff.n_added}A/${diff.n_removed}D)</button>`;
+                } else if (diff) {
+                    diffCell = `<span style="color:#999">sim: ${(diff.similarity * 100).toFixed(0)}%</span>`;
+                }
+
+                let diffRow = '';
+                if (diff && diff.entries && diff.entries.length > 0) {
+                    let diffHtml = `<div style="padding:8px;">
+                        <p style="margin-bottom:8px;font-size:0.85rem;color:#666;">
+                            Similarity: ${(diff.similarity * 100).toFixed(1)}% —
+                            <span class="diff-badge diff-replaced">${diff.n_replaced} replaced</span>
+                            <span class="diff-badge diff-added">${diff.n_added} added</span>
+                            <span class="diff-badge diff-removed">${diff.n_removed} removed</span>
+                        </p>
+                        <table class="inner-table"><thead><tr>
+                            <th>#</th><th>Old Kernel</th><th>New Kernel</th><th>Status</th>
+                        </tr></thead><tbody>`;
+                    diff.entries.forEach(e => {
+                        const rowCls = {'REPLACED':'diff-row-replaced','ADDED':'diff-row-added','REMOVED':'diff-row-removed'}[e.status] || '';
+                        diffHtml += `<tr class="${rowCls}">
+                            <td>${e.pos}</td>
+                            <td title="${e.old_kernel || ''}">${e.old_short || '-'}</td>
+                            <td title="${e.new_kernel || ''}">${e.new_short || '-'}</td>
+                            <td>${e.status}</td>
+                        </tr>`;
+                    });
+                    diffHtml += `</tbody></table></div>`;
+                    diffRow = `<tr id="diff-${idx}" class="metrics-detail" style="display:none"><td colspan="8">${diffHtml}</td></tr>`;
+                }
+
+                return `<tr>
+                    <td>${c.stage}</td>
+                    <td>${c.layer_type}</td>
+                    <td title="${c.old_dir}">${oldDate}</td>
+                    <td title="${c.new_dir}">${newDate}</td>
+                    <td>${fmtUs(c.old_time_us)}</td>
+                    <td>${fmtUs(c.new_time_us)}</td>
+                    <td class="${pctClass}">${fmtPct(c.pct_change)}</td>
+                    <td>${diffCell}</td>
+                </tr>${diffRow}`;
+            }).join('');
+        }
+
+        function toggleDiffDetail(id, btn) {
+            const row = document.getElementById(id);
+            if (row) {
+                const isHidden = row.style.display === 'none';
+                row.style.display = isHidden ? 'table-row' : 'none';
+                btn.textContent = isHidden ? 'Hide' : btn.textContent.replace('Hide', 'Show');
+            }
+        }
+
+        // ── Runs table ───────────────────────────────────────────────
+        async function loadRuns() {
+            const group = getGroup();
+            if (!group) return;
+            const qs = appendReport('');
+            const resp = await fetch(`/api/${group}/runs${qs ? '?' + qs : ''}`);
+            const runs = await resp.json();
+
+            const tbody = document.getElementById('runs-body');
+            if (!runs || runs.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" class="empty">No runs</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = runs.map(r => {
+                const date = `${r.date.slice(0,4)}-${r.date.slice(4,6)}-${r.date.slice(6)}`;
+                return `<tr>
+                    <td>${date}</td>
+                    <td style="font-family:monospace;font-size:0.8rem;" title="${r.dir_name}">${r.dir_name}</td>
+                    <td>${r.rocm_version}</td>
+                    <td>${r.tp_size}</td>
+                    <td>${r.model}</td>
+                </tr>`;
+            }).join('');
+        }
+
+        // ── Health badge ─────────────────────────────────────────────
+        async function loadHealth() {
+            try {
+                const qs = appendReport('');
+                const resp = await fetch(`/api/health${qs ? '?' + qs : ''}`);
+                const data = await resp.json();
+                const badge = document.getElementById('health-badge');
+                if (data.n_groups > 0) {
+                    badge.textContent = `${data.n_groups} config group(s)`;
+                    badge.className = 'health-badge ok';
+                } else {
+                    badge.textContent = 'No data — run generate_report first';
+                    badge.className = 'health-badge warn';
+                }
+            } catch (e) {
+                document.getElementById('health-badge').className = 'health-badge warn';
+                document.getElementById('health-badge').textContent = 'Error';
+            }
+        }
+
+        // ── Refresh ──────────────────────────────────────────────────
+        async function loadGroupData() {
+            kernelDiffsCache = null;
+            await Promise.all([loadMeta(), loadCharts(), loadChanges(), loadRuns()]);
+        }
+
+        async function loadReportData() {
+            await loadGroups();
+            await loadGroupData();
+        }
+
+        async function refreshAll() {
+            await loadReports();
+            await loadHealth();
+            await loadReportData();
+        }
+
+        // Selector change handlers
+        document.getElementById('filter-report').addEventListener('change', () => {
+            loadHealth();
+            loadReportData();
+        });
+        document.getElementById('filter-group').addEventListener('change', () => loadGroupData());
+        document.getElementById('filter-stage').addEventListener('change', () => loadCharts());
+
+        // Initial load
+        refreshAll();
+    </script>
+</body>
+</html>
