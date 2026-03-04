@@ -50,11 +50,13 @@ Advanced options:
                                      E.g.: --pr 19216
                                            --pr https://github.com/sgl-project/sglang/pull/19216
                                            --pr https://...pull/19216/changes/<commit>
-  --aiter-pr <url_or_number>         Checkout a GitHub PR/commit in aiter before benchmarking.
-                                     Accepts full GitHub PR URL, bare PR number, or commit SHA.
+  --aiter-pr <url_or_number_or_branch> Checkout a GitHub PR/commit/branch in aiter before benchmarking.
+                                     Accepts full GitHub PR URL, bare PR number, commit SHA,
+                                     or branch name.
                                      E.g.: --aiter-pr 123
                                            --aiter-pr https://github.com/ROCm/aiter/pull/123
                                            --aiter-pr <commit-sha>
+                                           --aiter-pr wjx/fix_moe_ds_tp2
   --resolved-config <path>           Save all resolved config values to file after prompts.
   --load-config <path>               Load config values from file (skip interactive prompts).
 
@@ -110,16 +112,18 @@ parse_pr_ref() {
 }
 
 parse_aiter_ref() {
-  # Accepts a full GitHub PR URL, a bare PR number, or a commit SHA.
-  # Sets globals AITER_PR_NUMBER and AITER_COMMIT.
+  # Accepts a full GitHub PR URL, a bare PR number, commit SHA, or branch name.
+  # Sets globals AITER_PR_NUMBER, AITER_COMMIT, and AITER_BRANCH.
   # Supported forms:
   #   https://github.com/ROCm/aiter/pull/123
   #   https://github.com/ROCm/aiter/pull/123/changes/<commit>
   #   123  (bare number)
   #   abc123def  (6-40 hex chars, not purely numeric => commit SHA)
+  #   wjx/fix_moe_ds_tp2  (anything else => branch name)
   local input="$1"
   AITER_PR_NUMBER=""
   AITER_COMMIT=""
+  AITER_BRANCH=""
   if [[ "$input" =~ ^[0-9]+$ ]]; then
     AITER_PR_NUMBER="$input"
   elif [[ "$input" =~ ^[a-f0-9]{6,40}$ ]]; then
@@ -128,7 +132,7 @@ parse_aiter_ref() {
     AITER_PR_NUMBER="${BASH_REMATCH[1]}"
     AITER_COMMIT="${BASH_REMATCH[3]:-}"
   else
-    die "Cannot parse aiter PR URL, number, or commit SHA: $input"
+    AITER_BRANCH="$input"
   fi
 }
 
@@ -459,6 +463,7 @@ fi
 
 AITER_PR_NUMBER=""
 AITER_COMMIT=""
+AITER_BRANCH=""
 if [[ -n "$AITER_PR" ]]; then
   parse_aiter_ref "$AITER_PR"
 fi
@@ -501,6 +506,10 @@ if [[ -z "$CONTAINER_NAME" ]]; then
   if [[ -z "$AITER_SUFFIX" && -n "$AITER_COMMIT" ]]; then
     AITER_SUFFIX="-aiter-${AITER_COMMIT:0:8}"
   fi
+  if [[ -z "$AITER_SUFFIX" && -n "$AITER_BRANCH" ]]; then
+    _sanitized="${AITER_BRANCH//[^a-zA-Z0-9_.-]/-}"
+    AITER_SUFFIX="-aiter-${_sanitized}"
+  fi
   CONTAINER_NAME="jacky-sglang-bench-${IMAGE_TAG}${PR_SUFFIX}${AITER_SUFFIX}-${TIMESTAMP}"
 fi
 
@@ -509,6 +518,10 @@ if [[ -z "$RESULT_DIR" ]]; then
   AITER_SUFFIX="${AITER_PR_NUMBER:+-aiter-pr${AITER_PR_NUMBER}}"
   if [[ -z "$AITER_SUFFIX" && -n "$AITER_COMMIT" ]]; then
     AITER_SUFFIX="-aiter-${AITER_COMMIT:0:8}"
+  fi
+  if [[ -z "$AITER_SUFFIX" && -n "$AITER_BRANCH" ]]; then
+    _sanitized="${AITER_BRANCH//[^a-zA-Z0-9_.-]/-}"
+    AITER_SUFFIX="-aiter-${_sanitized}"
   fi
   RESULT_DIR="${HOST_HOME_DIR}/benchmark_runs/${TIMESTAMP}${PR_SUFFIX}${AITER_SUFFIX}"
 fi
@@ -636,8 +649,8 @@ if [[ -n "$PR_NUMBER" ]]; then
   log "PR #${PR_NUMBER} applied successfully"
 fi
 
-# ── Apply GitHub PR/commit to aiter inside container (if requested) ──
-if [[ -n "$AITER_PR_NUMBER" || -n "$AITER_COMMIT" ]]; then
+# ── Apply GitHub PR/commit/branch to aiter inside container (if requested) ──
+if [[ -n "$AITER_PR_NUMBER" || -n "$AITER_COMMIT" || -n "$AITER_BRANCH" ]]; then
   log "Uninstalling existing aiter"
   docker_cmd exec "$CONTAINER_NAME" bash -lc \
     "pip uninstall amd-aiter -y 2>/dev/null || true"
@@ -668,6 +681,16 @@ if [[ -n "$AITER_PR_NUMBER" || -n "$AITER_COMMIT" ]]; then
         "cd /sgl-workspace/aiter && git checkout -f pr-${AITER_PR_NUMBER}" \
         || die "Failed to checkout aiter PR #${AITER_PR_NUMBER}"
     fi
+  elif [[ -n "$AITER_BRANCH" ]]; then
+    log "Fetching aiter branch: ${AITER_BRANCH}"
+    docker_cmd exec "$CONTAINER_NAME" bash -lc \
+      "cd /sgl-workspace/aiter && git fetch origin ${AITER_BRANCH}" \
+      || die "Failed to fetch aiter branch ${AITER_BRANCH}"
+
+    log "Checking out aiter branch: ${AITER_BRANCH}"
+    docker_cmd exec "$CONTAINER_NAME" bash -lc \
+      "cd /sgl-workspace/aiter && git checkout -f origin/${AITER_BRANCH}" \
+      || die "Failed to checkout aiter branch ${AITER_BRANCH}"
   else
     # Bare commit SHA (no PR number)
     log "Checking out aiter commit ${AITER_COMMIT}"
@@ -693,6 +716,8 @@ if [[ -n "$AITER_PR_NUMBER" || -n "$AITER_COMMIT" ]]; then
 
   if [[ -n "$AITER_PR_NUMBER" ]]; then
     log "Aiter PR #${AITER_PR_NUMBER} applied successfully"
+  elif [[ -n "$AITER_BRANCH" ]]; then
+    log "Aiter branch ${AITER_BRANCH} applied successfully"
   else
     log "Aiter commit ${AITER_COMMIT} applied successfully"
   fi
