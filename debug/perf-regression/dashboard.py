@@ -859,8 +859,7 @@ async def profile_chart_data(
             "S3 Round Consistency",
             "S4 Type Sequence",
         ]
-        OVERALL_METRIC = "Overall (weighted)"
-        TARGET_METRICS = set(STRUCTURAL_METRICS + [OVERALL_METRIC])
+        TARGET_METRICS = set(STRUCTURAL_METRICS)
 
         # Batch-query all profile_scores for these runs in one go
         run_ids = [r["id"] for r in runs]
@@ -870,7 +869,7 @@ async def profile_chart_data(
             score_rows = conn.execute(
                 f"""SELECT run_id, metric, score FROM profile_scores
                     WHERE run_id IN ({placeholders})
-                    AND section IN ('structural', 'overall')""",
+                    AND section = 'structural'""",
                 run_ids,
             ).fetchall()
             for sr in score_rows:
@@ -891,7 +890,7 @@ async def profile_chart_data(
             variant_key = f"rocm{rocm}-tp{tp}"
             variant_label = f"ROCm {rocm} / TP{tp}"
 
-            for metric in STRUCTURAL_METRICS + [OVERALL_METRIC]:
+            for metric in STRUCTURAL_METRICS:
                 if metric not in scores:
                     continue
                 key = f"{variant_key}-{metric}"

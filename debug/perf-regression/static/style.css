@@ -230,16 +230,24 @@ tr:hover {
 }
 
 .btn-expand {
-    padding: 3px 10px;
-    background: #e0e0e0;
-    border: none;
-    border-radius: 3px;
+    padding: 4px 12px;
+    background: #e8e8e8;
+    border: 1px solid #d0d0d0;
+    border-radius: 4px;
     cursor: pointer;
-    font-size: 0.8rem;
+    font-size: 0.78rem;
+    white-space: nowrap;
+    line-height: 1.4;
 }
 
 .btn-expand:hover {
-    background: #ccc;
+    background: #d4d4d4;
+    border-color: #bbb;
+}
+
+td:has(> .btn-expand) {
+    text-align: center;
+    white-space: nowrap;
 }
 
 .metrics-detail td {
