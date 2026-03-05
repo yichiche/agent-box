@@ -236,7 +236,7 @@
     </div>
 
     <div class="tables-section">
-        <h2>Profile Runs</h2>
+        <h2>Regression Alerts</h2>
         <div class="filter-group" style="margin-bottom: 12px;">
             <label>Compare Kernel Diff:</label>
             <select id="profile-diff-run-a" style="max-width:260px;"><option value="">-- Baseline (old) --</option></select>
@@ -244,78 +244,6 @@
             <select id="profile-diff-run-b" style="max-width:260px;"><option value="">-- Candidate (new) --</option></select>
             <button class="btn-expand" onclick="onDemandKernelDiff()">Compare</button>
         </div>
-        <table id="profile-runs-table">
-            <thead>
-                <tr>
-                    <th>Build Date</th>
-                    <th>Image Tag</th>
-                    <th>Model</th>
-                    <th>TP</th>
-                    <th>SGLang</th>
-                    <th>ROCm</th>
-                    <th>Status</th>
-                    <th>Duration</th>
-                    <th>Evaluation Summary</th>
-                    <th>Kernel Diff</th>
-                    <th>Delete</th>
-                </tr>
-            </thead>
-            <tbody id="profile-runs-body">
-                <tr><td colspan="11" class="empty">Loading...</td></tr>
-            </tbody>
-        </table>
-
-        <h2>Run History</h2>
-        <table id="runs-table">
-            <thead>
-                <tr>
-                    <th>Build Date</th>
-                    <th>Image Tag</th>
-                    <th>Model</th>
-                    <th>TP</th>
-                    <th>MTP</th>
-                    <th>EP</th>
-                    <th>DP</th>
-                    <th>SGLang</th>
-                    <th>ROCm</th>
-                    <th>Status</th>
-                    <th>Duration</th>
-                    <th>Accuracy</th>
-                    <th>Versions</th>
-                    <th>Details</th>
-                    <th>Delete</th>
-                </tr>
-            </thead>
-            <tbody id="runs-body">
-                <tr><td colspan="15" class="empty">Loading...</td></tr>
-            </tbody>
-        </table>
-
-        <h2>Variant Comparison</h2>
-        <div class="filter-group" style="margin-bottom: 12px;">
-            <label>Build Date:</label>
-            <select id="variant-build-date"></select>
-            <button class="btn-expand" onclick="loadVariantComparison()">Compare</button>
-        </div>
-        <table id="variant-table">
-            <thead>
-                <tr>
-                    <th>Variant</th>
-                    <th>Conc.</th>
-                    <th>Out Throughput</th>
-                    <th>Total Throughput</th>
-                    <th>Med E2E (ms)</th>
-                    <th>Med TTFT (ms)</th>
-                    <th>Med ITL (ms)</th>
-                    <th>Accuracy</th>
-                </tr>
-            </thead>
-            <tbody id="variant-body">
-                <tr><td colspan="8" class="empty">Select a build date to compare variants</td></tr>
-            </tbody>
-        </table>
-
-        <h2>Regression Alerts</h2>
         <div class="filter-bar" style="margin-bottom:8px; padding:8px 12px;">
             <div class="filter-group">
                 <label>Date Range:</label>
@@ -343,8 +271,8 @@
             <div class="filter-group">
                 <label>Concurrency:</label>
                 <select id="alert-concurrency">
-                    <option value="all" selected>All</option>
-                    <option value="1">1</option>
+                    <option value="all">All</option>
+                    <option value="1" selected>1</option>
                     <option value="2">2</option>
                     <option value="4">4</option>
                     <option value="8">8</option>
@@ -363,9 +291,9 @@
             <div class="filter-group">
                 <label>MTP:</label>
                 <select id="alert-mtp">
-                    <option value="all" selected>All</option>
+                    <option value="all">All</option>
                     <option value="1">Yes</option>
-                    <option value="0">No</option>
+                    <option value="0" selected>No</option>
                 </select>
             </div>
             <div class="filter-group">
@@ -431,15 +359,87 @@
                     <th>DP</th>
                     <th>Metric</th>
                     <th>Concurrency</th>
-                    <th>Current</th>
                     <th>Baseline</th>
+                    <th>Current</th>
                     <th>Change</th>
                     <th>Type</th>
                     <th>Dependency Diff</th>
+                    <th>Kernel Diff</th>
                 </tr>
             </thead>
             <tbody id="alerts-body">
                 <tr><td colspan="15" class="empty">Loading...</td></tr>
+            </tbody>
+        </table>
+
+        <h2>Run History</h2>
+        <table id="runs-table">
+            <thead>
+                <tr>
+                    <th>Build Date</th>
+                    <th>Image Tag</th>
+                    <th>Model</th>
+                    <th>TP</th>
+                    <th>MTP</th>
+                    <th>EP</th>
+                    <th>DP</th>
+                    <th>SGLang</th>
+                    <th>ROCm</th>
+                    <th>Status</th>
+                    <th>Duration</th>
+                    <th>Accuracy</th>
+                    <th>Versions</th>
+                    <th>Details</th>
+                    <th>Delete</th>
+                </tr>
+            </thead>
+            <tbody id="runs-body">
+                <tr><td colspan="15" class="empty">Loading...</td></tr>
+            </tbody>
+        </table>
+
+        <h2>Profile Runs</h2>
+        <table id="profile-runs-table">
+            <thead>
+                <tr>
+                    <th>Build Date</th>
+                    <th>Image Tag</th>
+                    <th>Model</th>
+                    <th>TP</th>
+                    <th>SGLang</th>
+                    <th>ROCm</th>
+                    <th>Status</th>
+                    <th>Duration</th>
+                    <th>Eval Summary</th>
+                    <th>Delete</th>
+                </tr>
+            </thead>
+            <tbody id="profile-runs-body">
+                <tr><td colspan="10" class="empty">Loading...</td></tr>
+            </tbody>
+        </table>
+
+        <h2>Variant Comparison</h2>
+        <div class="filter-group" style="margin-bottom: 12px;">
+            <label>Build Date:</label>
+            <select id="variant-build-date"></select>
+            <button class="btn-expand" onclick="loadVariantComparison()">Compare</button>
+        </div>
+        <table id="variant-table">
+            <thead>
+                <tr>
+                    <th>Variant</th>
+                    <th>Conc.</th>
+                    <th>Out Throughput</th>
+                    <th>Total Throughput</th>
+                    <th>Med E2E (ms)</th>
+                    <th>Med TTFT (ms)</th>
+                    <th>Med ITL (ms)</th>
+                    <th>Accuracy</th>
+                </tr>
+            </thead>
+            <tbody id="variant-body">
+                <tr><td colspan="8" class="empty">Select a build date to compare variants</td></tr>
             </tbody>
         </table>
     </div>
@@ -522,8 +522,8 @@
 
         async function refreshAlerts() {
             try {
-                const alerts = await fetchAlerts();
-                renderAlerts(alerts);
+                const [alerts, profileRuns] = await Promise.all([fetchAlerts(), fetchProfileRuns()]);
+                renderAlerts(alerts, profileRuns);
             } catch (err) {
                 console.error('Failed to refresh alerts:', err);
             }
@@ -660,12 +660,24 @@
             });
         }
 
-        function renderAlerts(alerts) {
+        function renderAlerts(alerts, profileRuns) {
             const tbody = document.getElementById('alerts-body');
             if (!alerts || alerts.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="14" class="empty">No changes exceeding threshold</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="15" class="empty">No changes exceeding threshold</td></tr>';
                 return;
             }
+
+            alerts.sort((a, b) => b.build_date.localeCompare(a.build_date));
+
+            // Build lookup from profile runs for kernel diff availability
+            const profileRunMap = {};
+            (profileRuns || []).forEach(pr => {
+                if (pr.has_kernel_diff && pr.status === 'completed') {
+                    const key = `${pr.build_date}-${pr.rocm_version}-${pr.tp_size}-${pr.model_name || ''}`;
+                    profileRunMap[key] = pr.id;
+                }
+            });
+
             tbody.innerHTML = alerts.map((a, idx) => {
                 const date = `${a.build_date.slice(0,4)}-${a.build_date.slice(4,6)}-${a.build_date.slice(6)}`;
                 const changePct = a.change_pct != null ? a.change_pct : a.regression_pct;
@@ -674,6 +686,13 @@
                 const dirColor = dir === 'improved' ? '#16a34a' : '#dc2626';
                 const dirLabel = dir === 'improved' ? 'Improved' : 'Regressed';
                 const diffRowId = `vdiff-${a.run_id}-${idx}`;
+
+                const prKey = `${a.build_date}-${a.rocm_version}-${a.tp_size}-${a.model_name || ''}`;
+                const profileRunId = profileRunMap[prKey];
+                const kernelDiffCell = profileRunId
+                    ? `<button class="btn-expand" onclick="showKernelDiff(${profileRunId}, this)">View</button>`
+                    : '-';
+
                 return `<tr class="alert-row">
                     <td>${date}</td>
                     <td class="tag-cell" title="${a.image_tag}">${a.image_tag}</td>
@@ -684,14 +703,15 @@
                     <td>${a.dp_size != null ? a.dp_size : '-'}</td>
                     <td>${a.metric_name}</td>
                     <td>${a.concurrency !== null ? a.concurrency : 'N/A'}</td>
-                    <td>${a.current_value !== null ? a.current_value.toFixed(2) : 'N/A'}</td>
                     <td>${a.baseline_value !== null ? a.baseline_value.toFixed(2) : 'N/A'}</td>
+                    <td>${a.current_value !== null ? a.current_value.toFixed(2) : 'N/A'}</td>
                     <td class="regression-val">${changeStr}</td>
                     <td style="color:${dirColor}; font-weight:600;">${dirLabel}</td>
                     <td><button class="btn-expand" onclick="compareVersions(${a.run_id}, '${a.rocm_version}', '${a.model_name || ''}', '${a.tp_size}', '${a.mtp_enabled != null ? a.mtp_enabled : ''}', '${diffRowId}', this)">Compare</button></td>
+                    <td>${kernelDiffCell}</td>
                 </tr>
                 <tr id="${diffRowId}" class="metrics-detail" style="display:none">
-                    <td colspan="14"><div class="vdiff-content" style="padding:8px 16px; color:#888;">Loading...</div></td>
+                    <td colspan="15"><div class="vdiff-content" style="padding:8px 16px; color:#888;">Loading...</div></td>
                 </tr>`;
             }).join('');
         }
@@ -828,7 +848,7 @@
         function renderProfileRuns(runs) {
             const tbody = document.getElementById('profile-runs-body');
             if (!runs || runs.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="11" class="empty">No profile runs</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="10" class="empty">No profile runs</td></tr>';
                 return;
             }
 
@@ -858,13 +878,6 @@
                     ? `<button class="btn-expand" onclick="showEvaluationSummary(${r.id}, this)">View</button>`
                     : (r.status === 'completed' ? '<span class="status-fail">Missing</span>' : '-');
 
-                let diffCell = '-';
-                if (r.has_kernel_diff) {
-                    diffCell = `<button class="btn-expand" onclick="showKernelDiff(${r.id}, this)">View</button>`;
-                } else if (r.status === 'completed') {
-                    diffCell = '<span style="color:#999;">N/A</span>';
-                }
-
                 const statusTd = r.status === 'failed'
                     ? `<span class="${statusClass} status-clickable" onclick="toggleError('profile-error-${r.id}', ${r.id}, this)">${r.status}</span>`
                     : `<span class="${statusClass}">${r.status}</span>`;
@@ -875,7 +888,7 @@
                         ? r.error_message.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
                         : 'No error details';
                     errorHtml = `<tr id="profile-error-${r.id}" class="metrics-detail" style="display:none">
-                        <td colspan="11">
+                        <td colspan="10">
                             <pre class="error-message">${errorText}</pre>
                         </td>
                     </tr>`;
@@ -891,7 +904,6 @@
                     <td>${statusTd}</td>
                     <td>${duration}</td>
                     <td>${summaryCell}</td>
-                    <td>${diffCell}</td>
                     <td><button class="btn-expand" onclick="deleteProfileRun(${r.id}, '${r.image_tag}', this)">Delete</button></td>
                 </tr>${errorHtml}`;
             }).join('');
@@ -902,7 +914,6 @@
             'S2 Architecture Sig': '#10B981',
             'S3 Round Consistency': '#F59E0B',
             'S4 Type Sequence':    '#8B5CF6',
-            'Overall (weighted)':  '#EF4444',
         };
         const profileVariantDash = {};
         let profileDashIdx = 0;
@@ -942,16 +953,15 @@
             const datasets = (chartData.datasets || []).map(ds => {
                 const color = profileMetricColors[ds.metric] || '#607D8B';
                 const dash = getProfileDash(ds.variant);
-                const isOverall = ds.metric === 'Overall (weighted)';
                 return {
                     label: ds.label,
                     data: ds.data,
                     borderColor: color,
                     backgroundColor: color + '33',
                     borderDash: dash,
-                    borderWidth: isOverall ? 3 : 2,
-                    pointRadius: isOverall ? 5 : 4,
-                    pointStyle: isOverall ? 'rectRot' : 'circle',
+                    borderWidth: 2,
+                    pointRadius: 4,
+                    pointStyle: 'circle',
                     tension: 0.1,
                 };
             });
@@ -1119,6 +1129,9 @@
                 return;
             }
 
+            const table = btn.closest('table');
+            const colspan = table ? table.querySelector('thead tr').children.length : 15;
+
             btn.textContent = 'Loading...';
             try {
                 const resp = await fetch(`/api/profile-runs/${runId}/kernel-diff`);
@@ -1128,7 +1141,7 @@
                 detailRow = document.createElement('tr');
                 detailRow.id = detailId;
                 detailRow.className = 'metrics-detail';
-                detailRow.innerHTML = `<td colspan="11">${html}</td>`;
+                detailRow.innerHTML = `<td colspan="${colspan}">${html}</td>`;
                 btn.closest('tr').insertAdjacentElement('afterend', detailRow);
                 btn.textContent = 'Hide';
             } catch (err) {
@@ -1162,9 +1175,9 @@
                 row.id = 'on-demand-kdiff-row';
                 row.className = 'metrics-detail';
                 row.style.display = 'table-row';
-                row.innerHTML = `<td colspan="11">${html}</td>`;
+                row.innerHTML = `<td colspan="15">${html}</td>`;
 
-                const tbody = document.getElementById('profile-runs-body');
+                const tbody = document.getElementById('alerts-body');
                 tbody.insertBefore(row, tbody.firstChild);
             } catch (err) {
                 alert('Kernel diff comparison failed: ' + err.message);
@@ -1560,7 +1573,7 @@
                 }
 
                 // Render tables
-                renderAlerts(alerts);
+                renderAlerts(alerts, profileRuns);
                 renderRuns(runs);
                 renderProfileRuns(profileRuns);
 
