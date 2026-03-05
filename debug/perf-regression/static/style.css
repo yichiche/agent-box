@@ -94,6 +94,57 @@ header h1 {
     background: #2a2a4e;
 }
 
+/* Chart toggle bar */
+.chart-toggle-bar {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    padding: 10px 24px;
+    background: #fff;
+    border-bottom: 1px solid #eee;
+    flex-wrap: wrap;
+}
+
+.chart-toggle-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.chart-toggle-label {
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: #555;
+    margin-right: 2px;
+}
+
+.chart-toggle-buttons {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+.chart-toggle {
+    padding: 3px 12px;
+    border: 2px solid var(--toggle-color, #999);
+    border-radius: 14px;
+    cursor: pointer;
+    font-size: 0.78rem;
+    font-weight: 600;
+    background: #fff;
+    color: #666;
+    transition: all 0.15s ease;
+}
+
+.chart-toggle:hover {
+    background: #f5f5f5;
+}
+
+.chart-toggle.active {
+    background: var(--toggle-color, #999);
+    color: #fff;
+}
+
 /* Charts grid */
 .charts-grid {
     display: grid;
@@ -461,6 +512,35 @@ td:has(> .btn-expand) {
 
 .btn-save-target:hover {
     background: #2a2a4e;
+}
+
+/* Profile Metric Toggles */
+.profile-metric-toggles {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+}
+
+.metric-toggle {
+    padding: 4px 12px;
+    border: 2px solid var(--toggle-color, #999);
+    border-radius: 16px;
+    cursor: pointer;
+    font-size: 0.78rem;
+    font-weight: 600;
+    background: #fff;
+    color: #666;
+    transition: all 0.15s ease;
+}
+
+.metric-toggle:hover {
+    background: #f5f5f5;
+}
+
+.metric-toggle.active {
+    background: var(--toggle-color, #999);
+    color: #fff;
 }
 
 /* Kernel Diff Styles */
