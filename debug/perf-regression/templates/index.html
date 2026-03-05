@@ -520,9 +520,23 @@
             return data.alerts || [];
         }
 
+        async function fetchProfileRunsForAlerts() {
+            const f = getAlertFilters();
+            const params = new URLSearchParams({
+                days: f.days,
+                rocm_version: f.rocm_version,
+                model_name: f.model_name,
+                tp_size: f.tp_size,
+                ep_size: f.ep_size,
+                dp_size: f.dp_size,
+            });
+            const resp = await fetch(`/api/profile-runs?${params}`);
+            return await resp.json();
+        }
+
         async function refreshAlerts() {
             try {
-                const [alerts, profileRuns] = await Promise.all([fetchAlerts(), fetchProfileRuns()]);
+                const [alerts, profileRuns] = await Promise.all([fetchAlerts(), fetchProfileRunsForAlerts()]);
                 renderAlerts(alerts, profileRuns);
             } catch (err) {
                 console.error('Failed to refresh alerts:', err);
@@ -1553,8 +1567,8 @@
         async function refreshAll() {
             document.getElementById('btn-refresh').textContent = 'Loading...';
             try {
-                const [chartData, alerts, runs, profileRuns, profileChartData, health] = await Promise.all([
-                    fetchChartData(), fetchAlerts(), fetchRuns(), fetchProfileRuns(), fetchProfileChartData(), fetchHealth(),
+                const [chartData, alerts, runs, profileRuns, profileRunsForAlerts, profileChartData, health] = await Promise.all([
+                    fetchChartData(), fetchAlerts(), fetchRuns(), fetchProfileRuns(), fetchProfileRunsForAlerts(), fetchProfileChartData(), fetchHealth(),
                 ]);
 
                 // Store targets from chart data response
@@ -1573,7 +1587,7 @@
                 }
 
                 // Render tables
-                renderAlerts(alerts, profileRuns);
+                renderAlerts(alerts, profileRunsForAlerts);
                 renderRuns(runs);
                 renderProfileRuns(profileRuns);
 
