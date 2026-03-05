@@ -146,24 +146,15 @@ MIN_FREE_DISK_GB = 50
 MAX_IMAGES_RETAINED = 5
 
 # ── Regression detection ──────────────────────────────────────────────────
-REGRESSION_THRESHOLD_PCT = 5.0
+REGRESSION_THRESHOLD_PCT = 2.0
 REGRESSION_WINDOW = 5
 
 # Metrics to monitor: (metric_name, direction)
 # "higher_better" = throughput-like, "lower_better" = latency-like
 MONITORED_METRICS = [
-    ("output_throughput", "higher_better"),
     ("total_throughput", "higher_better"),
     ("median_e2e_latency_ms", "lower_better"),
-    ("median_ttft_ms", "lower_better"),
-    ("median_itl_ms", "lower_better"),
-    ("p99_e2e_latency_ms", "lower_better"),
 ]
-
-# p99 uses a wider threshold
-METRIC_THRESHOLDS = {
-    "p99_e2e_latency_ms": 10.0,  # 10% for tail latency
-}
 
 ACCURACY_REGRESSION_THRESHOLD = 2.0  # absolute percentage points
 

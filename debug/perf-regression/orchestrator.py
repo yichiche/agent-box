@@ -750,7 +750,8 @@ def _salvage_version_snapshot(
 
 
 def process_image(conn, image_info, dry_run: bool = False, variants=None,
-                   no_profile: bool = False, profile_only: bool = False) -> bool:
+                   no_profile: bool = False, profile_only: bool = False,
+                   threshold_pct: float = None) -> bool:
     """Process a single image: pull, benchmark, collect, detect regressions.
 
     Iterates over all TP/MTP variants (or a filtered subset), tracking
@@ -832,7 +833,7 @@ def process_image(conn, image_info, dry_run: bool = False, variants=None,
             ingest_run(conn, run_id, result_dir)
 
             # Detect regressions
-            alerts = detect_regressions(conn, run_id)
+            alerts = detect_regressions(conn, run_id, threshold_pct=threshold_pct)
             if alerts:
                 for a in alerts:
                     logger.warning(
@@ -926,6 +927,13 @@ def main():
         help="Discover and filter images but don't run benchmarks",
     )
     parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help=f"Regression detection threshold in percent "
+        f"(default: {_cfg.REGRESSION_THRESHOLD_PCT}%%)",
+    )
+    parser.add_argument(
         "--force-rerun",
         type=str,
         nargs="*",
@@ -956,6 +964,14 @@ def main():
         type=int,
         default=None,
         help="Add DP (data parallelism) size to all variants",
+    )
+    parser.add_argument(
+        "--force-rerun-profile",
+        type=str,
+        nargs="*",
+        default=None,
+        help="Force re-run ONLY profiling (deletes profile DB records, keeps perf data). "
+        "If no tags specified, re-profiles all images found in --lookback-days.",
     )
     profile_group = parser.add_mutually_exclusive_group()
     profile_group.add_argument(
@@ -1133,6 +1149,37 @@ def main():
                 finally:
                     profile_conn.close()
 
+        # Handle --force-rerun-profile (profile-only wipe, no perf data touched)
+        if args.force_rerun_profile is not None:
+            if args.force_rerun_profile:
+                force_profile_tags = [
+                    t.split(":")[-1] if ":" in t else t for t in args.force_rerun_profile
+                ]
+            else:
+                force_profile_tags = [img.full_tag for img in images]
+                logger.info(
+                    "No tags specified for --force-rerun-profile, re-profiling all %d discovered image(s)",
+                    len(force_profile_tags),
+                )
+            rerun_variants = active_variants or TP_MTP_VARIANTS
+            profile_variants = [v for v in rerun_variants if not v.mtp]
+            profile_conn = get_profile_connection()
+            init_profile_db(profile_conn)
+            try:
+                for tag in force_profile_tags:
+                    for v in profile_variants:
+                        label = variant_label(v.tp_size, False, ep_size=v.ep_size, dp_size=v.dp_size)
+                        logger.info("Force re-profiling (profile-only): %s [%s]", tag, label)
+                        profile_conn.execute(
+                            "DELETE FROM benchmark_runs "
+                            "WHERE image_tag = ? AND model_name = ? AND tp_size = ? AND mtp_enabled = 0 "
+                            "AND ep_size IS ? AND dp_size IS ?",
+                            (tag, _cfg.MODEL_NAME, v.tp_size, v.ep_size, v.dp_size),
+                        )
+                profile_conn.commit()
+            finally:
+                profile_conn.close()
+
         if not images:
             logger.info("No images found. Nothing to do.")
             return
@@ -1145,7 +1192,8 @@ def main():
 
         for img in images:
             if process_image(conn, img, dry_run=args.dry_run, variants=active_variants,
-                             no_profile=args.no_profile, profile_only=args.profile_only):
+                             no_profile=args.no_profile, profile_only=args.profile_only,
+                             threshold_pct=args.threshold):
                 success_count += 1
             else:
                 fail_count += 1

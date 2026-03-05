@@ -316,6 +316,109 @@
         </table>
 
         <h2>Regression Alerts</h2>
+        <div class="filter-bar" style="margin-bottom:8px; padding:8px 12px;">
+            <div class="filter-group">
+                <label>Date Range:</label>
+                <select id="alert-days">
+                    <option value="3">3 days</option>
+                    <option value="14" selected>14 days</option>
+                    <option value="30">30 days</option>
+                    <option value="60">60 days</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>ROCm:</label>
+                <select id="alert-rocm">
+                    <option value="all">All</option>
+                    <option value="700" selected>ROCm 700</option>
+                    <option value="720">ROCm 720</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>Model:</label>
+                <select id="alert-model">
+                    <option value="all">All</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>Concurrency:</label>
+                <select id="alert-concurrency">
+                    <option value="all" selected>All</option>
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="4">4</option>
+                    <option value="8">8</option>
+                    <option value="16">16</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>TP Size:</label>
+                <select id="alert-tp">
+                    <option value="all">All</option>
+                    <option value="2">TP2</option>
+                    <option value="4">TP4</option>
+                    <option value="8" selected>TP8</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>MTP:</label>
+                <select id="alert-mtp">
+                    <option value="all" selected>All</option>
+                    <option value="1">Yes</option>
+                    <option value="0">No</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>EP Size:</label>
+                <select id="alert-ep">
+                    <option value="all" selected>All</option>
+                    <option value="none">None</option>
+                    <option value="2">2</option>
+                    <option value="4">4</option>
+                    <option value="8">8</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>DP Size:</label>
+                <select id="alert-dp">
+                    <option value="all" selected>All</option>
+                    <option value="none">None</option>
+                    <option value="2">2</option>
+                    <option value="4">4</option>
+                    <option value="8">8</option>
+                </select>
+            </div>
+        </div>
+        <div style="display:flex; align-items:center; gap:16px; margin-bottom:12px; font-size:14px; flex-wrap:wrap;">
+            <span style="display:flex; align-items:center; gap:4px;">
+                <strong>Total Throughput:</strong>
+                improved &gt;
+                <input type="number" id="thresh-tp-improve" value="2" min="0" max="100" step="0.5"
+                       style="width:50px; padding:2px 4px; font-size:13px;">%
+                regressed &gt;
+                <input type="number" id="thresh-tp-regress" value="5" min="0" max="100" step="0.5"
+                       style="width:50px; padding:2px 4px; font-size:13px;">%
+            </span>
+            <span style="display:flex; align-items:center; gap:4px;">
+                <strong>E2E Latency:</strong>
+                improved &gt;
+                <input type="number" id="thresh-e2e-improve" value="2" min="0" max="100" step="0.5"
+                       style="width:50px; padding:2px 4px; font-size:13px;">%
+                regressed &gt;
+                <input type="number" id="thresh-e2e-regress" value="5" min="0" max="100" step="0.5"
+                       style="width:50px; padding:2px 4px; font-size:13px;">%
+            </span>
+            <span style="display:flex; align-items:center; gap:4px;">
+                <strong>Baseline Window:</strong>
+                <select id="thresh-window" style="padding:2px 4px; font-size:13px;">
+                    <option value="1" selected>1 run</option>
+                    <option value="3">3 runs</option>
+                    <option value="5">5 runs</option>
+                    <option value="10">10 runs</option>
+                </select>
+            </span>
+            <button class="btn-expand" onclick="refreshAlerts()">Apply</button>
+        </div>
         <table id="alerts-table">
             <thead>
                 <tr>
@@ -330,7 +433,8 @@
                     <th>Concurrency</th>
                     <th>Current</th>
                     <th>Baseline</th>
-                    <th>Degradation</th>
+                    <th>Change</th>
+                    <th>Type</th>
                     <th>Compare</th>
                 </tr>
             </thead>
@@ -381,19 +485,48 @@
             return await resp.json();
         }
 
+        function getAlertFilters() {
+            return {
+                days: document.getElementById('alert-days').value,
+                rocm_version: document.getElementById('alert-rocm').value,
+                model_name: document.getElementById('alert-model').value,
+                concurrency: document.getElementById('alert-concurrency').value,
+                tp_size: document.getElementById('alert-tp').value,
+                mtp_enabled: document.getElementById('alert-mtp').value,
+                ep_size: document.getElementById('alert-ep').value,
+                dp_size: document.getElementById('alert-dp').value,
+            };
+        }
+
         async function fetchAlerts() {
-            const f = getFilters();
+            const f = getAlertFilters();
             const params = new URLSearchParams({
+                tp_improve: document.getElementById('thresh-tp-improve').value,
+                tp_regress: document.getElementById('thresh-tp-regress').value,
+                e2e_improve: document.getElementById('thresh-e2e-improve').value,
+                e2e_regress: document.getElementById('thresh-e2e-regress').value,
+                window: document.getElementById('thresh-window').value,
                 days: f.days,
                 rocm_version: f.rocm_version,
                 model_name: f.model_name,
+                concurrency: f.concurrency,
                 tp_size: f.tp_size,
                 mtp_enabled: f.mtp_enabled,
                 ep_size: f.ep_size,
                 dp_size: f.dp_size,
             });
-            const resp = await fetch(`/api/alerts?${params}`);
-            return await resp.json();
+            const resp = await fetch(`/api/regression-check?${params}`);
+            const data = await resp.json();
+            return data.alerts || [];
+        }
+
+        async function refreshAlerts() {
+            try {
+                const alerts = await fetchAlerts();
+                renderAlerts(alerts);
+            } catch (err) {
+                console.error('Failed to refresh alerts:', err);
+            }
         }
 
         async function fetchRuns() {
@@ -530,12 +663,16 @@
         function renderAlerts(alerts) {
             const tbody = document.getElementById('alerts-body');
             if (!alerts || alerts.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="13" class="empty">No regression alerts</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="14" class="empty">No changes exceeding threshold</td></tr>';
                 return;
             }
             tbody.innerHTML = alerts.map(a => {
                 const date = `${a.build_date.slice(0,4)}-${a.build_date.slice(4,6)}-${a.build_date.slice(6)}`;
-                const degradation = a.regression_pct > 0 ? `+${a.regression_pct.toFixed(1)}%` : `${a.regression_pct.toFixed(1)}%`;
+                const changePct = a.change_pct != null ? a.change_pct : a.regression_pct;
+                const changeStr = changePct > 0 ? `+${changePct.toFixed(1)}%` : `${changePct.toFixed(1)}%`;
+                const dir = a.direction || 'regressed';
+                const dirColor = dir === 'improved' ? '#16a34a' : '#dc2626';
+                const dirLabel = dir === 'improved' ? 'Improved' : 'Regressed';
                 return `<tr class="alert-row">
                     <td>${date}</td>
                     <td class="tag-cell" title="${a.image_tag}">${a.image_tag}</td>
@@ -548,8 +685,9 @@
                     <td>${a.concurrency !== null ? a.concurrency : 'N/A'}</td>
                     <td>${a.current_value !== null ? a.current_value.toFixed(2) : 'N/A'}</td>
                     <td>${a.baseline_value !== null ? a.baseline_value.toFixed(2) : 'N/A'}</td>
-                    <td class="regression-val">${degradation}</td>
-                    <td><button class="btn-expand" onclick="compareVersions(${a.run_id}, '${a.rocm_version}', this)">Compare</button></td>
+                    <td class="regression-val">${changeStr}</td>
+                    <td style="color:${dirColor}; font-weight:600;">${dirLabel}</td>
+                    <td><button class="btn-expand" onclick="compareVersions(${a.run_id}, '${a.rocm_version}', '${a.model_name || ''}', '${a.tp_size}', '${a.mtp_enabled != null ? a.mtp_enabled : ''}', this)">Compare</button></td>
                 </tr>`;
             }).join('');
         }
@@ -1149,9 +1287,12 @@
             logEl.dataset.loaded = '1';
         }
 
-        async function compareVersions(runId, rocmVersion, btn) {
-            const f = getFilters();
-            const params = new URLSearchParams({ days: f.days, rocm_version: rocmVersion, model_name: f.model_name });
+        async function compareVersions(runId, rocmVersion, modelName, tpSize, mtpEnabled, btn) {
+            const af = getAlertFilters();
+            const params = new URLSearchParams({ days: af.days, rocm_version: rocmVersion });
+            if (modelName) params.set('model_name', modelName);
+            if (tpSize) params.set('tp_size', tpSize);
+            if (mtpEnabled !== '') params.set('mtp_enabled', mtpEnabled);
             const runs = await (await fetch(`/api/runs?${params}`)).json();
             const completedRuns = runs.filter(r => r.status === 'completed').sort((a, b) => a.build_date.localeCompare(b.build_date));
             const currentIdx = completedRuns.findIndex(r => r.id === runId);
@@ -1364,6 +1505,7 @@
                 const models = await resp.json();
                 const select = document.getElementById('filter-model');
                 const targetSelect = document.getElementById('target-model');
+                const alertSelect = document.getElementById('alert-model');
                 models.forEach((m, i) => {
                     const opt = document.createElement('option');
                     opt.value = m;
@@ -1374,10 +1516,16 @@
                     opt2.value = m;
                     opt2.textContent = m;
                     targetSelect.appendChild(opt2);
+
+                    const opt3 = document.createElement('option');
+                    opt3.value = m;
+                    opt3.textContent = m;
+                    alertSelect.appendChild(opt3);
                 });
                 if (models.length > 0) {
                     select.value = models[0];
                     targetSelect.value = models[0];
+                    alertSelect.value = models[0];
                 }
             } catch (err) {
                 console.error('Failed to load models:', err);
@@ -1451,6 +1599,12 @@
         document.getElementById('filter-mtp').addEventListener('change', refreshAll);
         document.getElementById('filter-ep').addEventListener('change', refreshAll);
         document.getElementById('filter-dp').addEventListener('change', refreshAll);
+
+        // Alert filter bar: auto-refresh alerts on change
+        ['alert-days', 'alert-rocm', 'alert-model', 'alert-concurrency',
+         'alert-tp', 'alert-mtp', 'alert-ep', 'alert-dp'].forEach(id => {
+            document.getElementById(id).addEventListener('change', refreshAlerts);
+        });
 
         // Initial load
         loadModels();
