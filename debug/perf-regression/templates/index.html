@@ -1137,7 +1137,18 @@
             const detailId = `kdiff-${runId}`;
             let detailRow = document.getElementById(detailId);
             if (detailRow) {
+                const parentRow = btn.closest('tr');
                 const isHidden = detailRow.style.display === 'none';
+                if (isHidden) {
+                    // Reset any other button that was showing this diff
+                    const table = btn.closest('table');
+                    table.querySelectorAll(`button`).forEach(b => {
+                        if (b !== btn && b.textContent === 'Hide' && b.onclick && b.getAttribute('onclick')?.includes(`showKernelDiff(${runId}`)) {
+                            b.textContent = 'View';
+                        }
+                    });
+                    parentRow.insertAdjacentElement('afterend', detailRow);
+                }
                 detailRow.style.display = isHidden ? 'table-row' : 'none';
                 btn.textContent = isHidden ? 'Hide' : 'View';
                 return;
