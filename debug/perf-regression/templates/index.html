@@ -208,6 +208,17 @@
         </div>
     </div>
 
+    <div class="chart-toggle-bar" id="chart-toggle-bar">
+        <div class="chart-toggle-group">
+            <span class="chart-toggle-label">TP:</span>
+            <div id="tp-toggles" class="chart-toggle-buttons"></div>
+        </div>
+        <div class="chart-toggle-group">
+            <span class="chart-toggle-label">Concurrency:</span>
+            <div id="conc-toggles" class="chart-toggle-buttons"></div>
+        </div>
+    </div>
+
     <div class="charts-grid">
         <div class="chart-container">
             <h3>Median E2E Latency (ms)</h3>
@@ -231,6 +242,12 @@
         </div>
         <div class="chart-container">
             <h3>Profile Structural Scores</h3>
+            <div class="profile-metric-toggles" id="profile-metric-toggles">
+                <button class="metric-toggle active" data-metric="S1 Prefill Ordering" style="--toggle-color:#3B82F6" onclick="toggleProfileMetric(this)">S1 Prefill Ordering</button>
+                <button class="metric-toggle active" data-metric="S2 Architecture Sig" style="--toggle-color:#10B981" onclick="toggleProfileMetric(this)">S2 Architecture Sig</button>
+                <button class="metric-toggle active" data-metric="S3 Round Consistency" style="--toggle-color:#F59E0B" onclick="toggleProfileMetric(this)">S3 Round Consistency</button>
+                <button class="metric-toggle active" data-metric="S4 Type Sequence" style="--toggle-color:#8B5CF6" onclick="toggleProfileMetric(this)">S4 Type Sequence</button>
+            </div>
             <canvas id="chart-profile_scores"></canvas>
         </div>
     </div>
@@ -449,12 +466,16 @@
 
         const chartInstances = {};
         let currentTargets = {};
+        let lastChartData = null;
         let showTargetLines = true;
         const metricKeys = [
             'median_e2e_latency_ms', 'total_throughput',
             'median_ttft_ms', 'median_itl_ms',
             'accuracy_pct'
         ];
+
+        const tpToggleColors = { 2: '#60A5FA', 4: '#34D399', 8: '#A78BFA' };
+        const concToggleColors = { 1: '#6366F1', 2: '#EC4899', 4: '#F59E0B', 8: '#10B981', 16: '#EF4444' };
 
         function getFilters() {
             return {
@@ -568,10 +589,12 @@
             '#FFB300', '#FF6F00', '#FFD54F', '#FFA726', '#FF8F00'
         ];
 
-        function buildTargetAnnotations(metricKey, targets) {
+        function buildTargetAnnotations(metricKey, targets, activeTP, activeConc) {
             const items = targets[metricKey] || [];
             const annotations = {};
             items.forEach((t, i) => {
+                if (!activeTP.has(t.tp_size)) return;
+                if (!activeConc.has(t.concurrency)) return;
                 const color = targetColors[i % targetColors.length];
                 const mtpLabel = t.mtp_enabled ? 'MTP' : 'non-MTP';
                 annotations[`target-${metricKey}-${i}`] = {
@@ -595,6 +618,75 @@
             return annotations;
         }
 
+        function populateChartToggles(chartData) {
+            const tpSet = new Set();
+            const concSet = new Set();
+            for (const key of metricKeys) {
+                const ds = chartData[key]?.datasets || [];
+                ds.forEach(d => {
+                    const m = d.label.match(/TP(\d+)/);
+                    if (m) tpSet.add(parseInt(m[1]));
+                    const cm = d.label.match(/c=(\d+)/);
+                    if (cm) concSet.add(parseInt(cm[1]));
+                });
+            }
+
+            const tpContainer = document.getElementById('tp-toggles');
+            const concContainer = document.getElementById('conc-toggles');
+
+            const existingTP = new Set(Array.from(tpContainer.querySelectorAll('.chart-toggle.active')).map(b => parseInt(b.dataset.value)));
+            const existingConc = new Set(Array.from(concContainer.querySelectorAll('.chart-toggle.active')).map(b => parseInt(b.dataset.value)));
+            const hadToggles = tpContainer.children.length > 0;
+
+            const sortedTP = [...tpSet].sort((a, b) => a - b);
+            const sortedConc = [...concSet].sort((a, b) => a - b);
+
+            tpContainer.innerHTML = sortedTP.map(tp => {
+                const active = hadToggles ? existingTP.has(tp) : true;
+                const color = tpToggleColors[tp] || '#607D8B';
+                return `<button class="chart-toggle${active ? ' active' : ''}" data-group="tp" data-value="${tp}" style="--toggle-color:${color}" onclick="toggleChartFilter(this)">TP${tp}</button>`;
+            }).join('');
+
+            concContainer.innerHTML = sortedConc.map(c => {
+                const active = hadToggles ? existingConc.has(c) : true;
+                const color = concToggleColors[c] || '#607D8B';
+                return `<button class="chart-toggle${active ? ' active' : ''}" data-group="conc" data-value="${c}" style="--toggle-color:${color}" onclick="toggleChartFilter(this)">c=${c}</button>`;
+            }).join('');
+        }
+
+        function getActiveChartFilters() {
+            const tpBtns = document.querySelectorAll('#tp-toggles .chart-toggle.active');
+            const concBtns = document.querySelectorAll('#conc-toggles .chart-toggle.active');
+            return {
+                tp: new Set(Array.from(tpBtns).map(b => parseInt(b.dataset.value))),
+                conc: new Set(Array.from(concBtns).map(b => parseInt(b.dataset.value))),
+            };
+        }
+
+        function toggleChartFilter(btn) {
+            btn.classList.toggle('active');
+            if (lastChartData) rebuildCharts();
+        }
+
+        function rebuildCharts() {
+            for (const key of metricKeys) {
+                if (lastChartData[key]) {
+                    createChart(`chart-${key}`, lastChartData[key], currentTargets);
+                }
+            }
+        }
+
+        function filterDatasets(datasets, activeTP, activeConc) {
+            return datasets.filter(ds => {
+                const label = ds.label || '';
+                const tpMatch = label.match(/TP(\d+)/);
+                const concMatch = label.match(/c=(\d+)/);
+                if (tpMatch && !activeTP.has(parseInt(tpMatch[1]))) return false;
+                if (concMatch && !activeConc.has(parseInt(concMatch[1]))) return false;
+                return true;
+            });
+        }
+
         function createChart(canvasId, chartData, targets) {
             const ctx = document.getElementById(canvasId).getContext('2d');
 
@@ -602,7 +694,10 @@
                 chartInstances[canvasId].destroy();
             }
 
-            const datasets = (chartData.datasets || []).map(ds => {
+            const { tp: activeTP, conc: activeConc } = getActiveChartFilters();
+            const filtered = filterDatasets(chartData.datasets || [], activeTP, activeConc);
+
+            const datasets = filtered.map(ds => {
                 const baseStyle = ds.pointStyle || 'circle';
                 const baseRadius = ds.pointRadius || 4;
                 return {
@@ -618,7 +713,7 @@
 
             // Extract metric key from canvas id
             const metricKey = canvasId.replace('chart-', '');
-            const annotations = (showTargetLines && targets) ? buildTargetAnnotations(metricKey, targets) : {};
+            const annotations = (showTargetLines && targets) ? buildTargetAnnotations(metricKey, targets, activeTP, activeConc) : {};
 
             chartInstances[canvasId] = new Chart(ctx, {
                 type: 'line',
@@ -929,6 +1024,7 @@
             'S3 Round Consistency': '#F59E0B',
             'S4 Type Sequence':    '#8B5CF6',
         };
+        let lastProfileChartData = null;
         const profileVariantDash = {};
         let profileDashIdx = 0;
         const dashPatterns = [[], [8, 4], [4, 4], [12, 4, 4, 4]];
@@ -953,7 +1049,20 @@
             return await resp.json();
         }
 
+        function getActiveProfileMetrics() {
+            const btns = document.querySelectorAll('#profile-metric-toggles .metric-toggle.active');
+            return new Set(Array.from(btns).map(b => b.dataset.metric));
+        }
+
+        function toggleProfileMetric(btn) {
+            btn.classList.toggle('active');
+            if (lastProfileChartData) {
+                createProfileChart(lastProfileChartData);
+            }
+        }
+
         function createProfileChart(chartData) {
+            lastProfileChartData = chartData;
             const canvasId = 'chart-profile_scores';
             const ctx = document.getElementById(canvasId).getContext('2d');
 
@@ -964,7 +1073,10 @@
             profileDashIdx = 0;
             for (const k in profileVariantDash) delete profileVariantDash[k];
 
-            const datasets = (chartData.datasets || []).map(ds => {
+            const activeMetrics = getActiveProfileMetrics();
+            const filtered = (chartData.datasets || []).filter(ds => activeMetrics.has(ds.metric));
+
+            const datasets = filtered.map(ds => {
                 const color = profileMetricColors[ds.metric] || '#607D8B';
                 const dash = getProfileDash(ds.variant);
                 return {
@@ -999,8 +1111,7 @@
                         },
                         y: {
                             title: { display: true, text: 'Score' },
-                            min: 90,
-                            max: 101,
+                            grace: '5%',
                         },
                     },
                     plugins: {
@@ -1582,8 +1693,10 @@
                     fetchChartData(), fetchAlerts(), fetchRuns(), fetchProfileRuns(), fetchProfileRunsForAlerts(), fetchProfileChartData(), fetchHealth(),
                 ]);
 
-                // Store targets from chart data response
+                // Store targets and chart data for toggle filtering
                 currentTargets = chartData.targets || {};
+                lastChartData = chartData;
+                populateChartToggles(chartData);
 
                 // Render charts with target annotations
                 for (const key of metricKeys) {
