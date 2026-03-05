@@ -435,7 +435,7 @@
                     <th>Baseline</th>
                     <th>Change</th>
                     <th>Type</th>
-                    <th>Compare</th>
+                    <th>Dependency Diff</th>
                 </tr>
             </thead>
             <tbody id="alerts-body">
@@ -666,13 +666,14 @@
                 tbody.innerHTML = '<tr><td colspan="14" class="empty">No changes exceeding threshold</td></tr>';
                 return;
             }
-            tbody.innerHTML = alerts.map(a => {
+            tbody.innerHTML = alerts.map((a, idx) => {
                 const date = `${a.build_date.slice(0,4)}-${a.build_date.slice(4,6)}-${a.build_date.slice(6)}`;
                 const changePct = a.change_pct != null ? a.change_pct : a.regression_pct;
                 const changeStr = changePct > 0 ? `+${changePct.toFixed(1)}%` : `${changePct.toFixed(1)}%`;
                 const dir = a.direction || 'regressed';
                 const dirColor = dir === 'improved' ? '#16a34a' : '#dc2626';
                 const dirLabel = dir === 'improved' ? 'Improved' : 'Regressed';
+                const diffRowId = `vdiff-${a.run_id}-${idx}`;
                 return `<tr class="alert-row">
                     <td>${date}</td>
                     <td class="tag-cell" title="${a.image_tag}">${a.image_tag}</td>
@@ -687,7 +688,10 @@
                     <td>${a.baseline_value !== null ? a.baseline_value.toFixed(2) : 'N/A'}</td>
                     <td class="regression-val">${changeStr}</td>
                     <td style="color:${dirColor}; font-weight:600;">${dirLabel}</td>
-                    <td><button class="btn-expand" onclick="compareVersions(${a.run_id}, '${a.rocm_version}', '${a.model_name || ''}', '${a.tp_size}', '${a.mtp_enabled != null ? a.mtp_enabled : ''}', this)">Compare</button></td>
+                    <td><button class="btn-expand" onclick="compareVersions(${a.run_id}, '${a.rocm_version}', '${a.model_name || ''}', '${a.tp_size}', '${a.mtp_enabled != null ? a.mtp_enabled : ''}', '${diffRowId}', this)">Compare</button></td>
+                </tr>
+                <tr id="${diffRowId}" class="metrics-detail" style="display:none">
+                    <td colspan="14"><div class="vdiff-content" style="padding:8px 16px; color:#888;">Loading...</div></td>
                 </tr>`;
             }).join('');
         }
@@ -1287,48 +1291,128 @@
             logEl.dataset.loaded = '1';
         }
 
-        async function compareVersions(runId, rocmVersion, modelName, tpSize, mtpEnabled, btn) {
-            const af = getAlertFilters();
-            const params = new URLSearchParams({ days: af.days, rocm_version: rocmVersion });
-            if (modelName) params.set('model_name', modelName);
-            if (tpSize) params.set('tp_size', tpSize);
-            if (mtpEnabled !== '') params.set('mtp_enabled', mtpEnabled);
-            const runs = await (await fetch(`/api/runs?${params}`)).json();
-            const completedRuns = runs.filter(r => r.status === 'completed').sort((a, b) => a.build_date.localeCompare(b.build_date));
-            const currentIdx = completedRuns.findIndex(r => r.id === runId);
-            if (currentIdx <= 0) {
-                alert('No previous run found for comparison');
+        async function compareVersions(runId, rocmVersion, modelName, tpSize, mtpEnabled, diffRowId, btn) {
+            const detailRow = document.getElementById(diffRowId);
+            if (!detailRow) return;
+
+            // Toggle: if already visible, just collapse
+            if (detailRow.style.display !== 'none') {
+                detailRow.style.display = 'none';
+                btn.textContent = 'Compare';
                 return;
             }
-            const prevRun = completedRuns[currentIdx - 1];
 
+            const contentEl = detailRow.querySelector('.vdiff-content');
+
+            // If already loaded, just expand
+            if (contentEl.dataset.loaded) {
+                detailRow.style.display = 'table-row';
+                btn.textContent = 'Hide';
+                return;
+            }
+
+            // First open: fetch data
+            detailRow.style.display = 'table-row';
             btn.textContent = 'Loading...';
+            contentEl.innerHTML = '<span style="color:#888;">Loading...</span>';
+
             try {
+                // Find previous run for comparison
+                const af = getAlertFilters();
+                const params = new URLSearchParams({ days: af.days, rocm_version: rocmVersion });
+                if (modelName) params.set('model_name', modelName);
+                if (tpSize) params.set('tp_size', tpSize);
+                if (mtpEnabled !== '') params.set('mtp_enabled', mtpEnabled);
+                const runs = await (await fetch(`/api/runs?${params}`)).json();
+                const completedRuns = runs.filter(r => r.status === 'completed').sort((a, b) => a.build_date.localeCompare(b.build_date));
+                const currentIdx = completedRuns.findIndex(r => r.id === runId);
+                if (currentIdx <= 0) {
+                    contentEl.innerHTML = '<span style="color:#999;">No previous run found for comparison.</span>';
+                    contentEl.dataset.loaded = '1';
+                    btn.textContent = 'Hide';
+                    return;
+                }
+                const prevRun = completedRuns[currentIdx - 1];
+
                 const diffResp = await fetch(`/api/version-diff?run_a=${prevRun.id}&run_b=${runId}`);
                 const diffData = await diffResp.json();
+                const diff = diffData.diff;
+                const suggestions = diffData.suggestions || [];
 
-                let msg = 'Version Diff:\n\n';
-                if (diffData.diff.changed && diffData.diff.changed.length > 0) {
-                    msg += 'CHANGED:\n';
-                    diffData.diff.changed.forEach(c => {
-                        const oldCommit = c.old_commit ? ` (${c.old_commit.substring(0, 7)})` : '';
-                        const newCommit = c.new_commit ? ` (${c.new_commit.substring(0, 7)})` : '';
-                        msg += `  ${c.name}: ${c.old_version}${oldCommit} -> ${c.new_version}${newCommit}\n`;
-                    });
-                } else {
-                    msg += 'No version changes detected\n';
+                const hasChanged = diff.changed && diff.changed.length > 0;
+                const hasAdded = diff.added && diff.added.length > 0;
+                const hasRemoved = diff.removed && diff.removed.length > 0;
+                const hasAnyData = hasChanged || hasAdded || hasRemoved ||
+                                   (diff.unchanged && diff.unchanged.length > 0);
+
+                if (!hasAnyData) {
+                    contentEl.innerHTML = '<span style="color:#999;">No version data available. No package versions were recorded for these runs.</span>';
+                    contentEl.dataset.loaded = '1';
+                    btn.textContent = 'Hide';
+                    return;
                 }
-                if (diffData.suggestions && diffData.suggestions.length > 0) {
-                    msg += '\nRoot Cause Analysis:\n';
-                    diffData.suggestions.forEach((s, i) => {
-                        msg += `  ${i+1}. ${s.name} — ${s.reason}\n`;
+
+                // Find image tags for the two runs
+                const curRun = completedRuns[currentIdx];
+                const prevTag = prevRun.image_tag || `Run #${prevRun.id}`;
+                const curTag = curRun ? (curRun.image_tag || `Run #${runId}`) : `Run #${runId}`;
+                let html = `<div style="font-size:0.82rem; margin-bottom:4px; color:#666;">${prevTag} → ${curTag}</div>`;
+
+                if (hasChanged) {
+                    html += `<table class="inner-table" style="margin-bottom:8px;">
+                        <thead><tr><th>Library</th><th>Old Version</th><th>New Version</th><th>Source</th></tr></thead><tbody>`;
+                    diff.changed.forEach(c => {
+                        const oldC = c.old_commit ? ` <span style="color:#999;">(${c.old_commit.substring(0,7)})</span>` : '';
+                        const newC = c.new_commit ? ` <span style="color:#999;">(${c.new_commit.substring(0,7)})</span>` : '';
+                        html += `<tr>
+                            <td style="font-weight:600;">${c.name}</td>
+                            <td>${c.old_version || '-'}${oldC}</td>
+                            <td>${c.new_version || '-'}${newC}</td>
+                            <td>${c.source_type}</td>
+                        </tr>`;
                     });
+                    html += '</tbody></table>';
                 }
-                alert(msg);
+
+                if (hasAdded) {
+                    html += `<div style="font-size:0.78rem; font-weight:600; color:#16a34a; margin:4px 0 2px;">Added (new image only)</div>`;
+                    html += `<table class="inner-table" style="margin-bottom:8px;">
+                        <thead><tr><th>Library</th><th>Version</th><th>Source</th></tr></thead><tbody>`;
+                    diff.added.forEach(a => {
+                        html += `<tr><td>${a.name}</td><td>${a.version || '-'}</td><td>${a.source_type}</td></tr>`;
+                    });
+                    html += '</tbody></table>';
+                }
+
+                if (hasRemoved) {
+                    html += `<div style="font-size:0.78rem; font-weight:600; color:#dc2626; margin:4px 0 2px;">Removed (old image only)</div>`;
+                    html += `<table class="inner-table" style="margin-bottom:8px;">
+                        <thead><tr><th>Library</th><th>Version</th><th>Source</th></tr></thead><tbody>`;
+                    diff.removed.forEach(r => {
+                        html += `<tr><td>${r.name}</td><td>${r.version || '-'}</td><td>${r.source_type}</td></tr>`;
+                    });
+                    html += '</tbody></table>';
+                }
+
+                if (!hasChanged && !hasAdded && !hasRemoved) {
+                    html += '<div style="color:#999; margin:4px 0;">No version differences detected between the two runs.</div>';
+                }
+
+                if (suggestions.length > 0) {
+                    html += `<div style="font-size:0.78rem; font-weight:600; margin:6px 0 2px;">Suspected Root Cause</div><ul style="margin:0 0 0 16px; padding:0; font-size:0.8rem;">`;
+                    suggestions.forEach((s, i) => {
+                        html += `<li><strong>${s.name}</strong> — ${s.reason}</li>`;
+                    });
+                    html += '</ul>';
+                }
+
+                contentEl.innerHTML = html;
+                contentEl.dataset.loaded = '1';
+                btn.textContent = 'Hide';
             } catch (err) {
-                alert('Failed to compare versions: ' + err.message);
+                contentEl.innerHTML = `<span style="color:#dc2626;">Failed to load version diff: ${err.message}</span>`;
+                btn.textContent = 'Compare';
             }
-            btn.textContent = 'Compare';
         }
 
         // ── Target Baselines ──────────────────────────────────────────
