@@ -1062,6 +1062,54 @@ async def delete_target_api(target_id: int):
         conn.close()
 
 
+@app.get("/api/regression-check")
+async def regression_check(
+    tp_improve: float = Query(2.0, description="Total throughput improvement threshold %"),
+    tp_regress: float = Query(2.0, description="Total throughput regression threshold %"),
+    e2e_improve: float = Query(2.0, description="E2E latency improvement threshold %"),
+    e2e_regress: float = Query(2.0, description="E2E latency regression threshold %"),
+    window: int = Query(5, description="Number of previous runs for moving-average baseline"),
+    rocm_version: Optional[str] = Query(None),
+    model_name: Optional[str] = Query(None),
+    concurrency: Optional[str] = Query(None),
+    tp_size: Optional[str] = Query(None),
+    mtp_enabled: Optional[str] = Query(None),
+    ep_size: Optional[str] = Query(None),
+    dp_size: Optional[str] = Query(None),
+    days: int = Query(30),
+):
+    """Re-evaluate regressions on-the-fly with per-metric, per-direction thresholds (read-only)."""
+    from regression import check_regressions_dynamic
+
+    thresholds = {
+        "total_throughput": {"improved": tp_improve, "regressed": tp_regress},
+        "median_e2e_latency_ms": {"improved": e2e_improve, "regressed": e2e_regress},
+    }
+
+    conn = _get_conn()
+    try:
+        alerts = check_regressions_dynamic(
+            conn,
+            thresholds=thresholds,
+            window=window,
+            rocm_version=rocm_version if rocm_version != "all" else None,
+            model_name=model_name if model_name != "all" else None,
+            concurrency=int(concurrency) if concurrency and concurrency != "all" else None,
+            tp_size=int(tp_size) if tp_size and tp_size != "all" else None,
+            mtp_enabled=int(mtp_enabled) if mtp_enabled and mtp_enabled != "all" else None,
+            ep_size=int(ep_size) if ep_size and ep_size not in ("all", "none") else None,
+            dp_size=int(dp_size) if dp_size and dp_size not in ("all", "none") else None,
+            days=days,
+        )
+        return JSONResponse({
+            "thresholds": thresholds,
+            "count": len(alerts),
+            "alerts": alerts,
+        })
+    finally:
+        conn.close()
+
+
 @app.get("/api/health")
 async def health():
     """System health check."""
