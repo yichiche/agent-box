@@ -2,6 +2,7 @@
 
 import argparse
 import fcntl
+import hashlib
 import logging
 import os
 import re
@@ -38,6 +39,11 @@ from config import (
     VariantConfig,
     variant_label,
     parse_variant_label,
+    TRACE_ANALYZER_SCRIPT,
+    EVALUATE_PARSING_SCRIPT,
+    TRACE_ANALYZER_HASH_FILE,
+    DEFAULT_EXPORT_LAYERS,
+    DEFAULT_DEBUG_LAYERS,
 )
 from collector import (
     get_connection, init_db, is_already_benchmarked,
@@ -541,6 +547,219 @@ def _auto_kernel_diff(
         logger.warning("Kernel diff failed (non-fatal): %s", e)
 
 
+def _compute_file_hash(filepath: Path) -> str:
+    """Compute SHA-256 hash of a file."""
+    h = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _check_trace_analyzer_changed() -> bool:
+    """Check if trace_analyzer.py has changed since the last recorded hash.
+
+    First run (no stored hash): records hash, returns False.
+    Subsequent change: updates hash, returns True.
+    """
+    if not TRACE_ANALYZER_SCRIPT.exists():
+        logger.warning("trace_analyzer.py not found: %s", TRACE_ANALYZER_SCRIPT)
+        return False
+
+    current_hash = _compute_file_hash(TRACE_ANALYZER_SCRIPT)
+
+    TRACE_ANALYZER_HASH_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    if TRACE_ANALYZER_HASH_FILE.exists():
+        stored_hash = TRACE_ANALYZER_HASH_FILE.read_text().strip()
+        if stored_hash == current_hash:
+            return False
+        logger.info(
+            "trace_analyzer.py has changed (hash %s -> %s)",
+            stored_hash[:12], current_hash[:12],
+        )
+        TRACE_ANALYZER_HASH_FILE.write_text(current_hash)
+        return True
+
+    # First run: record hash, don't trigger re-analysis
+    logger.info("Recording initial trace_analyzer.py hash: %s", current_hash[:12])
+    TRACE_ANALYZER_HASH_FILE.write_text(current_hash)
+    return False
+
+
+def _reanalyze_single_run(
+    profile_conn, run_id: int, result_dir: Path,
+    tag: str, tp_size: int, ep_size: int = None, dp_size: int = None,
+) -> bool:
+    """Re-run trace_analyzer.py and evaluate_parsing.py on an existing profile run.
+
+    Finds .trace.json.gz in result_dir/trace_analysis/, re-runs analysis on host,
+    deletes old profile_scores rows, re-ingests new evaluation_summary.csv, and
+    regenerates kernel diffs.
+
+    Returns True on success, False on failure (non-blocking).
+    """
+    trace_dir = result_dir / "trace_analysis"
+    trace_files = list(trace_dir.glob("*.trace.json.gz"))
+    if not trace_files:
+        logger.warning("No .trace.json.gz found in %s, skipping", trace_dir)
+        return False
+
+    trace_file = trace_files[0]
+    profile_csv = trace_dir / "profile.csv"
+
+    # Step 1: Run trace_analyzer.py
+    cmd = [
+        sys.executable, str(TRACE_ANALYZER_SCRIPT),
+        str(trace_file),
+        "--export-csv", str(profile_csv),
+        "--export-layers", DEFAULT_EXPORT_LAYERS,
+        "--debug-layers", DEFAULT_DEBUG_LAYERS,
+    ]
+    logger.info("Re-analyzing trace for run %d [%s]: %s", run_id, tag, trace_file.name)
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300)
+    except subprocess.CalledProcessError as e:
+        logger.warning(
+            "trace_analyzer.py failed for run %d [%s]: %s",
+            run_id, tag, (e.stderr or e.stdout or str(e))[:500],
+        )
+        return False
+    except subprocess.TimeoutExpired:
+        logger.warning("trace_analyzer.py timed out for run %d [%s]", run_id, tag)
+        return False
+
+    # Step 2: Run evaluate_parsing.py on the generated xlsx
+    profile_xlsx = trace_dir / "profile.csv.xlsx"
+    if profile_xlsx.exists() and EVALUATE_PARSING_SCRIPT.exists():
+        eval_cmd = [sys.executable, str(EVALUATE_PARSING_SCRIPT), str(profile_xlsx)]
+        try:
+            subprocess.run(
+                eval_cmd, capture_output=True, text=True, timeout=120,
+                cwd=str(trace_dir),
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            # Non-zero exit is OK (means low score), but timeout is a warning
+            if isinstance(e, subprocess.TimeoutExpired):
+                logger.warning("evaluate_parsing.py timed out for run %d [%s]", run_id, tag)
+
+    # Step 3: Delete old profile_scores rows and re-ingest
+    summary_path = trace_dir / "evaluation_summary.csv"
+    if summary_path.exists():
+        profile_conn.execute(
+            "DELETE FROM profile_scores WHERE run_id = ?", (run_id,)
+        )
+        profile_conn.commit()
+        ingest_profile_scores(profile_conn, run_id, summary_path)
+        logger.info("Re-ingested profile_scores for run %d [%s]", run_id, tag)
+    else:
+        logger.warning(
+            "evaluation_summary.csv not produced for run %d [%s]", run_id, tag,
+        )
+
+    # Step 4: Regenerate kernel diffs
+    _auto_kernel_diff(
+        profile_conn, run_id, result_dir,
+        tag=tag, tp_size=tp_size, ep_size=ep_size, dp_size=dp_size,
+    )
+
+    return True
+
+
+def _run_reanalysis(dry_run: bool = False) -> int:
+    """Re-run trace_analyzer.py on all completed profile runs for the current model.
+
+    Returns the number of successfully re-analyzed runs.
+    """
+    profile_conn = get_profile_connection()
+    init_profile_db(profile_conn)
+
+    try:
+        rows = profile_conn.execute(
+            """SELECT id, image_tag, result_dir, tp_size, ep_size, dp_size
+               FROM benchmark_runs
+               WHERE model_name = ? AND status = 'completed'
+               ORDER BY id""",
+            (_cfg.MODEL_NAME,),
+        ).fetchall()
+
+        if not rows:
+            logger.info("No completed profile runs found for model %s", _cfg.MODEL_NAME)
+            return 0
+
+        eligible = []
+        for row in rows:
+            rd = resolve_result_dir(row["result_dir"])
+            if not rd:
+                continue
+            trace_dir = rd / "trace_analysis"
+            if list(trace_dir.glob("*.trace.json.gz")):
+                eligible.append((row, rd))
+
+        if not eligible:
+            logger.info("No profile runs with .trace.json.gz files on disk")
+            return 0
+
+        logger.info(
+            "Found %d profile run(s) eligible for re-analysis (model=%s)",
+            len(eligible), _cfg.MODEL_NAME,
+        )
+
+        success_count = 0
+        for row, rd in eligible:
+            label = variant_label(
+                row["tp_size"], False,
+                ep_size=row["ep_size"], dp_size=row["dp_size"],
+            )
+            if dry_run:
+                logger.info(
+                    "[DRY RUN] Would re-analyze: run %d, %s [%s], dir=%s",
+                    row["id"], row["image_tag"], label, rd,
+                )
+                continue
+
+            ok = _reanalyze_single_run(
+                profile_conn, row["id"], rd,
+                tag=row["image_tag"],
+                tp_size=row["tp_size"],
+                ep_size=row["ep_size"],
+                dp_size=row["dp_size"],
+            )
+            if ok:
+                success_count += 1
+
+        logger.info(
+            "Re-analysis complete: %d/%d runs succeeded", success_count, len(eligible),
+        )
+        return success_count
+
+    finally:
+        profile_conn.close()
+
+
+def _run_generate_report(dry_run: bool = False) -> None:
+    """Regenerate the dashboard report after re-analysis."""
+    if dry_run:
+        logger.info("[DRY RUN] Would regenerate dashboard report")
+        return
+
+    cmd = [sys.executable, "-m", "report.generate_report", str(BENCHMARK_RUNS_DIR)]
+    logger.info("Regenerating dashboard report...")
+    try:
+        subprocess.run(
+            cmd, capture_output=True, text=True, timeout=300,
+            cwd=str(_cfg.AGENT_BOX_DIR),
+        )
+        logger.info("Dashboard report regenerated successfully")
+    except subprocess.CalledProcessError as e:
+        logger.warning(
+            "Report generation failed (non-fatal): %s",
+            (e.stderr or e.stdout or str(e))[:500],
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("Report generation timed out (non-fatal)")
+
+
 def run_profiling_for_variant(
     profile_conn, image_info, tp_size: int, ep_size: int = None, dp_size: int = None,
 ) -> bool:
@@ -979,6 +1198,13 @@ def main():
         help="Force re-run ONLY profiling (deletes profile DB records, keeps perf data). "
         "If no tags specified, re-profiles all images found in --lookback-days.",
     )
+    parser.add_argument(
+        "--reanalyze",
+        action="store_true",
+        default=False,
+        help="Re-run trace_analyzer.py on all completed profile runs, then "
+        "regenerate dashboard reports. Exits without running benchmarks.",
+    )
     profile_group = parser.add_mutually_exclusive_group()
     profile_group.add_argument(
         "--no-profile",
@@ -1101,6 +1327,22 @@ def main():
         # Initialize DB
         conn = get_connection()
         init_db(conn)
+
+        # --reanalyze: re-run trace_analyzer.py on all completed profile runs, then exit
+        if args.reanalyze:
+            logger.info("Running trace re-analysis (--reanalyze)")
+            n = _run_reanalysis(dry_run=args.dry_run)
+            if n > 0 or args.dry_run:
+                _run_generate_report(dry_run=args.dry_run)
+            conn.close()
+            return
+
+        # Auto-detect trace_analyzer.py changes
+        if _check_trace_analyzer_changed():
+            logger.info("trace_analyzer.py changed, re-analyzing existing profile runs...")
+            n = _run_reanalysis(dry_run=args.dry_run)
+            if n > 0 or args.dry_run:
+                _run_generate_report(dry_run=args.dry_run)
 
         # Discover images
         images = discover_images(
