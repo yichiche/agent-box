@@ -15,7 +15,7 @@ import config as _cfg
 from config import DASHBOARD_PORT, DB_PATH, TEMPLATES_DIR, STATIC_DIR, ROCM_VERSIONS
 from collector import (
     get_connection, init_db, get_version_snapshot, upsert_target, get_targets, delete_target,
-    get_profile_connection, init_profile_db,
+    get_profile_connection, init_profile_db, resolve_result_dir,
 )
 
 logger = logging.getLogger(__name__)
@@ -507,15 +507,18 @@ async def get_server_log(run_id: int, tail: int = Query(200)):
         ).fetchone()
         if not row:
             return JSONResponse({"error": "Run not found"}, status_code=404)
-        result_dir = row["result_dir"]
-        if not result_dir:
+        rd = resolve_result_dir(row["result_dir"])
+        if not rd:
             return JSONResponse({"log": None, "reason": "No result directory recorded"})
-        log_path = Path(result_dir) / "server.log"
-        if not log_path.exists():
-            return JSONResponse({"log": None, "reason": f"server.log not found in {result_dir}"})
-        lines = log_path.read_text(errors="replace").splitlines()
-        tail_lines = lines[-tail:] if len(lines) > tail else lines
-        return JSONResponse({"log": "\n".join(tail_lines)})
+        log_path = rd / "server.log"
+        try:
+            if not log_path.exists():
+                return JSONResponse({"log": None, "reason": f"server.log not found in {result_dir}"})
+            lines = log_path.read_text(errors="replace").splitlines()
+            tail_lines = lines[-tail:] if len(lines) > tail else lines
+            return JSONResponse({"log": "\n".join(tail_lines)})
+        except OSError:
+            return JSONResponse({"log": None, "reason": f"server.log not accessible in {result_dir}"})
     finally:
         conn.close()
 
@@ -747,14 +750,36 @@ async def get_profile_runs(
         """
         runs = conn.execute(query, params).fetchall()
 
+        # Batch-query profile_scores to check which runs have scores in DB
+        run_ids = [run["id"] for run in runs]
+        runs_with_scores: set = set()
+        if run_ids:
+            placeholders = ",".join("?" * len(run_ids))
+            score_rows = conn.execute(
+                f"SELECT DISTINCT run_id FROM profile_scores WHERE run_id IN ({placeholders})",
+                run_ids,
+            ).fetchall()
+            runs_with_scores = {r["run_id"] for r in score_rows}
+
         result = []
         for run in runs:
             run_dict = dict(run)
-            rd = run_dict.get("result_dir") or ""
-            summary_path = Path(rd) / "trace_analysis" / "evaluation_summary.csv" if rd else None
-            run_dict["has_evaluation_summary"] = bool(summary_path and summary_path.exists())
-            diff_path = Path(rd) / "trace_analysis" / "kernel_diff.json" if rd else None
-            run_dict["has_kernel_diff"] = bool(diff_path and diff_path.exists())
+            # Check DB first, fall back to filesystem
+            if run["id"] in runs_with_scores:
+                run_dict["has_evaluation_summary"] = True
+            else:
+                rd = resolve_result_dir(run_dict.get("result_dir"))
+                summary_path = rd / "trace_analysis" / "evaluation_summary.csv" if rd else None
+                try:
+                    run_dict["has_evaluation_summary"] = bool(summary_path and summary_path.exists())
+                except OSError:
+                    run_dict["has_evaluation_summary"] = False
+            diff_path = resolve_result_dir(run_dict.get("result_dir"))
+            diff_path = diff_path / "trace_analysis" / "kernel_diff.json" if diff_path else None
+            try:
+                run_dict["has_kernel_diff"] = bool(diff_path and diff_path.exists())
+            except OSError:
+                run_dict["has_kernel_diff"] = False
             run_dict.pop("result_dir", None)
             result.append(run_dict)
 
@@ -775,13 +800,16 @@ async def get_evaluation_summary(run_id: int):
         if not row:
             return JSONResponse({"error": "Run not found"}, status_code=404)
 
-        result_dir = row["result_dir"]
-        if not result_dir:
+        rd = resolve_result_dir(row["result_dir"])
+        if not rd:
             return JSONResponse({"csv": None, "reason": "No result directory recorded"})
-        summary_path = Path(result_dir) / "trace_analysis" / "evaluation_summary.csv"
-        if not summary_path.exists():
-            return JSONResponse({"csv": None, "reason": "evaluation_summary.csv not found"})
-        return JSONResponse({"csv": summary_path.read_text(errors="replace")})
+        summary_path = rd / "trace_analysis" / "evaluation_summary.csv"
+        try:
+            if not summary_path.exists():
+                return JSONResponse({"csv": None, "reason": "evaluation_summary.csv not found"})
+            return JSONResponse({"csv": summary_path.read_text(errors="replace")})
+        except OSError:
+            return JSONResponse({"csv": None, "reason": "evaluation_summary.csv not accessible"})
     finally:
         conn.close()
 
@@ -794,9 +822,6 @@ async def profile_chart_data(
     days: int = Query(30),
 ):
     """Return Chart.js data for profile structural scores (S1-S4) over time."""
-    import csv
-    import io
-
     conn = get_profile_connection()
     try:
         where_parts = ["br.status = 'completed'"]
@@ -820,7 +845,7 @@ async def profile_chart_data(
         runs = conn.execute(
             f"""
             SELECT br.id, br.build_date, br.image_tag, br.rocm_version,
-                   br.sglang_version, br.tp_size, br.result_dir
+                   br.sglang_version, br.tp_size
             FROM benchmark_runs br
             WHERE {where_clause}
             ORDER BY br.build_date, br.rocm_version, br.tp_size
@@ -835,32 +860,27 @@ async def profile_chart_data(
             "S4 Type Sequence",
         ]
         OVERALL_METRIC = "Overall (weighted)"
+        TARGET_METRICS = set(STRUCTURAL_METRICS + [OVERALL_METRIC])
+
+        # Batch-query all profile_scores for these runs in one go
+        run_ids = [r["id"] for r in runs]
+        scores_by_run: dict[int, dict[str, float]] = {}
+        if run_ids:
+            placeholders = ",".join("?" * len(run_ids))
+            score_rows = conn.execute(
+                f"""SELECT run_id, metric, score FROM profile_scores
+                    WHERE run_id IN ({placeholders})
+                    AND section IN ('structural', 'overall')""",
+                run_ids,
+            ).fetchall()
+            for sr in score_rows:
+                if sr["metric"] in TARGET_METRICS:
+                    scores_by_run.setdefault(sr["run_id"], {})[sr["metric"]] = sr["score"]
 
         datasets: dict = {}
 
         for run in runs:
-            rd = run["result_dir"]
-            if not rd:
-                continue
-            summary_path = Path(rd) / "trace_analysis" / "evaluation_summary.csv"
-            if not summary_path.exists():
-                continue
-
-            scores: dict = {}
-            try:
-                reader = csv.DictReader(
-                    io.StringIO(summary_path.read_text(errors="replace"))
-                )
-                for row in reader:
-                    metric = row.get("metric", "").strip()
-                    if metric in STRUCTURAL_METRICS or metric == OVERALL_METRIC:
-                        try:
-                            scores[metric] = float(row["score"])
-                        except (ValueError, KeyError):
-                            pass
-            except Exception:
-                continue
-
+            scores = scores_by_run.get(run["id"])
             if not scores:
                 continue
 
@@ -911,16 +931,18 @@ async def get_kernel_diff(run_id: int):
         if not row:
             return JSONResponse({"error": "Run not found"}, status_code=404)
 
-        result_dir = row["result_dir"]
-        if not result_dir:
+        rd = resolve_result_dir(row["result_dir"])
+        if not rd:
             return JSONResponse({"diff": None, "reason": "No result directory recorded"})
 
-        diff_path = Path(result_dir) / "trace_analysis" / "kernel_diff.json"
-        if not diff_path.exists():
-            return JSONResponse({"diff": None, "reason": "No kernel diff available (no previous run to compare)"})
-
-        diff = _json.loads(diff_path.read_text(errors="replace"))
-        return JSONResponse({"diff": diff})
+        diff_path = rd / "trace_analysis" / "kernel_diff.json"
+        try:
+            if not diff_path.exists():
+                return JSONResponse({"diff": None, "reason": "No kernel diff available (no previous run to compare)"})
+            diff = _json.loads(diff_path.read_text(errors="replace"))
+            return JSONResponse({"diff": diff})
+        except OSError:
+            return JSONResponse({"diff": None, "reason": "Kernel diff not accessible"})
     finally:
         conn.close()
 
@@ -947,13 +969,13 @@ async def profile_diff_on_demand(
         if not row_a or not row_b:
             return JSONResponse({"error": "One or both runs not found"}, status_code=404)
 
-        dir_a = row_a["result_dir"]
-        dir_b = row_b["result_dir"]
-        if not dir_a or not dir_b:
+        rd_a = resolve_result_dir(row_a["result_dir"])
+        rd_b = resolve_result_dir(row_b["result_dir"])
+        if not rd_a or not rd_b:
             return JSONResponse({"error": "Missing result directory for one or both runs"}, status_code=400)
 
-        xlsx_a = str(Path(dir_a) / "trace_analysis" / "profile.csv.xlsx")
-        xlsx_b = str(Path(dir_b) / "trace_analysis" / "profile.csv.xlsx")
+        xlsx_a = str(rd_a / "trace_analysis" / "profile.csv.xlsx")
+        xlsx_b = str(rd_b / "trace_analysis" / "profile.csv.xlsx")
 
         diff = compare_trace_files(xlsx_a, xlsx_b)
         if diff is None:

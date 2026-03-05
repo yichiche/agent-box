@@ -43,6 +43,7 @@ from collector import (
     get_connection, init_db, is_already_benchmarked,
     create_run, update_run_status, ingest_run, ingest_version_snapshot,
     get_profile_connection, init_profile_db, is_already_profiled, create_profile_run,
+    resolve_result_dir, ingest_profile_scores,
 )
 from discover import discover_images
 from regression import detect_regressions
@@ -508,7 +509,11 @@ def _auto_kernel_diff(
         logger.info("No previous profile run found for kernel diff comparison")
         return
 
-    prev_xlsx = Path(prev["result_dir"]) / "trace_analysis" / "profile.csv.xlsx"
+    prev_rd = resolve_result_dir(prev["result_dir"])
+    if not prev_rd:
+        logger.info("Previous profile run %d has no result_dir", prev["id"])
+        return
+    prev_xlsx = prev_rd / "trace_analysis" / "profile.csv.xlsx"
     if not prev_xlsx.exists():
         logger.info("Previous profile run %d has no trace xlsx: %s", prev["id"], prev_xlsx)
         return
@@ -594,10 +599,11 @@ def run_profiling_for_variant(
             snapshot = _json.loads(version_path.read_text())
             ingest_version_snapshot(profile_conn, run_id, snapshot)
 
-        # Verify evaluation_summary.csv exists
+        # Verify evaluation_summary.csv exists and ingest scores into DB
         summary_path = result_dir / "trace_analysis" / "evaluation_summary.csv"
         if summary_path.exists():
             logger.info("Profile evaluation_summary.csv produced: %s", summary_path)
+            ingest_profile_scores(profile_conn, run_id, summary_path)
         else:
             logger.warning(
                 "Profile run completed but evaluation_summary.csv not found: %s",

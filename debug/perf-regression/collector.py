@@ -1,5 +1,7 @@
 """SQLite schema management and benchmark data ingestion."""
 
+import csv
+import io
 import json
 import logging
 import os
@@ -13,6 +15,31 @@ import config as _cfg
 from config import DB_PATH, PROFILE_DB_PATH
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_result_dir(result_dir: str | None) -> Path | None:
+    """Re-base a stored result_dir path onto the current BENCHMARK_RUNS_DIR.
+
+    The DB may contain absolute paths recorded under a different user's home
+    (e.g. /home/amd/jacky/benchmark_runs/...).  This helper extracts just the
+    leaf directory name and resolves it against the current BENCHMARK_RUNS_DIR
+    so the dashboard works regardless of which user account is running it.
+
+    Pure path manipulation — no filesystem I/O — so it never raises
+    PermissionError on inaccessible directories.
+    """
+    if not result_dir:
+        return None
+    p = Path(result_dir)
+    # Already under current BENCHMARK_RUNS_DIR — use as-is
+    try:
+        p.relative_to(_cfg.BENCHMARK_RUNS_DIR)
+        return p
+    except ValueError:
+        pass
+    # Re-base: take leaf dir name, put under current BENCHMARK_RUNS_DIR
+    return _cfg.BENCHMARK_RUNS_DIR / p.name
+
 
 # ── Schema ─────────────────────────────────────────────────────────────────
 
@@ -338,9 +365,21 @@ CREATE TABLE IF NOT EXISTS version_snapshots (
     UNIQUE(run_id, library_name)
 );
 
+CREATE TABLE IF NOT EXISTS profile_scores (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+    section TEXT NOT NULL,
+    metric TEXT NOT NULL,
+    score REAL NOT NULL,
+    grade TEXT,
+    detail TEXT,
+    UNIQUE(run_id, section, metric)
+);
+
 CREATE INDEX IF NOT EXISTS idx_profile_runs_lookup
     ON benchmark_runs(image_tag, model_name, tp_size, mtp_enabled, ep_size, dp_size);
 CREATE INDEX IF NOT EXISTS idx_profile_version_snapshots_run_id ON version_snapshots(run_id);
+CREATE INDEX IF NOT EXISTS idx_profile_scores_run_id ON profile_scores(run_id);
 """
 
 
@@ -361,10 +400,85 @@ def init_profile_db(conn: Optional[sqlite3.Connection] = None) -> None:
         conn = get_profile_connection()
         close = True
     conn.executescript(PROFILE_SCHEMA_SQL)
+    _migrate_add_profile_scores(conn)
     conn.commit()
     if close:
         conn.close()
     logger.info("Profile database initialized: %s", PROFILE_DB_PATH)
+
+
+def ingest_profile_scores(conn: sqlite3.Connection, run_id: int, csv_path: Path) -> int:
+    """Parse evaluation_summary.csv and INSERT OR REPLACE rows into profile_scores.
+
+    Returns count of rows ingested.
+    """
+    if not csv_path.exists():
+        logger.warning("evaluation_summary.csv not found: %s", csv_path)
+        return 0
+
+    count = 0
+    try:
+        reader = csv.DictReader(io.StringIO(csv_path.read_text(errors="replace")))
+        for row in reader:
+            section = (row.get("section") or "").strip()
+            metric = (row.get("metric") or "").strip()
+            score_str = (row.get("score") or "").strip()
+            if not section or not metric or not score_str:
+                continue
+            try:
+                score = float(score_str)
+            except ValueError:
+                continue
+            conn.execute(
+                """INSERT OR REPLACE INTO profile_scores
+                   (run_id, section, metric, score, grade, detail)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (run_id, section, metric, score,
+                 (row.get("grade") or "").strip() or None,
+                 (row.get("detail") or "").strip() or None),
+            )
+            count += 1
+        conn.commit()
+    except Exception:
+        logger.exception("Failed to ingest profile scores for run %d from %s", run_id, csv_path)
+        return 0
+
+    logger.info("Ingested %d profile score rows for run %d", count, run_id)
+    return count
+
+
+def _migrate_add_profile_scores(conn: sqlite3.Connection) -> None:
+    """Ensure profile_scores table exists and backfill from local CSV files.
+
+    The table is created by PROFILE_SCHEMA_SQL, so this function only needs
+    to backfill completed runs that don't yet have scores in the DB.
+    """
+    # Find completed runs that have no scores yet
+    rows = conn.execute(
+        """SELECT br.id, br.result_dir FROM benchmark_runs br
+           WHERE br.status = 'completed'
+           AND NOT EXISTS (
+               SELECT 1 FROM profile_scores ps WHERE ps.run_id = br.id
+           )"""
+    ).fetchall()
+    if not rows:
+        return
+
+    logger.info("Backfilling profile_scores for %d completed runs...", len(rows))
+    backfilled = 0
+    for row in rows:
+        rd = resolve_result_dir(row["result_dir"])
+        if not rd:
+            continue
+        summary = rd / "trace_analysis" / "evaluation_summary.csv"
+        try:
+            if summary.exists():
+                n = ingest_profile_scores(conn, row["id"], summary)
+                if n > 0:
+                    backfilled += 1
+        except OSError:
+            continue
+    logger.info("Backfilled profile_scores for %d runs", backfilled)
 
 
 def create_profile_run(
@@ -425,24 +539,39 @@ def is_already_profiled(
     ep_size: Optional[int] = None,
     dp_size: Optional[int] = None,
 ) -> bool:
-    """Check if this image already has a completed profile run with evaluation_summary.csv.
+    """Check if this image already has a completed profile run with scores.
 
+    Checks the profile_scores DB table first, then falls back to filesystem.
     conn should be a profile database connection.
     """
     row = conn.execute(
-        "SELECT status, result_dir FROM benchmark_runs "
+        "SELECT id, status FROM benchmark_runs "
         "WHERE image_tag = ? AND model_name = ? AND tp_size = ? AND mtp_enabled = 0 "
         "AND ep_size IS ? AND dp_size IS ?",
         (image_tag, _cfg.MODEL_NAME, tp_size, ep_size, dp_size),
     ).fetchone()
     if row is None or row["status"] != "completed":
         return False
-    result_dir = row["result_dir"]
-    if result_dir and Path(result_dir).is_dir():
-        summary = Path(result_dir) / "trace_analysis" / "evaluation_summary.csv"
-        if summary.exists():
-            return True
-    logger.info("Profile result dir/evaluation_summary.csv missing for %s, will re-profile", image_tag)
+
+    # Check DB for scores first
+    score_count = conn.execute(
+        "SELECT COUNT(*) FROM profile_scores WHERE run_id = ?", (row["id"],)
+    ).fetchone()[0]
+    if score_count > 0:
+        return True
+
+    # Fallback: check local filesystem (for runs not yet migrated)
+    rd = resolve_result_dir(conn.execute(
+        "SELECT result_dir FROM benchmark_runs WHERE id = ?", (row["id"],)
+    ).fetchone()["result_dir"])
+    if rd:
+        summary = rd / "trace_analysis" / "evaluation_summary.csv"
+        try:
+            if summary.exists():
+                return True
+        except OSError:
+            pass
+    logger.info("Profile scores missing for %s, will re-profile", image_tag)
     return False
 
 
@@ -464,8 +593,8 @@ def is_already_benchmarked(
     if row is None or row["status"] != "completed":
         return False
     # Verify the result directory and JSONL actually exist
-    result_dir = row["result_dir"]
-    if result_dir and Path(result_dir).is_dir() and (Path(result_dir) / "bench_results.jsonl").exists():
+    rd = resolve_result_dir(row["result_dir"])
+    if rd and rd.is_dir() and (rd / "bench_results.jsonl").exists():
         return True
     logger.info("Result dir missing for completed run %s, will re-run", image_tag)
     return False
