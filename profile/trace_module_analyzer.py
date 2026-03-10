@@ -24,6 +24,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# Maximum data rows per Excel tab (excluding header).  Keeps file size
+# manageable for large traces (e.g. DeepSeek with 24K+ decoder instances).
+MAX_ROWS_PER_TAB = 1000
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -52,6 +56,7 @@ class KernelDetail:
     category: str
     module_path: str  # e.g. "WanTransformerBlock_1/WanT2VCrossAttention_0"
     ts: float = 0.0
+    phase: str = ""  # "prefill" / "decode" / ""
 
 
 @dataclass
@@ -312,6 +317,7 @@ class ModuleAggregator:
     def _aggregate_node(self, node: ModuleNode, depth: int, mode: str,
                         parent_path: str) -> ModuleStats:
         path = f"{parent_path}/{node.name}" if parent_path else node.name
+        node_phase = getattr(node, "_phase", "")
         stats = ModuleStats(
             name=node.name,
             module_type=node.module_type,
@@ -330,7 +336,7 @@ class ModuleAggregator:
             stats.kernel_breakdown[cat] = (prev_dur + dur, prev_cnt + 1)
             stats.kernel_details.append(KernelDetail(
                 name=kname, duration=dur, category=cat,
-                module_path=path, ts=k.get("ts", 0)))
+                module_path=path, ts=k.get("ts", 0), phase=node_phase))
 
         # Direct cpu_op stats
         for op in node.cpu_ops:
@@ -343,7 +349,7 @@ class ModuleAggregator:
             stats.kernel_breakdown[cat] = (prev_dur + dur, prev_cnt + 1)
             stats.kernel_details.append(KernelDetail(
                 name=opname, duration=dur, category=cat,
-                module_path=path, ts=op.get("ts", 0)))
+                module_path=path, ts=op.get("ts", 0), phase=node_phase))
 
         # Sort own details by timestamp
         stats.kernel_details.sort(key=lambda d: d.ts)
@@ -381,14 +387,23 @@ class PhaseDetector:
         phase_markers_sorted = sorted(phase_markers)
         self._tag_nodes_from_phases(roots, phase_markers_sorted)
 
-    def _tag_nodes_from_phases(self, nodes: List[ModuleNode], phases: List[Tuple]):
+    def _tag_nodes_from_phases(self, nodes: List[ModuleNode], phases: List[Tuple],
+                               parent_phase: Optional[str] = None):
         phase_ts = [p[0] for p in phases]
         for node in nodes:
-            idx = bisect.bisect_right(phase_ts, node.ts) - 1
-            if 0 <= idx < len(phases):
-                _, phase, _, _ = phases[idx]
-                node._phase = phase  # type: ignore[attr-defined]
-            self._tag_nodes_from_phases(node.children, phases)
+            if parent_phase:
+                # Children inherit parent phase — a forward pass is entirely
+                # prefill or decode; independent bisect on children can land on
+                # a stale marker when timestamps are close to a boundary.
+                node._phase = parent_phase  # type: ignore[attr-defined]
+            else:
+                idx = bisect.bisect_right(phase_ts, node.ts) - 1
+                if 0 <= idx < len(phases):
+                    _, phase, _, _ = phases[idx]
+                    node._phase = phase  # type: ignore[attr-defined]
+            self._tag_nodes_from_phases(
+                node.children, phases,
+                parent_phase=getattr(node, "_phase", None))
 
     def _detect_from_cpu_ops(self, nodes: List[ModuleNode]):
         """Fall back to checking cpu_op names for prefill/decode keywords."""
@@ -679,7 +694,7 @@ class ReportGenerator:
         # --- Kernel Breakdown sheet: per-module kernel name aggregation ---
         ws3 = wb.create_sheet(title="Kernel Breakdown")
         bd_headers = ["Module", "Kernel Name", "Category", "Total Duration (us)",
-                       "Count", "Avg (us)", "% of Module"]
+                       "Count", "Avg (us)", "% of Module", "Phase"]
         for col, h in enumerate(bd_headers, 1):
             cell = ws3.cell(row=1, column=col, value=h)
             cell.font = header_font
@@ -691,7 +706,7 @@ class ReportGenerator:
         # --- Kernel Detail sheet: one row per kernel with module path ---
         ws4 = wb.create_sheet(title="Kernel Detail")
         kd_headers = ["#", "Module Path", "Kernel Name", "Category",
-                       "Duration (us)", "% of Layer", "Timestamp (us)"]
+                       "Duration (us)", "% of Layer", "Timestamp (us)", "Phase"]
         for col, h in enumerate(kd_headers, 1):
             cell = ws4.cell(row=1, column=col, value=h)
             cell.font = header_font
@@ -715,12 +730,17 @@ class ReportGenerator:
             self._collect_by_type(stats_list, type_agg_flat, mode)
             sorted_types_flat = sorted(type_agg_flat.items(), key=lambda x: -sum(x[1]))
             top_type_names = {mtype for mtype, _ in sorted_types_flat[:top_n_types]}
-        seen_types: Dict[str, ModuleStats] = {}
+        seen_types: Dict[Tuple[str, str], ModuleStats] = {}
         self._find_median_instance_per_type(stats_list, seen_types, mode)
-        for mtype, rep_stats in sorted(seen_types.items()):
+        for (mtype, phase), rep_stats in sorted(seen_types.items()):
             if mtype not in top_type_names:
                 continue
-            sheet_name = mtype[:28]  # Excel sheet name limit = 31 chars
+            # Include phase suffix in sheet name for LLM traces
+            if phase:
+                suffix = f" ({phase[:3]})"  # "prefill" -> "(pre)", "decode" -> "(dec)"
+                sheet_name = f"{mtype[:28 - len(suffix)]}{suffix}"
+            else:
+                sheet_name = mtype[:28]  # Excel sheet name limit = 31 chars
             ws_det = wb.create_sheet(title=sheet_name)
             all_details = self._collect_all_details(rep_stats)
             all_details.sort(key=lambda d: d.ts)
@@ -735,19 +755,21 @@ class ReportGenerator:
                 wall_time = 0
 
             # Header rows
+            phase_label = f" [{phase}]" if phase else ""
             ws_det.cell(row=1, column=1,
-                        value=f"{rep_stats.name} — {len(all_details)} kernels").font = Font(bold=True, size=12)
+                        value=f"{rep_stats.name}{phase_label} — {len(all_details)} kernels").font = Font(bold=True, size=12)
             ws_det.cell(row=2, column=1,
                         value=f"Kernel sum: {sum_dur:,.0f} us  |  "
                               f"Wall time: {wall_time:,.0f} us  |  "
                               f"Overlap: {sum_dur - wall_time:,.0f} us  "
                               f"(% uses wall time)")
-            det_headers = ["#", "Module", "Kernel Name", "Category", "Duration (us)", "% wall time"]
+            det_headers = ["#", "Module", "Kernel Name", "Category", "Duration (us)", "% wall time", "Phase"]
             for col, h in enumerate(det_headers, 1):
                 cell = ws_det.cell(row=3, column=col, value=h)
                 cell.font = header_font
                 cell.fill = header_fill
-            for i, d in enumerate(all_details, 1):
+            detail_truncated = len(all_details) > MAX_ROWS_PER_TAB
+            for i, d in enumerate(all_details[:MAX_ROWS_PER_TAB], 1):
                 r = i + 3
                 pct = d.duration / wall_time * 100 if wall_time > 0 else 0
                 leaf = d.module_path.rsplit("/", 1)[-1] if "/" in d.module_path else d.module_path
@@ -757,6 +779,10 @@ class ReportGenerator:
                 ws_det.cell(row=r, column=4, value=d.category)
                 ws_det.cell(row=r, column=5, value=round(d.duration, 1))
                 ws_det.cell(row=r, column=6, value=round(pct, 1))
+                ws_det.cell(row=r, column=7, value=d.phase)
+            if detail_truncated:
+                ws_det.cell(row=MAX_ROWS_PER_TAB + 4, column=1,
+                            value=f"... truncated at {MAX_ROWS_PER_TAB} rows")
             ws_det.column_dimensions["C"].width = 80
             ws_det.column_dimensions["B"].width = 35
 
@@ -815,8 +841,9 @@ class ReportGenerator:
 
     def _write_children_hierarchy(self, ws, rep: ModuleStats, mode: str,
                                   row: int, parent_time: float,
-                                  all_stats: List[ModuleStats]) -> int:
-        """Write children + grandchildren rows, collecting cross-instance stats."""
+                                  all_stats: List[ModuleStats],
+                                  max_depth: int = 5) -> int:
+        """Recursively write children rows up to max_depth, with cross-instance stats."""
         if not rep.children_stats:
             return row
 
@@ -831,6 +858,9 @@ class ReportGenerator:
                 for c in x[1]))
 
         for ctype, clist_in_rep in sorted_children:
+            child_depth = clist_in_rep[0].depth
+            if child_depth > max_depth:
+                continue
             # Collect ALL instances of this type across entire tree for stats
             all_of_type = self._collect_all_of_type(all_stats, ctype)
             if all_of_type:
@@ -839,7 +869,6 @@ class ReportGenerator:
             else:
                 child_times = [(c.total_kernel_time if mode == "full" else c.total_cpu_op_time)
                                for c in clist_in_rep]
-            child_depth = clist_in_rep[0].depth
             child_indent = "  " * child_depth
             # % of parent uses per-rep subtotal (sum within this one parent)
             rep_child_total = sum(
@@ -850,36 +879,11 @@ class ReportGenerator:
                                  parent_time, pct_total=rep_child_total)
             row += 1
 
-            # Grandchildren from representative child
-            gc_rep = next((c for c in clist_in_rep if c.instance_id == 1), clist_in_rep[0])
-            if gc_rep.children_stats:
-                gc_by_type: Dict[str, List[ModuleStats]] = defaultdict(list)
-                for gc in gc_rep.children_stats:
-                    gc_by_type[gc.module_type].append(gc)
-                sorted_gc = sorted(
-                    gc_by_type.items(),
-                    key=lambda x: -sum(
-                        (g.total_kernel_time if mode == "full" else g.total_cpu_op_time)
-                        for g in x[1]))
-                gc_rep_time = gc_rep.total_kernel_time if mode == "full" else gc_rep.total_cpu_op_time
-                for gctype, gclist_in_rep in sorted_gc:
-                    all_gc = self._collect_all_of_type(all_stats, gctype)
-                    if all_gc:
-                        gc_times = [(g.total_kernel_time if mode == "full" else g.total_cpu_op_time)
-                                    for g in all_gc]
-                    else:
-                        gc_times = [(g.total_kernel_time if mode == "full" else g.total_cpu_op_time)
-                                    for g in gclist_in_rep]
-                    gc_depth = gclist_in_rep[0].depth
-                    gc_indent = "  " * gc_depth
-                    # % of parent uses per-rep subtotal
-                    gc_rep_subtotal = sum(
-                        (g.total_kernel_time if mode == "full" else g.total_cpu_op_time)
-                        for g in gclist_in_rep)
-                    self._write_type_row(ws, row, f"{gc_indent}{gctype}",
-                                         gc_depth, len(gc_times), gc_times,
-                                         gc_rep_time, pct_total=gc_rep_subtotal)
-                    row += 1
+            # Recurse into representative child
+            child_rep = next((c for c in clist_in_rep if c.instance_id == 1), clist_in_rep[0])
+            child_rep_time = child_rep.total_kernel_time if mode == "full" else child_rep.total_cpu_op_time
+            row = self._write_children_hierarchy(
+                ws, child_rep, mode, row, child_rep_time, all_stats, max_depth)
 
         return row
 
@@ -888,6 +892,9 @@ class ReportGenerator:
         """Write tree-structured rows with Excel outline grouping for collapse/expand."""
         if depth > max_depth:
             return row
+        if row > MAX_ROWS_PER_TAB + 1:
+            ws.cell(row=row, column=1, value=f"... truncated at {MAX_ROWS_PER_TAB} rows")
+            return row + 1
         time_val = stats.total_kernel_time if mode == "full" else stats.total_cpu_op_time
         count = stats.kernel_count if mode == "full" else stats.cpu_op_count
         phase = getattr(stats, "phase", "")
@@ -924,6 +931,9 @@ class ReportGenerator:
     def _write_stats_rows(self, ws, stats_list: List[ModuleStats], mode: str,
                           row: int, path_prefix: str) -> int:
         for s in stats_list:
+            if row > MAX_ROWS_PER_TAB + 1:
+                ws.cell(row=row, column=1, value=f"... truncated at {MAX_ROWS_PER_TAB} rows")
+                return row + 1
             path = f"{path_prefix}/{s.name}" if path_prefix else s.name
             time_val = s.total_kernel_time if mode == "full" else s.total_cpu_op_time
             self_time = s.self_kernel_time if mode == "full" else s.self_cpu_op_time
@@ -944,10 +954,16 @@ class ReportGenerator:
     def _write_kernel_detail_rows(self, ws, stats: ModuleStats, mode: str,
                                   row: int) -> int:
         """Write kernel detail rows for a module and its descendants."""
+        if row > MAX_ROWS_PER_TAB + 1:
+            return row
         all_details = self._collect_all_details(stats)
         all_details.sort(key=lambda d: d.ts)
         time_val = stats.total_kernel_time if mode == "full" else stats.total_cpu_op_time
         for i, d in enumerate(all_details, 1):
+            if row > MAX_ROWS_PER_TAB + 1:
+                ws.cell(row=row, column=1, value=f"... truncated at {MAX_ROWS_PER_TAB} rows")
+                row += 1
+                return row
             pct = d.duration / time_val * 100 if time_val > 0 else 0
             ws.cell(row=row, column=1, value=i)
             ws.cell(row=row, column=2, value=d.module_path)
@@ -956,23 +972,34 @@ class ReportGenerator:
             ws.cell(row=row, column=5, value=round(d.duration, 1))
             ws.cell(row=row, column=6, value=round(pct, 1))
             ws.cell(row=row, column=7, value=round(d.ts, 1))
+            ws.cell(row=row, column=8, value=d.phase)
             row += 1
         return row
 
     def _find_median_instance_per_type(self, stats_list: List[ModuleStats],
-                                       seen: Dict[str, ModuleStats], mode: str):
-        """Find median instance of each module type (most representative)."""
+                                       seen: Dict[Tuple[str, str], ModuleStats],
+                                       mode: str):
+        """Find median instance of each (module_type, phase) pair.
+
+        Groups by (module_type, phase) so that prefill and decode get separate
+        representative instances, producing separate detail sheets.
+        """
         # First collect all instances per type
         all_by_type: Dict[str, List[ModuleStats]] = defaultdict(list)
         self._collect_instances_by_type(stats_list, all_by_type)
-        # Pick median for each type
+        # Pick median for each (type, phase) pair
         for mtype, instances in all_by_type.items():
             if not any(s.children_stats for s in instances):
                 continue  # skip leaf modules
-            timed = sorted(instances,
-                           key=lambda s: s.total_kernel_time if mode == "full" else s.total_cpu_op_time)
-            mid = len(timed) // 2
-            seen[mtype] = timed[mid]
+            # Sub-group by phase
+            by_phase: Dict[str, List[ModuleStats]] = defaultdict(list)
+            for s in instances:
+                by_phase[getattr(s, "phase", "")].append(s)
+            for phase, phase_instances in by_phase.items():
+                timed = sorted(phase_instances,
+                               key=lambda s: s.total_kernel_time if mode == "full" else s.total_cpu_op_time)
+                mid = len(timed) // 2
+                seen[(mtype, phase)] = timed[mid]
 
     def _collect_instances_by_type(self, stats_list: List[ModuleStats],
                                    out: Dict[str, List[ModuleStats]]):
@@ -985,11 +1012,13 @@ class ReportGenerator:
                                      mode: str, row: int) -> int:
         """Write kernel name breakdown sorted globally by total duration (highest first)."""
         # Collect all (module, kernel_name) aggregations across the entire tree
-        all_rows: List[Tuple[str, str, str, float, int, float]] = []
+        all_rows: List[Tuple[str, str, str, float, int, float, str]] = []
         self._collect_kernel_name_rows(stats_list, mode, all_rows)
         # Sort by total duration descending, then avg descending
         all_rows.sort(key=lambda x: (-x[3], -x[5]))
-        for module, kname, cat, dur, cnt, pct in all_rows:
+        truncated = len(all_rows) > MAX_ROWS_PER_TAB
+        all_rows = all_rows[:MAX_ROWS_PER_TAB]
+        for module, kname, cat, dur, cnt, pct, phase in all_rows:
             ws.cell(row=row, column=1, value=module)
             ws.cell(row=row, column=2, value=kname)
             ws.cell(row=row, column=3, value=cat)
@@ -997,6 +1026,10 @@ class ReportGenerator:
             ws.cell(row=row, column=5, value=cnt)
             ws.cell(row=row, column=6, value=round(dur / cnt, 1))
             ws.cell(row=row, column=7, value=round(pct, 1))
+            ws.cell(row=row, column=8, value=phase)
+            row += 1
+        if truncated:
+            ws.cell(row=row, column=1, value=f"... truncated at {MAX_ROWS_PER_TAB} rows")
             row += 1
         return row
 
@@ -1013,9 +1046,10 @@ class ReportGenerator:
                         name_agg[d.name] = (prev[0] + d.duration, prev[1] + 1, d.category)
                     else:
                         name_agg[d.name] = (d.duration, 1, d.category)
+                phase = getattr(s, "phase", "")
                 for kname, (dur, cnt, cat) in name_agg.items():
                     pct = dur / time_val * 100 if time_val > 0 else 0
-                    out.append((s.name, kname, cat, dur, cnt, pct))
+                    out.append((s.name, kname, cat, dur, cnt, pct, phase))
             self._collect_kernel_name_rows(s.children_stats, mode, out)
 
 
