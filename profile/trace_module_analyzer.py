@@ -372,7 +372,7 @@ _KERNEL_CATEGORIES = [
     ("quantization", re.compile(
         r"mxfp4|fp8|quant|_gemm_afp4|_fused_rms_mxfp4|dynamic_per_group_scaled_quant"
         r"|_dynamic_mxfp4|fp4x2|_gemm_a8w8|_batched_gemm_a8w8|_fused_rms_fp8", re.IGNORECASE)),
-    ("linear", re.compile(
+    ("gemm", re.compile(
         r"Cijk_Alik_Bljk|Cijk_Ailk_Bljk|Cijk_SB_|_gemm_a16_w16|Custom_Cijk|gemm|matmul",
         re.IGNORECASE)),
     ("normalization", re.compile(
