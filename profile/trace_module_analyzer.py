@@ -24,6 +24,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+try:
+    from fix_rocm_trace_flow import fix_trace as _rocm_fix_trace
+    _HAS_ROCM_FIX = True
+except ImportError:
+    _HAS_ROCM_FIX = False
+
 # Maximum data rows per Excel tab (excluding header).  Keeps file size
 # manageable for large traces (e.g. DeepSeek with 24K+ decoder instances).
 MAX_ROWS_PER_TAB = 1000
@@ -320,9 +326,203 @@ class KernelCorrelator:
             if module is not None:
                 if shape_index is not None:
                     k["_input_dims"] = shape_index.get_shape(corr)
+                k["_matched"] = True
                 module.kernels.append(k)
                 matched += 1
         return matched
+
+
+# ---------------------------------------------------------------------------
+# CUDA graph replay correlator
+# ---------------------------------------------------------------------------
+
+class CudaGraphCorrelator:
+    """Correlate CUDA-graph-replayed kernels to synthetic layer modules."""
+
+    _COMM_RE = re.compile(
+        r"all_reduce|cross_device_reduce|nccl|rccl|broadcast|allgather"
+        r"|reduce_scatter|quickreduce|all_to_all", re.IGNORECASE)
+    _ATTN_RE = re.compile(
+        r"aiter::mla_|mla_a8w8|decode_attention|flash_attn|attention|softmax"
+        r"|fmha_|mla_reduce|kv_cache|paged_attention|chunk_gated_delta_rule"
+        r"|fused_gdn|kn_get_mla_metadata|kn_mla_reduce|gating_delta_rule",
+        re.IGNORECASE)
+    _MOE_RE = re.compile(
+        r"fused_moe|moe_align|topk|expert|MoeFlatmm|MoeSorting|kernel_moe_gemm"
+        r"|kernel_moe_mxgemm|shared_experts|grouped_topk|fused_append_shared_experts",
+        re.IGNORECASE)
+
+    def __init__(self, runtime_events):
+        self._graph_corrs = set()
+        for e in runtime_events:
+            name = e.get("name", "")
+            if "hipGraphLaunch" in name or "cudaGraphLaunch" in name:
+                corr = e.get("args", {}).get("correlation")
+                if corr is not None:
+                    self._graph_corrs.add(corr)
+
+    @property
+    def has_graph_replays(self):
+        return bool(self._graph_corrs)
+
+    def correlate(self, gpu_events, capture_roots):
+        """Split graph-replayed events into synthetic layer modules.
+
+        Returns (new_roots, matched_count).
+        """
+        # 1. Partition: graph-replay events grouped by correlation ID
+        corr_to_events = defaultdict(list)
+        for e in gpu_events:
+            corr = e.get("args", {}).get("correlation")
+            if corr in self._graph_corrs:
+                corr_to_events[corr].append(e)
+
+        if not corr_to_events:
+            return [], 0
+
+        # Sort each group by timestamp
+        for corr in corr_to_events:
+            corr_to_events[corr].sort(key=lambda e: e.get("ts", 0))
+
+        # 2. Deduplicate into templates by kernel count (signature)
+        templates = {}  # sig_len -> layer boundaries [(start, end, label), ...]
+        for corr, evts in corr_to_events.items():
+            sig_len = len(evts)
+            if sig_len not in templates:
+                names = [e.get("name", "") for e in evts]
+                templates[sig_len] = self._detect_layers(names)
+
+        # 3. Extract capture-iteration layer names for naming
+        capture_layer_names = self._extract_layer_names(capture_roots)
+
+        # 4. Build synthetic module trees for each replay
+        new_roots = []
+        matched = 0
+        replay_idx = 0
+        for corr in sorted(corr_to_events,
+                           key=lambda c: corr_to_events[c][0].get("ts", 0)):
+            evts = corr_to_events[corr]
+            sig_len = len(evts)
+            layer_bounds = templates.get(sig_len, [(0, sig_len, "unknown")])
+
+            root = ModuleNode(
+                name=f"CudaGraphReplay_{replay_idx}",
+                module_type="CudaGraphReplay",
+                instance_id=replay_idx,
+                ts=evts[0].get("ts", 0),
+                end=evts[-1].get("ts", 0) + evts[-1].get("dur", 0),
+                tid=evts[0].get("tid", 0),
+                pid=evts[0].get("pid", 0),
+            )
+            root._phase = "decode"
+
+            for layer_i, (start, end, label) in enumerate(layer_bounds):
+                if layer_i < len(capture_layer_names):
+                    layer_name = capture_layer_names[layer_i]
+                else:
+                    layer_name = f"Layer_{layer_i}"
+                mod_type, inst_id = ModuleTreeBuilder._parse_name(layer_name)
+
+                layer_evts = evts[start:end]
+                if not layer_evts:
+                    continue
+
+                layer_node = ModuleNode(
+                    name=layer_name,
+                    module_type=mod_type,
+                    instance_id=inst_id,
+                    ts=layer_evts[0].get("ts", 0),
+                    end=layer_evts[-1].get("ts", 0) + layer_evts[-1].get("dur", 0),
+                    tid=root.tid,
+                    pid=root.pid,
+                )
+                layer_node._phase = "decode"
+                layer_node.kernels = layer_evts
+                matched += len(layer_evts)
+                root.children.append(layer_node)
+
+            new_roots.append(root)
+            replay_idx += 1
+
+        return new_roots, matched
+
+    def _detect_layers(self, names):
+        """COMM-based segmentation + half-layer merging.
+
+        Returns [(start_idx, end_idx, type_label), ...].
+        """
+        cats = [self._quick_cat(n) for n in names]
+        comm_pos = [i for i, c in enumerate(cats) if c == "COMM"]
+
+        if len(comm_pos) < 2:
+            return [(0, len(names), "unknown")]
+
+        # Build segments ending at each COMM
+        segments = []
+        prev = 0
+        for cp in comm_pos:
+            seg = cats[prev:cp + 1]
+            segments.append((prev, cp + 1, "ATTN" in seg, "MOE" in seg))
+            prev = cp + 1
+        if prev < len(cats):
+            seg = cats[prev:]
+            segments.append((prev, len(cats), "ATTN" in seg, "MOE" in seg))
+
+        # Decide: half-layer vs full-layer model
+        attn_only = sum(1 for s in segments if s[2] and not s[3])
+        full_layer = sum(1 for s in segments if s[2] and s[3])
+
+        if attn_only > full_layer:
+            return self._merge_half_layers(segments)
+        else:
+            return [(s[0], s[1], self._seg_label(s[2], s[3])) for s in segments]
+
+    @staticmethod
+    def _merge_half_layers(segments):
+        """Merge adjacent ATTN-only + non-ATTN pairs into full layers."""
+        layers = []
+        i = 0
+        while i < len(segments):
+            start, end, has_attn, has_moe = segments[i]
+            if has_attn and not has_moe and i + 1 < len(segments):
+                _, next_end, _, next_moe = segments[i + 1]
+                layers.append((start, next_end, "MoE" if next_moe else "FC"))
+                i += 2
+            else:
+                layers.append((start, end,
+                               CudaGraphCorrelator._seg_label(has_attn, has_moe)))
+                i += 1
+        return layers
+
+    @staticmethod
+    def _seg_label(has_attn, has_moe):
+        if has_attn and has_moe:
+            return "MoE"
+        if has_attn:
+            return "Attn"
+        if has_moe:
+            return "MoE"
+        return "other"
+
+    def _quick_cat(self, name):
+        if self._COMM_RE.search(name):
+            return "COMM"
+        if self._ATTN_RE.search(name):
+            return "ATTN"
+        if self._MOE_RE.search(name):
+            return "MOE"
+        return "X"
+
+    @staticmethod
+    def _extract_layer_names(roots):
+        """Extract decoder layer names from capture-iteration module tree."""
+        names = []
+        for root in roots:
+            for child in root.children:
+                if ("DecoderLayer" in child.module_type
+                        or "TransformerBlock" in child.module_type):
+                    names.append(child.name)
+        return names
 
 
 # ---------------------------------------------------------------------------
@@ -1191,7 +1391,8 @@ class TraceModuleAnalyzer:
                  output_path: Optional[str] = None,
                  detail_modules: Optional[List[str]] = None,
                  detail_instance: Optional[int] = None,
-                 top_n_types: int = 5, show_tree: bool = False):
+                 top_n_types: int = 5, show_tree: bool = False,
+                 auto_fix_rocm: bool = True):
         self.trace_path = trace_path
         self.top_n = top_n
         self.output_path = output_path
@@ -1199,6 +1400,7 @@ class TraceModuleAnalyzer:
         self.detail_instance = detail_instance
         self.top_n_types = top_n_types
         self.show_tree = show_tree
+        self.auto_fix_rocm = auto_fix_rocm
 
     def run(self):
         # Step 1: Load trace with single-pass categorization
@@ -1206,6 +1408,16 @@ class TraceModuleAnalyzer:
         data = self._load_trace(self.trace_path)
         events = data.get("traceEvents", [])
         print(f"  Total events: {len(events):,}")
+
+        # Auto-detect and fix ROCm traces (missing hipGraphLaunch flow events)
+        if self.auto_fix_rocm and _HAS_ROCM_FIX:
+            data, n_launches, n_injected = _rocm_fix_trace(data)
+            events = data.get("traceEvents", [])
+            if n_launches > 0:
+                print(f"  ROCm trace detected: {n_launches:,} hipGraphLaunch events, "
+                      f"{n_injected:,} flow events injected")
+        elif self.auto_fix_rocm and not _HAS_ROCM_FIX:
+            logger.debug("fix_rocm_trace_flow not available — skipping ROCm auto-fix")
 
         # Single-pass categorization: extract everything we need
         kernel_events = []
@@ -1291,11 +1503,25 @@ class TraceModuleAnalyzer:
             all_gpu_events = kernel_events + gpu_memcpy + gpu_memset
             correlator = KernelCorrelator(runtime_events, roots,
                                           driver_events=driver_events)
+            graph_correlator = CudaGraphCorrelator(runtime_events)
             del runtime_events, driver_events  # free memory
             matched = correlator.correlate(all_gpu_events, roots,
                                            shape_index=shape_index)
             del shape_index  # free memory
             print(f"  Matched {matched:,} / {len(all_gpu_events):,} GPU events to modules")
+
+            # Step 3b: CUDA graph replay correlation
+            if graph_correlator.has_graph_replays:
+                unmatched = [e for e in all_gpu_events if not e.get("_matched")]
+                graph_roots, graph_matched = graph_correlator.correlate(
+                    unmatched, roots)
+                if graph_roots:
+                    roots.extend(graph_roots)
+                    matched += graph_matched
+                    print(f"  CUDA graph: {graph_matched:,} kernels in "
+                          f"{len(graph_roots)} replay(s)")
+                    print(f"  Total matched: {matched:,} / "
+                          f"{len(all_gpu_events):,} GPU events")
         else:
             print("\nCorrelating cpu_ops to modules via time containment...")
             del runtime_events, driver_events
@@ -1429,6 +1655,8 @@ Examples:
                         help="Which instance to show detail for (default: 1)")
     parser.add_argument("--show-tree", action="store_true",
                         help="Print full module tree to console (verbose)")
+    parser.add_argument("--no-rocm-fix", action="store_true",
+                        help="Disable automatic ROCm trace fix (hipGraphLaunch flow events)")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Enable debug logging")
 
@@ -1454,6 +1682,7 @@ Examples:
             detail_instance=args.detail_instance,
             top_n_types=args.top_n_types if args.top_n_types > 0 else 999,
             show_tree=args.show_tree,
+            auto_fix_rocm=not args.no_rocm_fix,
         )
         analyzer.run()
     except FileNotFoundError as e:
