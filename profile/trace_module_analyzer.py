@@ -914,56 +914,49 @@ class ReportGenerator:
             import openpyxl
             import openpyxl.worksheet.properties
             from openpyxl import Workbook
-            from openpyxl.styles import Alignment, Font, PatternFill
+            from openpyxl.styles import Font, PatternFill
         except ImportError:
             logger.error("openpyxl not installed. Run: pip install openpyxl")
             return
 
         self.top_n_types = top_n_types
         wb = Workbook()
-
-        # --- By Module Type sheet (flat per-instance listing) ---
-        ws = wb.active
-        ws.title = "By Module Type"
         header_font = Font(bold=True)
         header_fill = PatternFill(start_color="CCE5FF", end_color="CCE5FF", fill_type="solid")
+        title_font = Font(bold=True, size=12)
 
-        headers = ["Module Path", "Module Type", "Instance", "Depth",
-                    "Total Time (us)", "Self Time (us)", "Kernel/Op Count", "Phase"]
-        for col, h in enumerate(headers, 1):
-            cell = ws.cell(row=1, column=col, value=h)
-            cell.font = header_font
-            cell.fill = header_fill
+        # Pre-compute grand total and category breakdown (used by Summary + Overview)
+        grand_total = sum(
+            (s.total_kernel_time if mode == "full" else s.total_cpu_op_time)
+            for s in stats_list)
+        total_kernel_count = sum(
+            s.kernel_count if mode == "full" else s.cpu_op_count
+            for s in stats_list)
+        # Aggregate kernel categories across entire tree
+        global_cat_agg: Dict[str, List] = {}
+        self._collect_global_category_agg(stats_list, global_cat_agg, mode)
 
-        row = 2
-        row = self._write_stats_rows(ws, stats_list, mode, row, "")
+        # --- Summary tab (one-pager overview) ---
+        ws_summary = wb.active
+        ws_summary.title = "Summary"
+        self._write_summary_tab(ws_summary, stats_list, mode, grand_total,
+                                total_kernel_count, global_cat_agg,
+                                header_font, header_fill, title_font)
 
-        # Auto-adjust column widths
-        for col in range(1, len(headers) + 1):
-            max_len = max(len(str(ws.cell(row=r, column=col).value or ""))
-                         for r in range(1, ws.max_row + 1))
-            ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = min(max_len + 2, 50)
-
-        # --- Summary sheet (hierarchical type tree, with % of Parent + stats) ---
-        ws2 = wb.create_sheet(title="Summary")
+        # --- Overview sheet (hierarchical type tree, with % of Parent + stats) ---
+        ws_ov = wb.create_sheet(title="Overview")
         type_headers = ["Module Type", "Depth", "Count",
                         "Mean (us)", "Std (us)", "Min (us)", "Max (us)",
-                        "Total (us)", "% of Parent"]
+                        "Total (us)", "% of Parent", "Top Kernel"]
         for col, h in enumerate(type_headers, 1):
-            cell = ws2.cell(row=1, column=col, value=h)
+            cell = ws_ov.cell(row=1, column=col, value=h)
             cell.font = header_font
             cell.fill = header_fill
 
         # Build hierarchical type summary
-        # Group ALL root-level stats by module_type for proper cross-instance stats
         root_by_type: Dict[str, List[ModuleStats]] = defaultdict(list)
         for s in stats_list:
             root_by_type[s.module_type].append(s)
-        # Grand total across all root-level instances
-        grand_total = sum(
-            (s.total_kernel_time if mode == "full" else s.total_cpu_op_time)
-            for s in stats_list)
-        # Sort root types by total time descending
         sorted_root_types = sorted(
             root_by_type.items(),
             key=lambda x: -sum(
@@ -973,18 +966,18 @@ class ReportGenerator:
         for rtype, rlist in sorted_root_types:
             root_times = [(s.total_kernel_time if mode == "full" else s.total_cpu_op_time)
                           for s in rlist]
-            self._write_type_row(ws2, type_row, rtype, 0, len(rlist),
-                                 root_times, grand_total, bold=True)
-            type_row += 1
-            # Use representative (instance_id=1 or first) for children hierarchy
             rep = next((s for s in rlist if s.instance_id == 1), rlist[0])
             rep_time = rep.total_kernel_time if mode == "full" else rep.total_cpu_op_time
+            root_rep_kernel = self._get_rep_kernel(rep, mode)
+            self._write_type_row(ws_ov, type_row, rtype, 0, len(rlist),
+                                 root_times, grand_total, bold=True,
+                                 rep_kernel=root_rep_kernel)
+            type_row += 1
             if rep.children_stats:
-                type_row = self._write_children_hierarchy(
-                    ws2, rep, mode, type_row, rep_time, stats_list)
-        ws2.column_dimensions["A"].width = 40
-        # Move Summary to be the first tab
-        wb.move_sheet(ws2, offset=-1)
+                type_row, _ = self._write_children_hierarchy(
+                    ws_ov, rep, mode, type_row, rep_time, stats_list)
+        ws_ov.column_dimensions["A"].width = 40
+        ws_ov.column_dimensions["J"].width = 80
 
         # --- Module Tree tab (full tree with collapsible outline groups) ---
         ws_tree = wb.create_sheet(title="Module Tree")
@@ -1008,51 +1001,39 @@ class ReportGenerator:
         ws_tree.column_dimensions["A"].width = 50
         ws_tree.column_dimensions["D"].width = 60
 
-        # --- Kernel Breakdown sheet: per-module kernel name aggregation ---
-        ws3 = wb.create_sheet(title="Kernel Breakdown")
-        bd_headers = ["Module", "Kernel Name", "Category", "Total Duration (us)",
-                       "Count", "Avg (us)", "% of Module", "Phase"]
+        # --- GPU Kernels sheet: global kernel name aggregation ---
+        ws3 = wb.create_sheet(title="GPU Kernels")
+        bd_headers = ["Kernel Name", "Category", "Total Duration (us)",
+                       "Count", "Avg (us)", "% of Total", "Module Types"]
         for col, h in enumerate(bd_headers, 1):
             cell = ws3.cell(row=1, column=col, value=h)
             cell.font = header_font
             cell.fill = header_fill
         bd_row = 2
-        bd_row = self._write_kernel_name_breakdown(ws3, stats_list, mode, bd_row)
-        ws3.column_dimensions["B"].width = 80
-
-        # --- Kernel Detail sheet: one row per kernel with module path ---
-        ws4 = wb.create_sheet(title="Kernel Detail")
-        kd_headers = ["#", "Module Path", "Kernel Name", "Category",
-                       "Duration (us)", "% of Layer", "Timestamp (us)", "Phase",
-                       "Input Dims"]
-        for col, h in enumerate(kd_headers, 1):
-            cell = ws4.cell(row=1, column=col, value=h)
-            cell.font = header_font
-            cell.fill = header_fill
-
-        # Write detail for each top-level module (each forward pass / layer)
-        kd_row = 2
-        for stats in stats_list:
-            kd_row = self._write_kernel_detail_rows(ws4, stats, mode, kd_row)
-
-        # Set kernel name column width
-        ws4.column_dimensions["C"].width = 80
-        ws4.column_dimensions["B"].width = 40
-        ws4.column_dimensions["I"].width = 60
+        bd_row = self._write_kernel_name_breakdown(ws3, stats_list, mode, bd_row,
+                                                   grand_total)
+        ws3.column_dimensions["A"].width = 80
+        ws3.column_dimensions["G"].width = 50
 
         # --- Per-module-type detail sheets ---
         # If --detail-module given, use exactly those; otherwise top N by time
+        type_agg_flat: Dict[str, List[float]] = defaultdict(list)
+        self._collect_by_type(stats_list, type_agg_flat, mode)
+        sorted_types_flat = sorted(type_agg_flat.items(), key=lambda x: -sum(x[1]))
         if detail_modules:
             top_type_names = set(detail_modules)
         else:
-            type_agg_flat: Dict[str, List[float]] = defaultdict(list)
-            self._collect_by_type(stats_list, type_agg_flat, mode)
-            sorted_types_flat = sorted(type_agg_flat.items(), key=lambda x: -sum(x[1]))
             top_type_names = {mtype for mtype, _ in sorted_types_flat[:top_n_types]}
+        # Build rank lookup: module_type -> total time (for ordering tabs)
+        type_total_time = {mtype: sum(times) for mtype, times in sorted_types_flat}
         seen_types: Dict[Tuple[str, str], ModuleStats] = {}
         self._find_median_instance_per_type(stats_list, seen_types, mode,
                                             force_types=top_type_names)
-        for (mtype, phase), rep_stats in sorted(seen_types.items()):
+        # Sort detail tabs by total kernel time descending (highest % first)
+        sorted_detail_items = sorted(
+            seen_types.items(),
+            key=lambda item: -type_total_time.get(item[0][0], 0))
+        for (mtype, phase), rep_stats in sorted_detail_items:
             if mtype not in top_type_names:
                 continue
             # Include phase suffix in sheet name for LLM traces
@@ -1127,13 +1108,117 @@ class ReportGenerator:
             std = 0
         return mean, std, min(times), max(times), total
 
+    @staticmethod
+    def _top_kernel_name(stats: ModuleStats) -> Tuple[str, float]:
+        """Find the kernel name with the highest total duration from self kernels.
+
+        Returns (kernel_name, total_duration).  Aggregates across all instances
+        of the same kernel name within this module's own kernel_details.
+        """
+        if not stats.kernel_details:
+            return "", 0.0
+        by_name: Dict[str, float] = {}
+        for d in stats.kernel_details:
+            by_name[d.name] = by_name.get(d.name, 0.0) + d.duration
+        if not by_name:
+            return "", 0.0
+        best_name = max(by_name, key=by_name.get)  # type: ignore[arg-type]
+        return best_name, by_name[best_name]
+
+    def _collect_global_category_agg(self, stats_list: List[ModuleStats],
+                                     agg: Dict[str, List], mode: str):
+        """Aggregate kernel categories globally: cat -> [total_dur, count]."""
+        for s in stats_list:
+            for d in s.kernel_details:
+                entry = agg.get(d.category)
+                if entry:
+                    entry[0] += d.duration
+                    entry[1] += 1
+                else:
+                    agg[d.category] = [d.duration, 1]
+            self._collect_global_category_agg(s.children_stats, agg, mode)
+
+    def _write_summary_tab(self, ws, stats_list: List[ModuleStats], mode: str,
+                           grand_total: float, total_kernel_count: int,
+                           global_cat_agg: Dict[str, List],
+                           header_font, header_fill, title_font):
+        """Write the Summary tab: top-level metrics, category breakdown, module time split."""
+        from openpyxl.styles import Font, PatternFill, numbers
+
+        row = 1
+
+        # --- Section 1: Top-level metrics ---
+        ws.cell(row=row, column=1, value="Metric").font = header_font
+        ws.cell(row=row, column=2, value="Value (us)").font = header_font
+        ws.cell(row=row, column=3, value="Percentage").font = header_font
+        for c in range(1, 4):
+            ws.cell(row=row, column=c).fill = header_fill
+        row += 1
+
+        ws.cell(row=row, column=1, value="Total Kernel Time")
+        ws.cell(row=row, column=2, value=round(grand_total, 1))
+        ws.cell(row=row, column=3, value="100.0%")
+        ws.cell(row=row, column=1).font = Font(bold=True)
+        row += 1
+
+        # Phase breakdown (prefill/decode if available, otherwise module-level split)
+        root_by_type: Dict[str, List[ModuleStats]] = defaultdict(list)
+        for s in stats_list:
+            root_by_type[s.module_type].append(s)
+        sorted_root_types = sorted(
+            root_by_type.items(),
+            key=lambda x: -sum(
+                (s.total_kernel_time if mode == "full" else s.total_cpu_op_time)
+                for s in x[1]))
+        for rtype, rlist in sorted_root_types:
+            rtype_total = sum(
+                (s.total_kernel_time if mode == "full" else s.total_cpu_op_time)
+                for s in rlist)
+            pct = rtype_total / grand_total * 100 if grand_total > 0 else 0
+            ws.cell(row=row, column=1, value=f"  {rtype}")
+            ws.cell(row=row, column=2, value=round(rtype_total, 1))
+            ws.cell(row=row, column=3, value=f"{pct:.1f}%")
+            row += 1
+
+        row += 1  # blank row
+
+        # --- Section 2: Category breakdown ---
+        ws.cell(row=row, column=1, value="Category").font = header_font
+        ws.cell(row=row, column=2, value="Count").font = header_font
+        ws.cell(row=row, column=3, value="Total (us)").font = header_font
+        ws.cell(row=row, column=4, value="Avg (us)").font = header_font
+        ws.cell(row=row, column=5, value="Percentage").font = header_font
+        for c in range(1, 6):
+            ws.cell(row=row, column=c).fill = header_fill
+        row += 1
+
+        sorted_cats = sorted(global_cat_agg.items(), key=lambda x: -x[1][0])
+        for cat, (dur, cnt) in sorted_cats:
+            pct = dur / grand_total * 100 if grand_total > 0 else 0
+            avg = dur / cnt if cnt > 0 else 0
+            ws.cell(row=row, column=1, value=cat)
+            ws.cell(row=row, column=2, value=cnt)
+            ws.cell(row=row, column=3, value=round(dur, 1))
+            ws.cell(row=row, column=4, value=round(avg, 1))
+            ws.cell(row=row, column=5, value=f"{pct:.1f}%")
+            row += 1
+
+        # Column widths
+        ws.column_dimensions["A"].width = 25
+        ws.column_dimensions["B"].width = 15
+        ws.column_dimensions["C"].width = 18
+        ws.column_dimensions["D"].width = 15
+        ws.column_dimensions["E"].width = 15
+
     def _write_type_row(self, ws, row: int, label: str, depth: int, count: int,
                         times: List[float], parent_time: float,
-                        bold: bool = False, pct_total: Optional[float] = None):
-        """Write one row of the Summary hierarchy with stats columns.
+                        bold: bool = False, pct_total: Optional[float] = None,
+                        rep_kernel: str = ""):
+        """Write one row of the Overview hierarchy with stats columns.
 
         pct_total: if given, use this as the numerator for % of Parent
                    (for children: sum within one parent, not global total).
+        rep_kernel: representative kernel name for this row.
         """
         from openpyxl.styles import Font
         mean, std, tmin, tmax, total = self._time_stats(times)
@@ -1148,8 +1233,9 @@ class ReportGenerator:
         ws.cell(row=row, column=7, value=round(tmax, 1))
         ws.cell(row=row, column=8, value=round(total, 1))
         ws.cell(row=row, column=9, value=round(pct, 1))
+        ws.cell(row=row, column=10, value=rep_kernel)
         if bold:
-            for c in range(1, 10):
+            for c in range(1, 11):
                 ws.cell(row=row, column=c).font = Font(bold=True)
 
     def _collect_all_of_type(self, stats_list: List[ModuleStats],
@@ -1165,10 +1251,15 @@ class ReportGenerator:
     def _write_children_hierarchy(self, ws, rep: ModuleStats, mode: str,
                                   row: int, parent_time: float,
                                   all_stats: List[ModuleStats],
-                                  max_depth: int = 5) -> int:
-        """Recursively write children rows up to max_depth, with cross-instance stats."""
+                                  max_depth: int = 5) -> Tuple[int, str]:
+        """Recursively write children rows up to max_depth, with cross-instance stats.
+
+        Returns (next_row, rep_kernel) where rep_kernel is the representative
+        kernel name from the highest-time child (bubbled up for parent rows).
+        """
         if not rep.children_stats:
-            return row
+            kname, _ = self._top_kernel_name(rep)
+            return row, kname
 
         child_by_type: Dict[str, List[ModuleStats]] = defaultdict(list)
         for child in rep.children_stats:
@@ -1180,11 +1271,18 @@ class ReportGenerator:
                 (c.total_kernel_time if mode == "full" else c.total_cpu_op_time)
                 for c in x[1]))
 
+        rep_self_time = (rep.self_kernel_time if mode == "full"
+                         else rep.self_cpu_op_time)
+        child_depth = rep.depth + 1
+
+        # Track the highest-time child's representative kernel for bubbling up
+        best_child_kernel = ""
+        best_child_time = -1.0
+
         for ctype, clist_in_rep in sorted_children:
-            child_depth = clist_in_rep[0].depth
-            if child_depth > max_depth:
+            cdepth = clist_in_rep[0].depth
+            if cdepth > max_depth:
                 continue
-            # Collect ALL instances of this type across entire tree for stats
             all_of_type = self._collect_all_of_type(all_stats, ctype)
             if all_of_type:
                 child_times = [(c.total_kernel_time if mode == "full" else c.total_cpu_op_time)
@@ -1192,23 +1290,94 @@ class ReportGenerator:
             else:
                 child_times = [(c.total_kernel_time if mode == "full" else c.total_cpu_op_time)
                                for c in clist_in_rep]
-            child_indent = "  " * child_depth
-            # % of parent uses per-rep subtotal (sum within this one parent)
+            child_indent = "    " * cdepth + "├── "
             rep_child_total = sum(
                 (c.total_kernel_time if mode == "full" else c.total_cpu_op_time)
                 for c in clist_in_rep)
-            self._write_type_row(ws, row, f"{child_indent}{ctype}",
-                                 child_depth, len(child_times), child_times,
-                                 parent_time, pct_total=rep_child_total)
-            row += 1
 
-            # Recurse into representative child
+            # Recurse first to get child's rep_kernel before writing this row
             child_rep = next((c for c in clist_in_rep if c.instance_id == 1), clist_in_rep[0])
             child_rep_time = child_rep.total_kernel_time if mode == "full" else child_rep.total_cpu_op_time
-            row = self._write_children_hierarchy(
+
+            # For leaf children (no sub-children), use their own top kernel
+            # For parent children, recurse to get bubbled-up kernel
+            if not child_rep.children_stats:
+                child_kernel, _ = self._top_kernel_name(child_rep)
+            else:
+                # Peek: the recursion below will write sub-rows and return the kernel
+                # We need to write THIS row first, then recurse.
+                # So compute the kernel from the highest-time grandchild.
+                child_kernel = self._get_rep_kernel(child_rep, mode)
+
+            self._write_type_row(ws, row, f"{child_indent}{ctype}",
+                                 cdepth, len(child_times), child_times,
+                                 parent_time, pct_total=rep_child_total,
+                                 rep_kernel=child_kernel)
+            row += 1
+
+            row, _ = self._write_children_hierarchy(
                 ws, child_rep, mode, row, child_rep_time, all_stats, max_depth)
 
-        return row
+            if rep_child_total > best_child_time:
+                best_child_time = rep_child_total
+                best_child_kernel = child_kernel
+
+        # Add "(self)" row if self_time is significant (>0.5% of parent)
+        if rep_self_time > 0 and parent_time > 0:
+            self_pct = rep_self_time / parent_time * 100
+            if self_pct >= 0.5:
+                self_indent = "    " * child_depth + "└── "
+                from openpyxl.styles import Font
+                self_kernel, _ = self._top_kernel_name(rep)
+                self._write_type_row(
+                    ws, row, f"{self_indent}(self)", child_depth, 1,
+                    [rep_self_time], parent_time, pct_total=rep_self_time,
+                    rep_kernel=self_kernel)
+                for c in range(1, 11):
+                    ws.cell(row=row, column=c).font = Font(italic=True, color="888888")
+                row += 1
+                if rep_self_time > best_child_time:
+                    best_child_kernel = self_kernel
+
+        return row, best_child_kernel
+
+    def _get_rep_kernel(self, stats: ModuleStats, mode: str) -> str:
+        """Get representative kernel name by following the highest-time child type
+        down the tree until a leaf is reached.
+
+        Groups children by module_type (matching the Summary sheet's grouping)
+        so that e.g. 4 WanUpBlock instances are summed together before comparing
+        against self_time.
+        """
+        if not stats.children_stats:
+            kname, _ = self._top_kernel_name(stats)
+            return kname
+
+        # Group children by type and sum their times
+        child_by_type: Dict[str, List[ModuleStats]] = defaultdict(list)
+        for c in stats.children_stats:
+            child_by_type[c.module_type].append(c)
+
+        best_type = ""
+        best_type_time = 0.0
+        best_type_rep: Optional[ModuleStats] = None
+        for ctype, clist in child_by_type.items():
+            type_total = sum(
+                c.total_kernel_time if mode == "full" else c.total_cpu_op_time
+                for c in clist)
+            if type_total > best_type_time:
+                best_type_time = type_total
+                best_type = ctype
+                best_type_rep = next(
+                    (c for c in clist if c.instance_id == 1), clist[0])
+
+        self_time = stats.self_kernel_time if mode == "full" else stats.self_cpu_op_time
+
+        if self_time > best_type_time or best_type_rep is None:
+            kname, _ = self._top_kernel_name(stats)
+            return kname
+
+        return self._get_rep_kernel(best_type_rep, mode)
 
     def _write_tree_rows(self, ws, stats: ModuleStats, mode: str,
                          row: int, depth: int, max_depth: int = 3) -> int:
@@ -1222,7 +1391,7 @@ class ReportGenerator:
         count = stats.kernel_count if mode == "full" else stats.cpu_op_count
         phase = getattr(stats, "phase", "")
 
-        indent = "  " * depth
+        indent = ("    " * depth + "├── ") if depth > 0 else ""
         ws.cell(row=row, column=1, value=f"{indent}{stats.name}")
         ws.cell(row=row, column=2, value=round(time_val, 1))
         ws.cell(row=row, column=3, value=count)
@@ -1249,55 +1418,6 @@ class ReportGenerator:
         for child in stats.children_stats:
             row = self._write_tree_rows(ws, child, mode, row, depth + 1)
 
-        return row
-
-    def _write_stats_rows(self, ws, stats_list: List[ModuleStats], mode: str,
-                          row: int, path_prefix: str) -> int:
-        for s in stats_list:
-            if row > MAX_ROWS_PER_TAB + 1:
-                ws.cell(row=row, column=1, value=f"... truncated at {MAX_ROWS_PER_TAB} rows")
-                return row + 1
-            path = f"{path_prefix}/{s.name}" if path_prefix else s.name
-            time_val = s.total_kernel_time if mode == "full" else s.total_cpu_op_time
-            self_time = s.self_kernel_time if mode == "full" else s.self_cpu_op_time
-            count = s.kernel_count if mode == "full" else s.cpu_op_count
-            phase = getattr(s, "phase", "")
-            ws.cell(row=row, column=1, value=path)
-            ws.cell(row=row, column=2, value=s.module_type)
-            ws.cell(row=row, column=3, value=s.instance_id)
-            ws.cell(row=row, column=4, value=s.depth)
-            ws.cell(row=row, column=5, value=round(time_val, 1))
-            ws.cell(row=row, column=6, value=round(self_time, 1))
-            ws.cell(row=row, column=7, value=count)
-            ws.cell(row=row, column=8, value=phase)
-            row += 1
-            row = self._write_stats_rows(ws, s.children_stats, mode, row, path)
-        return row
-
-    def _write_kernel_detail_rows(self, ws, stats: ModuleStats, mode: str,
-                                  row: int) -> int:
-        """Write kernel detail rows for a module and its descendants."""
-        if row > MAX_ROWS_PER_TAB + 1:
-            return row
-        all_details = self._collect_all_details(stats)
-        all_details.sort(key=lambda d: d.ts)
-        time_val = stats.total_kernel_time if mode == "full" else stats.total_cpu_op_time
-        for i, d in enumerate(all_details, 1):
-            if row > MAX_ROWS_PER_TAB + 1:
-                ws.cell(row=row, column=1, value=f"... truncated at {MAX_ROWS_PER_TAB} rows")
-                row += 1
-                return row
-            pct = d.duration / time_val * 100 if time_val > 0 else 0
-            ws.cell(row=row, column=1, value=i)
-            ws.cell(row=row, column=2, value=d.module_path)
-            ws.cell(row=row, column=3, value=d.name)
-            ws.cell(row=row, column=4, value=d.category)
-            ws.cell(row=row, column=5, value=round(d.duration, 1))
-            ws.cell(row=row, column=6, value=round(pct, 1))
-            ws.cell(row=row, column=7, value=round(d.ts, 1))
-            ws.cell(row=row, column=8, value=d.phase)
-            ws.cell(row=row, column=9, value=d.input_dims)
-            row += 1
         return row
 
     def _find_median_instance_per_type(self, stats_list: List[ModuleStats],
@@ -1336,48 +1456,44 @@ class ReportGenerator:
             self._collect_instances_by_type(s.children_stats, out)
 
     def _write_kernel_name_breakdown(self, ws, stats_list: List[ModuleStats],
-                                     mode: str, row: int) -> int:
-        """Write kernel name breakdown sorted globally by total duration (highest first)."""
-        # Collect all (module, kernel_name) aggregations across the entire tree
-        all_rows: List[Tuple[str, str, str, float, int, float, str]] = []
-        self._collect_kernel_name_rows(stats_list, mode, all_rows)
-        # Sort by total duration descending, then avg descending
-        all_rows.sort(key=lambda x: (-x[3], -x[5]))
-        truncated = len(all_rows) > MAX_ROWS_PER_TAB
-        all_rows = all_rows[:MAX_ROWS_PER_TAB]
-        for module, kname, cat, dur, cnt, pct, phase in all_rows:
-            ws.cell(row=row, column=1, value=module)
-            ws.cell(row=row, column=2, value=kname)
-            ws.cell(row=row, column=3, value=cat)
-            ws.cell(row=row, column=4, value=round(dur, 1))
-            ws.cell(row=row, column=5, value=cnt)
-            ws.cell(row=row, column=6, value=round(dur / cnt, 1))
-            ws.cell(row=row, column=7, value=round(pct, 1))
-            ws.cell(row=row, column=8, value=phase)
+                                     mode: str, row: int,
+                                     grand_total: float) -> int:
+        """Write kernel name breakdown aggregated globally (one row per unique kernel name)."""
+        # Aggregate across entire tree: kernel_name -> (total_dur, count, category, module_types)
+        global_agg: Dict[str, List] = {}  # name -> [dur, count, category, set(module_types)]
+        self._collect_global_kernel_agg(stats_list, global_agg)
+
+        sorted_kernels = sorted(global_agg.items(), key=lambda x: -x[1][0])
+        truncated = len(sorted_kernels) > MAX_ROWS_PER_TAB
+        sorted_kernels = sorted_kernels[:MAX_ROWS_PER_TAB]
+        for kname, (dur, cnt, cat, mtypes) in sorted_kernels:
+            pct = dur / grand_total * 100 if grand_total > 0 else 0
+            ws.cell(row=row, column=1, value=kname)
+            ws.cell(row=row, column=2, value=cat)
+            ws.cell(row=row, column=3, value=round(dur, 1))
+            ws.cell(row=row, column=4, value=cnt)
+            ws.cell(row=row, column=5, value=round(dur / cnt, 1) if cnt > 0 else 0)
+            ws.cell(row=row, column=6, value=round(pct, 1))
+            ws.cell(row=row, column=7, value=", ".join(sorted(mtypes)))
             row += 1
         if truncated:
             ws.cell(row=row, column=1, value=f"... truncated at {MAX_ROWS_PER_TAB} rows")
             row += 1
         return row
 
-    def _collect_kernel_name_rows(self, stats_list: List[ModuleStats], mode: str,
-                                  out: List[Tuple]):
-        """Recursively collect per-module kernel name aggregations."""
+    def _collect_global_kernel_agg(self, stats_list: List[ModuleStats],
+                                   agg: Dict[str, List]):
+        """Recursively aggregate kernel durations globally by kernel name."""
         for s in stats_list:
-            time_val = s.total_kernel_time if mode == "full" else s.total_cpu_op_time
-            if s.kernel_details and time_val > 0:
-                name_agg: Dict[str, Tuple[float, int, str]] = {}
-                for d in s.kernel_details:
-                    prev = name_agg.get(d.name)
-                    if prev:
-                        name_agg[d.name] = (prev[0] + d.duration, prev[1] + 1, d.category)
-                    else:
-                        name_agg[d.name] = (d.duration, 1, d.category)
-                phase = getattr(s, "phase", "")
-                for kname, (dur, cnt, cat) in name_agg.items():
-                    pct = dur / time_val * 100 if time_val > 0 else 0
-                    out.append((s.name, kname, cat, dur, cnt, pct, phase))
-            self._collect_kernel_name_rows(s.children_stats, mode, out)
+            for d in s.kernel_details:
+                entry = agg.get(d.name)
+                if entry:
+                    entry[0] += d.duration
+                    entry[1] += 1
+                    entry[3].add(s.module_type)
+                else:
+                    agg[d.name] = [d.duration, 1, d.category, {s.module_type}]
+            self._collect_global_kernel_agg(s.children_stats, agg)
 
 
 # ---------------------------------------------------------------------------
