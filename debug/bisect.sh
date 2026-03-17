@@ -303,7 +303,7 @@ run_profile_eval() {
     eval_json=$(python3 "$EVALUATE_SCRIPT" "$excel_path" --json 2>/dev/null) || return 4
     echo "$eval_json" > "${analysis_dir}/evaluation.json"
 
-    # Extract S1-S4 scores from JSON (evaluate_parsing may print extra lines after JSON)
+    # Extract S1-S4 scores from JSON (evaluate_module_parsing may print extra lines after JSON)
     PROFILE_SCORES=$(echo "$eval_json" | python3 -c "
 import sys, json, json.decoder
 raw = sys.stdin.read()

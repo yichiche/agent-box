@@ -16,17 +16,6 @@ Raw Trace (.trace.json.gz)
         (standalone, or enriches trace_module_analyzer output)
 ```
 
-### Legacy Pipeline (still used by perf-regression)
-
-The perf-regression orchestrator, bisect.sh, and benchmark scripts still call these:
-
-```
-trace_analyzer.py  ──► profile.csv.xlsx   (rule-based per-layer kernel breakdown)
-evaluate_parsing.py ──► evaluation_summary.csv  (quality scores for trace_analyzer output)
-```
-
-These scripts are kept for backward compatibility but are **not** the primary analysis tools.
-
 ## Tools Reference
 
 ### trace_module_analyzer.py — Primary Trace Parser
@@ -81,20 +70,12 @@ python3 /home/yichiche/agent-box/profile/model_inspector.py --trace trace.json.g
 python3 /home/yichiche/agent-box/profile/model_inspector.py --trace trace.json.gz --arch-diagram --detailed
 ```
 
-### trace_analyzer.py — Legacy Rule-Based Parser
+### evaluate_module_parsing.py — Quality Evaluator
 
-> **Note:** This is the older regex/rule-based trace parser. It is kept because the perf-regression pipeline (`debug/perf-regression/orchestrator.py`, `debug/bisect.sh`, `benchmark/run-local-benchmark-e2e.sh`) still depends on its CLI and Excel output format. For new analysis, use `trace_module_analyzer.py` instead.
-
-```bash
-python3 /home/yichiche/agent-box/profile/trace_analyzer.py trace.json.gz -o output.xlsx
-```
-
-### evaluate_parsing.py — Legacy Quality Evaluator
-
-> **Note:** Evaluates the output of `trace_analyzer.py`. Kept for perf-regression pipeline compatibility.
+Evaluates the output of `trace_module_analyzer.py`. Used by the perf-regression pipeline for quality gating.
 
 ```bash
-python3 /home/yichiche/agent-box/profile/evaluate_parsing.py output.xlsx --json
+python3 /home/yichiche/agent-box/profile/evaluate_module_parsing.py report.xlsx --json
 ```
 
 ## Output File Formats
@@ -107,20 +88,9 @@ An Excel workbook with module-level kernel breakdown:
 - **Module type sheets**: Per-module-type detail with kernel lists, timing, and percentages
 - **Model Info sheet** (with `--config`): HuggingFace model configuration details
 
-### trace_analyzer.py Output (profile.csv.xlsx) — Legacy
+### evaluation.json — Quality Assessment
 
-An Excel workbook with per-layer kernel breakdown:
-
-- **Summary sheet**: Overall stats — total kernel time, prefill/decode split, time breakdown by kernel type (attention, MoE, quantization, communication, linear, memory, other), per-layer table
-- **Layer_N sheets**: Detailed kernel sequence per detected layer
-
-**Key layer types**: `MLA+MoE`, `MLA+FC`, `MHA+MoE`, `MHA+FC`, `GDN+MoE`, `GDN+FC`
-**Key stages**: `prefill`, `decode`
-**Key kernel types**: `attention`, `moe`, `quantization`, `communication`, `linear`, `memory`, `other`
-
-### evaluation_summary.csv — Legacy Quality Assessment
-
-CSV with structural scores (S1-S4), per-group metrics, and overall composite score. Produced by `evaluate_parsing.py` from `trace_analyzer.py` output. Used by perf-regression pipeline for quality gating.
+JSON with structural scores (S1-S4), per-group metrics, and overall composite score. Produced by `evaluate_module_parsing.py` from `trace_module_analyzer.py` output. Used by perf-regression pipeline for quality gating.
 
 ## Typical Benchmark Run Directory Layout
 
@@ -136,10 +106,9 @@ Benchmark runs are stored under `/home/yichiche/benchmark_runs/`. A typical prof
 ├── version_snapshot.json               (version metadata)
 └── trace_analysis/
     ├── *.trace.json.gz                 (raw trace file)
-    ├── profile.csv.xlsx                (legacy trace_analyzer output)
-    ├── trace_analyzer.log              (legacy analysis log)
-    ├── evaluation_summary.csv          (legacy quality scores)
-    └── evaluate_parsing.log            (legacy quality diagnostics)
+    ├── analysis.xlsx                   (trace_module_analyzer output)
+    ├── trace_analyzer.log              (analysis log)
+    └── evaluation.json                 (quality scores)
 ```
 
 ## How to Analyze Profiling Data
@@ -160,7 +129,7 @@ For new analysis, use `trace_module_analyzer.py`:
 python3 /home/yichiche/agent-box/profile/trace_module_analyzer.py /path/to/trace.json.gz -o report.xlsx -v
 ```
 
-For existing legacy analysis, read the `profile.csv.xlsx` and `evaluation_summary.csv` files that were already generated.
+For existing analysis, read the `analysis.xlsx` and `evaluation.json` files in the `trace_analysis/` subdirectory.
 
 ### Step 3: Answer the user's question
 
@@ -171,9 +140,9 @@ Common questions and how to answer them:
 | "What modules take the most time?" | trace_module_analyzer summary sheet |
 | "What kernels run in module X?" | trace_module_analyzer --detail-module X |
 | "What's the model architecture?" | model_inspector --profiler-tree or --arch-diagram |
-| "What's the prefill/decode split?" | Legacy: profile.csv.xlsx Summary sheet |
-| "Is the trace parsing reliable?" | Legacy: evaluation_summary.csv overall score |
-| "Which layers are outliers?" | Legacy: evaluate_parsing.log outlier section |
+| "What's the prefill/decode split?" | trace_module_analyzer summary sheet |
+| "Is the trace parsing reliable?" | evaluate_module_parsing --json overall score |
+| "Which layers are outliers?" | evaluate_module_parsing --json structural rules |
 
 ## Key Concepts
 

@@ -19,9 +19,7 @@ Raw Trace (.trace.json.gz)
   └─► model_inspector.py ──► model structure tree / architecture diagrams
         (standalone, or enriches trace_module_analyzer output)
 
-Legacy (used by perf-regression pipeline):
-  trace_analyzer.py  ──► profile.csv.xlsx
-  evaluate_parsing.py ──► evaluation_summary.csv
+evaluate_module_parsing.py ──► evaluation.json  (quality scores for trace_module_analyzer output)
 ```
 
 ## Output File Formats
@@ -33,20 +31,9 @@ An Excel workbook with module-level kernel breakdown:
 - **Module type sheets**: Per-module-type detail with kernel lists, timing, and percentages
 - **Model Info sheet** (with `--config`): HuggingFace model configuration details
 
-### profile.csv.xlsx — Per-Layer Kernel Breakdown (Legacy trace_analyzer output)
+### evaluation.json — Parsing Quality Assessment
 
-An Excel workbook produced by `trace_analyzer.py`. Contains:
-
-- **Summary sheet**: Overall stats — total kernel time, prefill/decode split, time breakdown by kernel type (attention, MoE, quantization, communication, linear, memory, other), and a per-layer table.
-- **Layer_N sheets** (one per detected layer): Detailed kernel sequence for that layer.
-
-**Key layer types**: `MLA+MoE`, `MLA+FC`, `MHA+MoE`, `MHA+FC`, `GDN+MoE`, `GDN+FC`
-**Key stages**: `prefill`, `decode`
-**Key kernel types**: `attention`, `moe`, `quantization`, `communication`, `linear`, `memory`, `other`
-
-### evaluation_summary.csv — Parsing Quality Assessment (Legacy)
-
-CSV with columns: `section, metric, score, grade, detail`. Produced by `evaluate_parsing.py` from `trace_analyzer.py` output. Used by perf-regression pipeline.
+JSON with structural scores (S1-S4), per-group metrics, and overall composite score. Produced by `evaluate_module_parsing.py` from `trace_module_analyzer.py` output. Used by perf-regression pipeline for quality gating.
 
 ### *.trace.json.gz — Raw Torch Profiler Trace
 
@@ -66,10 +53,9 @@ Benchmark runs are stored under `/home/yichiche/benchmark_runs/`. A typical prof
 ├── version_snapshot.json               (version metadata)
 └── trace_analysis/
     ├── *.trace.json.gz                 (raw trace file)
-    ├── profile.csv.xlsx                (legacy trace_analyzer output)
-    ├── trace_analyzer.log              (legacy analysis log)
-    ├── evaluation_summary.csv          (legacy quality scores)
-    └── evaluate_parsing.log            (legacy quality diagnostics)
+    ├── analysis.xlsx                   (trace_module_analyzer output)
+    ├── trace_analyzer.log              (analysis log)
+    └── evaluation.json                 (quality scores)
 ```
 
 ## How to Analyze Profiling Data
@@ -90,7 +76,7 @@ python3 /home/yichiche/agent-box/profile/trace_module_analyzer.py trace.json.gz 
 python3 /home/yichiche/agent-box/profile/trace_module_analyzer.py trace.json.gz --show-tree
 ```
 
-For existing legacy analysis, read the `profile.csv.xlsx` and `evaluation_summary.csv` files.
+For existing analysis, read the `analysis.xlsx` and `evaluation.json` files in the `trace_analysis/` subdirectory.
 
 ### Step 3: Answer the user's question
 
@@ -99,9 +85,9 @@ For existing legacy analysis, read the `profile.csv.xlsx` and `evaluation_summar
 | "What modules take the most time?" | trace_module_analyzer summary sheet |
 | "What kernels run in module X?" | trace_module_analyzer --detail-module X |
 | "What's the model architecture?" | model_inspector --profiler-tree or --arch-diagram |
-| "What's the prefill/decode split?" | Legacy: profile.csv.xlsx Summary sheet |
-| "Is the trace parsing reliable?" | Legacy: evaluation_summary.csv overall score |
-| "Which layers are outliers?" | Legacy: evaluate_parsing.log outlier section |
+| "What's the prefill/decode split?" | trace_module_analyzer summary sheet |
+| "Is the trace parsing reliable?" | evaluate_module_parsing --json overall score |
+| "Which layers are outliers?" | evaluate_module_parsing --json structural rules |
 
 ## Running the Tools
 
@@ -116,9 +102,8 @@ python3 /home/yichiche/agent-box/profile/fix_rocm_trace_flow.py trace.json.gz -o
 python3 /home/yichiche/agent-box/profile/model_inspector.py /path/to/model.py --config config.json
 python3 /home/yichiche/agent-box/profile/model_inspector.py --trace trace.json.gz --arch-diagram
 
-# Legacy: Rule-based trace analysis (used by perf-regression pipeline)
-python3 /home/yichiche/agent-box/profile/trace_analyzer.py /path/to/trace.json.gz -o output.xlsx
-python3 /home/yichiche/agent-box/profile/evaluate_parsing.py output.xlsx --json
+# Quality evaluation
+python3 /home/yichiche/agent-box/profile/evaluate_module_parsing.py report.xlsx --json
 ```
 
 ## Key Concepts
@@ -136,6 +121,6 @@ python3 /home/yichiche/agent-box/profile/evaluate_parsing.py output.xlsx --json
 
 - Profile Excel files can be large (1+ MB with 20,000+ layer sheets). Read selectively — start with the Summary sheet, then drill into specific layers.
 - Raw trace files are very large (30-100+ MB compressed). Do NOT attempt to read them directly. Use the analysis tools to process them.
-- The legacy evaluation score uses 85 as the default pass threshold. Scores below this indicate structural parsing issues.
+- The evaluation score uses 85 as the default pass threshold. Scores below this indicate structural parsing issues.
 
 If the user provided `$ARGUMENTS`, treat it as their specific question or the path to profiling data to analyze.

@@ -94,8 +94,8 @@ env.sh       — Central environment config (HOST_HOME, AGENT_BOX_DIR)
 ## Profiling & Trace Analysis
 
 - When analyzing profiling outputs (trace Excel, evaluation CSV, raw traces, kernel performance), use `/profile` or see `profile/profile.md`.
-- Primary trace parser: `trace_module_analyzer.py` (nn.Module correlation-based).
-- Legacy parser: `trace_analyzer.py` (regex/rule-based, still used by perf-regression pipeline).
+- Trace parser: `trace_module_analyzer.py` (nn.Module correlation-based).
+- Quality evaluator: `evaluate_module_parsing.py` (structural scoring for trace_module_analyzer output).
 
 ## Skills (Slash Commands)
 
