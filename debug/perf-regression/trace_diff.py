@@ -3,6 +3,8 @@
 Wraps the core logic from agent-box/benchmark/compare_traces.py for use by
 the orchestrator (auto-compare after profiling) and the dashboard API
 (on-demand comparison).
+
+Works with trace_module_analyzer.py output (per-module-type detail sheets).
 """
 
 import json
@@ -35,8 +37,8 @@ def _serialize_group(g) -> dict:
     if g.representative and g.representative.entries:
         rep = g.representative
         result["representative"] = {
-            "layer_a_idx": rep.layer_a.layer_idx,
-            "layer_b_idx": rep.layer_b.layer_idx,
+            "module_type_a": rep.layer_a.layer_type,
+            "module_type_b": rep.layer_b.layer_type,
             "similarity": round(rep.similarity, 4),
             "match_method": rep.match_method,
             "entries": [
@@ -55,9 +57,9 @@ def _serialize_group(g) -> dict:
         }
 
     if g.only_layers:
-        result["only_layers"] = [
-            {"layer_idx": l.layer_idx, "n_kernels": len(l.kernels)}
-            for l in g.only_layers
+        result["only_modules"] = [
+            {"module_type": m.layer_type, "phase": m.stage, "n_kernels": len(m.kernels)}
+            for m in g.only_layers
         ]
 
     return result
@@ -85,14 +87,15 @@ def compare_trace_files(file_a: str, file_b: str) -> Optional[dict]:
         return None
 
     try:
-        layers_a = parse_excel(str(path_a))
-        layers_b = parse_excel(str(path_b))
+        modules_a = parse_excel(str(path_a))
+        modules_b = parse_excel(str(path_b))
 
-        if not layers_a or not layers_b:
-            logger.warning("Empty layer data: A=%d layers, B=%d layers", len(layers_a), len(layers_b))
+        if not modules_a or not modules_b:
+            logger.warning("Empty module data: A=%d modules, B=%d modules",
+                           len(modules_a), len(modules_b))
             return None
 
-        matched, only_a, only_b = match_layers(layers_a, layers_b)
+        matched, only_a, only_b = match_layers(modules_a, modules_b)
 
         pair_results = [diff_pair(a, b, method) for a, b, method in matched]
 
@@ -108,8 +111,8 @@ def compare_trace_files(file_a: str, file_b: str) -> Optional[dict]:
         return {
             "file_a": str(path_a),
             "file_b": str(path_b),
-            "layers_a": len(layers_a),
-            "layers_b": len(layers_b),
+            "modules_a": len(modules_a),
+            "modules_b": len(modules_b),
             "matched_pairs": len(matched),
             "has_changes": has_changes,
             "summary": {

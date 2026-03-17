@@ -18,11 +18,10 @@ BUILD_SCRIPT=""
 PORT="30000"
 MODEL_PATH=""
 TIMEOUT="600"
-EXPORT_LAYERS="58-65"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENT_BOX_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-TRACE_ANALYZER_SCRIPT="${AGENT_BOX_DIR}/profile/trace_analyzer.py"
-EVALUATE_SCRIPT="${AGENT_BOX_DIR}/profile/evaluate_parsing.py"
+TRACE_ANALYZER_SCRIPT="${AGENT_BOX_DIR}/profile/trace_module_analyzer.py"
+EVALUATE_SCRIPT="${AGENT_BOX_DIR}/profile/evaluate_module_parsing.py"
 PROFILE_REF_CSV=""  # auto-generated from good commit
 
 # ── Usage ────────────────────────────────────────────────────────────────────
@@ -47,7 +46,7 @@ Options:
   --port <int>                 Server port (default: 30000)
   --model-path <path>          Model path, exported to server/client scripts
   --timeout <seconds>          Health check timeout (default: 600)
-  --export-layers <range>      profile mode: layers to export for trace analysis (default: 58-65)
+  --export-layers <range>      (deprecated, ignored)
 
 Modes:
   launch    - Test if the server starts successfully
@@ -104,8 +103,8 @@ fi
 if [[ "$MODE" == "profile" ]]; then
     [[ -n "$CLIENT_SCRIPT" ]] || fail "--client-script is required for profile mode"
     [[ -f "$CLIENT_SCRIPT" ]] || fail "--client-script not found: $CLIENT_SCRIPT"
-    [[ -f "$TRACE_ANALYZER_SCRIPT" ]] || fail "trace_analyzer.py not found: $TRACE_ANALYZER_SCRIPT"
-    [[ -f "$EVALUATE_SCRIPT" ]] || fail "evaluate_parsing.py not found: $EVALUATE_SCRIPT"
+    [[ -f "$TRACE_ANALYZER_SCRIPT" ]] || fail "trace_module_analyzer.py not found: $TRACE_ANALYZER_SCRIPT"
+    [[ -f "$EVALUATE_SCRIPT" ]] || fail "evaluate_module_parsing.py not found: $EVALUATE_SCRIPT"
 fi
 
 if [[ "$MODE" == "accuracy" ]]; then
@@ -293,14 +292,13 @@ run_profile_eval() {
     local trace_dir
     trace_dir=$(dirname "$trace_file")
 
-    # Run trace_analyzer
+    # Run trace_module_analyzer
     python3 "$TRACE_ANALYZER_SCRIPT" "$trace_file" \
-        --export-csv "${analysis_dir}/profile.csv" \
-        --export-layers "$EXPORT_LAYERS" \
+        -o "${analysis_dir}/analysis.xlsx" \
         > "${analysis_dir}/trace_analyzer.log" 2>&1 || return 3
 
-    # Run evaluate_parsing (Excel is created next to the --export-csv path)
-    local excel_path="${analysis_dir}/profile.csv.xlsx"
+    # Run evaluate_module_parsing on the generated xlsx
+    local excel_path="${analysis_dir}/analysis.xlsx"
     local eval_json
     eval_json=$(python3 "$EVALUATE_SCRIPT" "$excel_path" --json 2>/dev/null) || return 4
     echo "$eval_json" > "${analysis_dir}/evaluation.json"
@@ -315,7 +313,7 @@ except json.decoder.JSONDecodeError:
     dec = json.JSONDecoder()
     d, _ = dec.raw_decode(raw)
 sr = d['structural_rules']
-print(f\"S1:{sr['s1_prefill_ordering']['score']} S2:{sr['s2_architecture_sig']['score']} S3:{sr['s3_round_consistency']['score']} S4:{sr['s4_type_sequence']['score']}\")
+print(f\"S1:{sr['s1_phase_coverage']['score']} S2:{sr['s2_architecture_sig']['score']} S3:{sr['s3_instance_consistency']['score']} S4:{sr['s4_time_distribution']['score']}\")
 " 2>/dev/null) || return 5
 
     # Cleanup trace file to save disk

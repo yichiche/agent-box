@@ -869,21 +869,24 @@ if (( PROFILE_MODE == 1 )); then
     log "Running trace analyzer in container"
     docker_cmd exec "$CONTAINER_NAME" mkdir -p "$CONTAINER_TRACE_ANALYSIS_DIR"
     docker_cmd exec "$CONTAINER_NAME" pip install openpyxl -q
-    docker_cmd cp "${AGENT_BOX_DIR}/profile/trace_analyzer.py" \
-      "${CONTAINER_NAME}:/tmp/trace_analyzer.py"
+    docker_cmd cp "${AGENT_BOX_DIR}/profile/trace_module_analyzer.py" \
+      "${CONTAINER_NAME}:/tmp/trace_module_analyzer.py"
+    # Copy optional dependency for ROCm trace fixing
+    if [[ -f "${AGENT_BOX_DIR}/profile/fix_rocm_trace_flow.py" ]]; then
+      docker_cmd cp "${AGENT_BOX_DIR}/profile/fix_rocm_trace_flow.py" \
+        "${CONTAINER_NAME}:/tmp/fix_rocm_trace_flow.py"
+    fi
     docker_cmd exec "$CONTAINER_NAME" bash -lc \
-      "python3 /tmp/trace_analyzer.py $(quote_one "$TRACE_PATH_IN_CONTAINER") \
-      --export-csv $(quote_one "${CONTAINER_TRACE_ANALYSIS_DIR}/profile.csv") \
-      --export-layers 58-65 \
-      --debug-layers 2-5 \
+      "cd /tmp && python3 /tmp/trace_module_analyzer.py $(quote_one "$TRACE_PATH_IN_CONTAINER") \
+      -o $(quote_one "${CONTAINER_TRACE_ANALYSIS_DIR}/analysis.xlsx") \
       > $(quote_one "${CONTAINER_TRACE_ANALYSIS_DIR}/trace_analyzer.log") 2>&1"
-    # Run evaluate_parsing.py on the exported xlsx
-    EXCEL_PATH_IN_CONTAINER="${CONTAINER_TRACE_ANALYSIS_DIR}/profile.csv.xlsx"
+    # Run evaluate_module_parsing.py on the exported xlsx
+    EXCEL_PATH_IN_CONTAINER="${CONTAINER_TRACE_ANALYSIS_DIR}/analysis.xlsx"
     log "Running parsing quality evaluation"
-    docker_cmd cp "${AGENT_BOX_DIR}/profile/evaluate_parsing.py" \
-      "${CONTAINER_NAME}:/tmp/evaluate_parsing.py"
+    docker_cmd cp "${AGENT_BOX_DIR}/profile/evaluate_module_parsing.py" \
+      "${CONTAINER_NAME}:/tmp/evaluate_module_parsing.py"
     docker_cmd exec "$CONTAINER_NAME" bash -lc \
-      "python3 /tmp/evaluate_parsing.py $(quote_one "$EXCEL_PATH_IN_CONTAINER") \
+      "python3 /tmp/evaluate_module_parsing.py $(quote_one "$EXCEL_PATH_IN_CONTAINER") \
       2>&1 | tee $(quote_one "${CONTAINER_TRACE_ANALYSIS_DIR}/evaluate_parsing.log")" || true
     mkdir -p "$HOST_TRACE_ANALYSIS_DIR"
     docker_cmd cp "${CONTAINER_NAME}:${TRACE_PATH_IN_CONTAINER}" \
