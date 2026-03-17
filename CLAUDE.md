@@ -16,7 +16,6 @@ After cloning, run setup (initializes submodules, activates git hooks):
 ```bash
 bash setup-hooks.sh
 ```
-This automatically pulls the latest tagged release of `profile/` (torch-profiler-parser). To update it later: `bash update-profile.sh`.
 
 ## Commit & PR Conventions
 
