@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# Activate local git hooks from .githooks/
+# Initialize submodules and activate local git hooks
+git submodule update --init
 git config core.hooksPath .githooks
 chmod +x .githooks/*
-echo "Git hooks activated from .githooks/"
-
-# Update profile/ submodule to latest tagged release
-bash "$(dirname "${BASH_SOURCE[0]}")/update-profile.sh"
+echo "Setup complete: submodules initialized, git hooks activated."
