@@ -37,11 +37,14 @@ Based on the commit-msg hook analysis from Step 1:
 - **If no commit-msg hook exists or it doesn't enforce a tag format**:
   Use `[AMD]` as the default prefix.
 
-## Step 3: Ensure we are on a feature branch (NOT main/master)
+## Step 3: Branching strategy (repo-dependent)
 
-If the current branch is `main` or `master`:
-1. Determine a short, descriptive branch name based on the changes (e.g., `fix-mla-bf16-attention`, `add-rocm-triton-kernel`)
-2. Create and switch to the new branch: `git checkout -b <branch-name>`
+First, determine which repo you are in by running `git rev-parse --show-toplevel`.
+
+- **If in `/home/yichiche/agent-box`** (the agent-box repo): commit directly on `main`. Do NOT create a feature branch.
+- **Otherwise** (e.g., sglang or any other repo): if the current branch is `main` or `master`, create a feature branch:
+  1. Determine a short, descriptive branch name based on the changes (e.g., `fix-mla-bf16-attention`, `add-rocm-triton-kernel`)
+  2. Create and switch to the new branch: `git checkout -b <branch-name>`
 
 If already on a feature branch, stay on it.
 
