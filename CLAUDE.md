@@ -12,8 +12,9 @@ SGLang is a high-performance serving framework for large language models (LLMs) 
 
 ## Setup
 
-After cloning, activate the git hooks:
+After cloning, initialize submodules and activate the git hooks:
 ```bash
+git submodule update --init --recursive
 bash setup-hooks.sh
 ```
 
@@ -85,7 +86,7 @@ Versions are managed via `setuptools-scm` from git tags. Generated gRPC files (`
 
 ```
 benchmark/   — Performance benchmarking (run, compare, analyze CSVs)
-profile/     — Profiler trace analysis & model structure inspection
+profile/     — Profiler trace analysis & model structure inspection (git submodule → torch-profiler-parser)
 debug/       — Regression detection (perf-regression subsystem)
 configs/     — Shared model configuration files
 env.sh       — Central environment config (HOST_HOME, AGENT_BOX_DIR)
