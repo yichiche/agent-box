@@ -1463,7 +1463,7 @@ class ReportGenerator:
         """Write a 'Model Info' tab: text on the left, arch diagram PNG on the right."""
         from openpyxl.styles import Font, Alignment
 
-        ws = wb.create_sheet(title="Model Info")
+        ws = wb.create_sheet(title="Model Info (WIP)")
 
         row = 1
         ws.cell(row=row, column=1, value="Architecture (text)").font = Font(bold=True, size=12)
@@ -1889,7 +1889,7 @@ class TraceModuleAnalyzer:
                  top_n_types: int = 3, show_tree: bool = False,
                  auto_fix_rocm: bool = True,
                  config_path: Optional[str] = None,
-                 model_info: bool = False):
+                 model_info: bool = True):
         self.trace_path = trace_path
         self.top_n = top_n
         self.output_path = output_path
@@ -2133,6 +2133,9 @@ Examples:
   # LLM trace (CPU-only mode — no kernel events)
   python trace_module_analyzer.py deepseek.trace.json.gz -o report.xlsx
 
+  # Enrich the Model Info tab with HuggingFace config (adds head counts, etc.)
+  python trace_module_analyzer.py trace.json.gz -o report.xlsx --config config.json
+
   # Show kernel-by-kernel detail for a module type (repetitive pattern)
   python trace_module_analyzer.py trace.json.gz --detail-module WanTransformerBlock
 
@@ -2159,12 +2162,8 @@ Examples:
     parser.add_argument("--show-tree", action="store_true",
                         help="Print full module tree to console (verbose)")
     parser.add_argument("--config", metavar="PATH", default=None,
-                        help="Path to HuggingFace config.json (enriches architecture diagram)")
-    parser.add_argument("--model-info", action="store_true",
-                        help="Add a 'Model Info' tab to the Excel report with the "
-                             "architecture diagram text (from model_inspector). "
-                             "Uses the trace's module hierarchy — no extra files needed. "
-                             "Combine with --config for richer output.")
+                        help="Path to HuggingFace config.json (enriches Model Info "
+                             "tab with head counts, vocab size, expert config, etc.)")
     parser.add_argument("--no-rocm-fix", action="store_true",
                         help="Disable automatic ROCm trace fix (hipGraphLaunch flow events)")
     parser.add_argument("-v", "--verbose", action="store_true",
@@ -2194,7 +2193,6 @@ Examples:
             show_tree=args.show_tree,
             auto_fix_rocm=not args.no_rocm_fix,
             config_path=args.config,
-            model_info=args.model_info,
         )
         analyzer.run()
     except FileNotFoundError as e:
