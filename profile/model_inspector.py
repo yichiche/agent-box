@@ -1953,6 +1953,19 @@ def _compute_metadata(cfg: Dict[str, Any],
     return meta
 
 
+def match_template(root_type: str, cfg: Dict[str, Any],
+                   raw_root=None, cpu_ops: Optional[list] = None,
+                   ) -> Optional[ArchTemplate]:
+    """Compatibility wrapper used by trace_module_analyzer.
+
+    Bridges the old ``match_template(root_type, cfg, raw_root=...)`` call
+    signature to the current ``module_tree_to_arch_template`` pipeline.
+    """
+    if raw_root is None:
+        return None
+    return module_tree_to_arch_template(raw_root, {}, cfg, cpu_ops=cpu_ops)
+
+
 def module_tree_to_arch_template(raw_root, classes, cfg,
                                  cpu_ops: Optional[list] = None,
                                  ) -> ArchTemplate:
