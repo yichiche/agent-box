@@ -42,8 +42,6 @@ from config import (
     TRACE_ANALYZER_SCRIPT,
     EVALUATE_PARSING_SCRIPT,
     TRACE_ANALYZER_HASH_FILE,
-    DEFAULT_EXPORT_LAYERS,
-    DEFAULT_DEBUG_LAYERS,
 )
 from collector import (
     get_connection, init_db, is_already_benchmarked,
@@ -495,7 +493,7 @@ def _auto_kernel_diff(
     """
     from trace_diff import compare_and_save
 
-    current_xlsx = result_dir / "trace_analysis" / "profile.csv.xlsx"
+    current_xlsx = result_dir / "trace_analysis" / "analysis.xlsx"
     if not current_xlsx.exists():
         logger.info("No trace xlsx for kernel diff: %s", current_xlsx)
         return
@@ -519,7 +517,7 @@ def _auto_kernel_diff(
     if not prev_rd:
         logger.info("Previous profile run %d has no result_dir", prev["id"])
         return
-    prev_xlsx = prev_rd / "trace_analysis" / "profile.csv.xlsx"
+    prev_xlsx = prev_rd / "trace_analysis" / "analysis.xlsx"
     if not prev_xlsx.exists():
         logger.info("Previous profile run %d has no trace xlsx: %s", prev["id"], prev_xlsx)
         return
@@ -557,13 +555,13 @@ def _compute_file_hash(filepath: Path) -> str:
 
 
 def _check_trace_analyzer_changed() -> bool:
-    """Check if trace_analyzer.py has changed since the last recorded hash.
+    """Check if trace_module_analyzer.py has changed since the last recorded hash.
 
     First run (no stored hash): records hash, returns False.
     Subsequent change: updates hash, returns True.
     """
     if not TRACE_ANALYZER_SCRIPT.exists():
-        logger.warning("trace_analyzer.py not found: %s", TRACE_ANALYZER_SCRIPT)
+        logger.warning("trace_module_analyzer.py not found: %s", TRACE_ANALYZER_SCRIPT)
         return False
 
     current_hash = _compute_file_hash(TRACE_ANALYZER_SCRIPT)
@@ -575,14 +573,14 @@ def _check_trace_analyzer_changed() -> bool:
         if stored_hash == current_hash:
             return False
         logger.info(
-            "trace_analyzer.py has changed (hash %s -> %s)",
+            "trace_module_analyzer.py has changed (hash %s -> %s)",
             stored_hash[:12], current_hash[:12],
         )
         TRACE_ANALYZER_HASH_FILE.write_text(current_hash)
         return True
 
     # First run: record hash, don't trigger re-analysis
-    logger.info("Recording initial trace_analyzer.py hash: %s", current_hash[:12])
+    logger.info("Recording initial trace_module_analyzer.py hash: %s", current_hash[:12])
     TRACE_ANALYZER_HASH_FILE.write_text(current_hash)
     return False
 
@@ -591,7 +589,7 @@ def _reanalyze_single_run(
     profile_conn, run_id: int, result_dir: Path,
     tag: str, tp_size: int, ep_size: int = None, dp_size: int = None,
 ) -> bool:
-    """Re-run trace_analyzer.py and evaluate_parsing.py on an existing profile run.
+    """Re-run trace_module_analyzer.py and evaluate_module_parsing.py on an existing profile run.
 
     Finds .trace.json.gz in result_dir/trace_analysis/, re-runs analysis on host,
     deletes old profile_scores rows, re-ingests new evaluation_summary.csv, and
@@ -606,31 +604,28 @@ def _reanalyze_single_run(
         return False
 
     trace_file = trace_files[0]
-    profile_csv = trace_dir / "profile.csv"
+    profile_xlsx = trace_dir / "analysis.xlsx"
 
-    # Step 1: Run trace_analyzer.py
+    # Step 1: Run trace_module_analyzer.py
     cmd = [
         sys.executable, str(TRACE_ANALYZER_SCRIPT),
         str(trace_file),
-        "--export-csv", str(profile_csv),
-        "--export-layers", DEFAULT_EXPORT_LAYERS,
-        "--debug-layers", DEFAULT_DEBUG_LAYERS,
+        "-o", str(profile_xlsx),
     ]
     logger.info("Re-analyzing trace for run %d [%s]: %s", run_id, tag, trace_file.name)
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300)
     except subprocess.CalledProcessError as e:
         logger.warning(
-            "trace_analyzer.py failed for run %d [%s]: %s",
+            "trace_module_analyzer.py failed for run %d [%s]: %s",
             run_id, tag, (e.stderr or e.stdout or str(e))[:500],
         )
         return False
     except subprocess.TimeoutExpired:
-        logger.warning("trace_analyzer.py timed out for run %d [%s]", run_id, tag)
+        logger.warning("trace_module_analyzer.py timed out for run %d [%s]", run_id, tag)
         return False
 
-    # Step 2: Run evaluate_parsing.py on the generated xlsx
-    profile_xlsx = trace_dir / "profile.csv.xlsx"
+    # Step 2: Run evaluate_module_parsing.py on the generated xlsx
     if profile_xlsx.exists() and EVALUATE_PARSING_SCRIPT.exists():
         eval_cmd = [sys.executable, str(EVALUATE_PARSING_SCRIPT), str(profile_xlsx)]
         try:
@@ -641,7 +636,7 @@ def _reanalyze_single_run(
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             # Non-zero exit is OK (means low score), but timeout is a warning
             if isinstance(e, subprocess.TimeoutExpired):
-                logger.warning("evaluate_parsing.py timed out for run %d [%s]", run_id, tag)
+                logger.warning("evaluate_module_parsing.py timed out for run %d [%s]", run_id, tag)
 
     # Step 3: Delete old profile_scores rows and re-ingest
     summary_path = trace_dir / "evaluation_summary.csv"
@@ -667,7 +662,7 @@ def _reanalyze_single_run(
 
 
 def _run_reanalysis(dry_run: bool = False) -> int:
-    """Re-run trace_analyzer.py on all completed profile runs for the current model.
+    """Re-run trace_module_analyzer.py on all completed profile runs for the current model.
 
     Returns the number of successfully re-analyzed runs.
     """
@@ -1202,7 +1197,7 @@ def main():
         "--reanalyze",
         action="store_true",
         default=False,
-        help="Re-run trace_analyzer.py on all completed profile runs, then "
+        help="Re-run trace_module_analyzer.py on all completed profile runs, then "
         "regenerate dashboard reports. Exits without running benchmarks.",
     )
     profile_group = parser.add_mutually_exclusive_group()
@@ -1328,7 +1323,7 @@ def main():
         conn = get_connection()
         init_db(conn)
 
-        # --reanalyze: re-run trace_analyzer.py on all completed profile runs, then exit
+        # --reanalyze: re-run trace_module_analyzer.py on all completed profile runs, then exit
         if args.reanalyze:
             logger.info("Running trace re-analysis (--reanalyze)")
             n = _run_reanalysis(dry_run=args.dry_run)
@@ -1337,9 +1332,9 @@ def main():
             conn.close()
             return
 
-        # Auto-detect trace_analyzer.py changes
+        # Auto-detect trace_module_analyzer.py changes
         if _check_trace_analyzer_changed():
-            logger.info("trace_analyzer.py changed, re-analyzing existing profile runs...")
+            logger.info("trace_module_analyzer.py changed, re-analyzing existing profile runs...")
             n = _run_reanalysis(dry_run=args.dry_run)
             if n > 0 or args.dry_run:
                 _run_generate_report(dry_run=args.dry_run)

@@ -64,12 +64,9 @@ PROFILE_DB_PATH = Path(
 LOCK_FILE = BASE_DIR / ".orchestrator.lock"
 
 # ── Trace re-analysis ─────────────────────────────────────────────────────
-TRACE_ANALYZER_SCRIPT = AGENT_BOX_DIR / "profile" / "trace_analyzer.py"
-EVALUATE_PARSING_SCRIPT = AGENT_BOX_DIR / "profile" / "evaluate_parsing.py"
+TRACE_ANALYZER_SCRIPT = AGENT_BOX_DIR / "profile" / "trace_module_analyzer.py"
+EVALUATE_PARSING_SCRIPT = AGENT_BOX_DIR / "profile" / "evaluate_module_parsing.py"
 TRACE_ANALYZER_HASH_FILE = BENCHMARK_RUNS_DIR / "data" / ".trace_analyzer_hash"
-# Default args matching run-local-benchmark-e2e.sh (lines 877-878)
-DEFAULT_EXPORT_LAYERS = "58-65"
-DEFAULT_DEBUG_LAYERS = "2-5"
 
 # ── Docker Hub ─────────────────────────────────────────────────────────────
 DOCKER_HUB_REPO = "rocm/sgl-dev"
