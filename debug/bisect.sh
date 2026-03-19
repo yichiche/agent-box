@@ -202,8 +202,13 @@ copy_clean_aiter() {
 # ── Launch server ────────────────────────────────────────────────────────────
 SERVER_PID=""
 SERVER_LOG=""
-BISECT_LOG_DIR="/tmp/bisect_logs"
+BISECT_TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+BISECT_LOG_DIR="$(cd "$AGENT_BOX_DIR/.." && pwd)/bisect_logs_${BISECT_TIMESTAMP}"
 mkdir -p "$BISECT_LOG_DIR"
+
+# Capture all stdout/stderr to a session log while still printing to terminal
+BISECT_SESSION_LOG="${BISECT_LOG_DIR}/bisect_session.log"
+exec > >(tee -a "$BISECT_SESSION_LOG") 2>&1
 
 launch_server() {
     local short_sha="$1"
@@ -646,13 +651,20 @@ while [[ $lo -le $hi ]]; do
 done
 
 # ── Result ───────────────────────────────────────────────────────────────────
+BISECT_RESULT_LOG="${BISECT_LOG_DIR}/bisect_result.log"
+
+{
 echo ""
 echo "=== RESULT ==="
+echo "  Mode: $MODE"
+echo "  Library: $LIB"
+echo "  Good: $GOOD_SHORT ($GOOD_DATE)  Bad: $BAD_SHORT ($BAD_DATE)"
 if [[ -n "$first_bad_idx" ]]; then
     bad_sha="${COMMITS[$first_bad_idx]}"
     bad_short=$(cd "$REPO_DIR" && git rev-parse --short "$bad_sha")
+    bad_date=$(cd "$REPO_DIR" && git log -1 --format='%ai' "$bad_sha")
     bad_subject=$(cd "$REPO_DIR" && git log -1 --format='%s' "$bad_sha")
-    echo "  First bad commit: $bad_short"
+    echo "  First bad commit: $bad_short ($bad_date)"
     echo "  Subject: $bad_subject"
     echo "  Full SHA: $bad_sha"
 else
@@ -660,4 +672,6 @@ else
     echo "  This may happen if some commits were skipped."
 fi
 echo "  Total steps: $current_step"
+echo "  Logs: $BISECT_LOG_DIR/"
 echo ""
+} | tee "$BISECT_RESULT_LOG"
