@@ -159,6 +159,7 @@ rebuild() {
         aiter)
             (cd "$REPO_DIR" \
                 && git submodule update --init --recursive \
+                && pip install -r requirements.txt \
                 && GPU_ARCHS="gfx950" python setup.py develop)
             ;;
     esac
