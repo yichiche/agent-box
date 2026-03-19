@@ -126,7 +126,9 @@ if [[ -z "$REPO_DIR" ]]; then
         REPO_DIR="/sgl-workspace/aiter"
     fi
 fi
-[[ -d "$REPO_DIR" ]] || fail "repo-dir not found: $REPO_DIR"
+if [[ "$LIB" != "aiter" ]]; then
+    [[ -d "$REPO_DIR" ]] || fail "repo-dir not found: $REPO_DIR"
+fi
 
 # Auto-detect port from server script if user didn't override --port
 if [[ "$PORT" == "30000" ]]; then
@@ -159,6 +161,38 @@ rebuild() {
                 && GPU_ARCHS="gfx950" python setup.py develop)
             ;;
     esac
+}
+
+# ── Aiter clean source management ────────────────────────────────────────
+AITER_CLEAN_DIR=""
+
+prepare_aiter_clean_source() {
+    AITER_CLEAN_DIR="$(cd "$AGENT_BOX_DIR/.." && pwd)/aiter"
+
+    if [[ -d "$AITER_CLEAN_DIR/.git" ]]; then
+        log "Found existing aiter source at $AITER_CLEAN_DIR"
+        local so_count
+        so_count=$(find "$AITER_CLEAN_DIR" -name "*.so" -not -path "*/.git/*" 2>/dev/null | wc -l)
+        if [[ "$so_count" -gt 0 ]]; then
+            log "WARNING: Found $so_count compiled .so files, cleaning..."
+            (cd "$AITER_CLEAN_DIR" && git clean -fdx -q)
+        fi
+        (cd "$AITER_CLEAN_DIR" && git fetch --all -q)
+    else
+        log "No clean aiter source found at $AITER_CLEAN_DIR, cloning..."
+        local remote_url=""
+        if [[ -d "$REPO_DIR/.git" ]]; then
+            remote_url=$(cd "$REPO_DIR" && git remote get-url origin 2>/dev/null || true)
+        fi
+        [[ -n "$remote_url" ]] || fail "Cannot determine aiter remote URL. Provide a clean clone at $AITER_CLEAN_DIR or ensure $REPO_DIR exists with a valid remote."
+        git clone "$remote_url" "$AITER_CLEAN_DIR"
+    fi
+}
+
+copy_clean_aiter() {
+    log "replacing $REPO_DIR with clean aiter source..."
+    rm -rf "$REPO_DIR"
+    cp -a "$AITER_CLEAN_DIR" "$REPO_DIR"
 }
 
 # ── Launch server ────────────────────────────────────────────────────────────
@@ -330,6 +364,11 @@ evaluate_commit() {
     local sha="$1"
     local short_sha="$2"
 
+    # For aiter: start from clean uncompiled source each time
+    if [[ "$LIB" == "aiter" ]]; then
+        copy_clean_aiter
+    fi
+
     # Checkout
     log "checking out..."
     (cd "$REPO_DIR" && git checkout "$sha" --quiet >/dev/null 2>&1)
@@ -436,14 +475,27 @@ evaluate_commit() {
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+# Aiter: prepare clean source and do initial copy before any git operations
+if [[ "$LIB" == "aiter" ]]; then
+    echo "=== Preparing aiter clean source ==="
+    prepare_aiter_clean_source
+    copy_clean_aiter
+    echo ""
+fi
+
 # Save original HEAD so we can restore it at the end
 ORIG_HEAD=$(cd "$REPO_DIR" && git rev-parse HEAD)
 
 cleanup() {
     kill_server
     echo ""
-    echo "Restoring original HEAD..."
-    (cd "$REPO_DIR" && git checkout "$ORIG_HEAD" --quiet >/dev/null 2>&1) || true
+    if [[ "$LIB" == "aiter" ]]; then
+        echo "Restoring clean aiter source..."
+        copy_clean_aiter 2>/dev/null || true
+    else
+        echo "Restoring original HEAD..."
+        (cd "$REPO_DIR" && git checkout "$ORIG_HEAD" --quiet >/dev/null 2>&1) || true
+    fi
 }
 trap cleanup EXIT
 
@@ -469,11 +521,15 @@ echo "  Commits to test: $NUM_COMMITS (~$STEPS steps)"
 [[ -n "$MODEL_PATH" ]] && echo "  Model: $MODEL_PATH"
 echo "  Port: $PORT"
 echo "  Server logs: $BISECT_LOG_DIR/"
+[[ "$LIB" == "aiter" && -n "$AITER_CLEAN_DIR" ]] && echo "  Clean source: $AITER_CLEAN_DIR"
 echo ""
 
 # Generate reference profile from good commit (profile mode only)
 if [[ "$MODE" == "profile" ]]; then
     echo "Generating reference profile from good commit ($GOOD_SHORT)..."
+    if [[ "$LIB" == "aiter" ]]; then
+        copy_clean_aiter
+    fi
     (cd "$REPO_DIR" && git checkout "$GOOD" --quiet)
     rebuild > /tmp/bisect_build.log 2>&1 || fail "Cannot build good commit"
     launch_server "$GOOD_SHORT"
@@ -491,6 +547,25 @@ if [[ "$MODE" == "profile" ]]; then
     kill_server
     echo ""
 fi
+
+# ── Pre-bisect: verify good and bad commits ──────────────────────────────
+if [[ "$MODE" != "profile" ]]; then
+    echo "--- Verifying good commit ($GOOD_SHORT) ---"
+    evaluate_commit "$GOOD" "$GOOD_SHORT"
+    if [[ "$VERDICT" != "GOOD" ]]; then
+        fail "Good commit $GOOD_SHORT did not pass as GOOD ($VERDICT: $VERDICT_DETAIL). Fix --good."
+    fi
+    log "Good commit verified: $VERDICT_DETAIL"
+    echo ""
+fi
+
+echo "--- Verifying bad commit ($BAD_SHORT) ---"
+evaluate_commit "$BAD" "$BAD_SHORT"
+if [[ "$VERDICT" != "BAD" ]]; then
+    fail "Bad commit $BAD_SHORT did not fail as BAD ($VERDICT: $VERDICT_DETAIL). Fix --bad."
+fi
+log "Bad commit verified: $VERDICT_DETAIL"
+echo ""
 
 # Binary search
 lo=0
