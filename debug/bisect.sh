@@ -617,10 +617,11 @@ while [[ $lo -le $hi ]]; do
     mid=$(( (lo + hi) / 2 ))
     sha="${COMMITS[$mid]}"
     short_sha=$(cd "$REPO_DIR" && git rev-parse --short "$sha")
+    commit_date=$(cd "$REPO_DIR" && git log -1 --format='%ai' "$sha")
     subject=$(cd "$REPO_DIR" && git log -1 --format='%s' "$sha")
     current_step=$(( current_step + 1 ))
 
-    echo "[Step ${current_step}/${total_steps}] $short_sha  $subject"
+    echo "[Step ${current_step}/${total_steps}] $short_sha ($commit_date)  $subject"
 
     evaluate_commit "$sha" "$short_sha"
 
