@@ -16,6 +16,7 @@ ACCURACY_SCRIPT=""
 ACCURACY_BASELINE=""
 ACCURACY_THRESHOLD="2.0"
 BUILD_SCRIPT=""
+ERROR_PATTERN=""
 PORT="30000"
 MODEL_PATH=""
 TIMEOUT="1800"
@@ -44,6 +45,8 @@ Options:
   --accuracy-baseline <float>  accuracy mode: expected accuracy %
   --accuracy-threshold <float> accuracy mode: allowed drop % (default: 2.0)
   --build-script <path>        Override the default rebuild step
+  --error-pattern <regex>      launch mode: only treat failures matching this pattern as BAD;
+                               other failures are treated as GOOD (e.g. "Memory access fault")
   --port <int>                 Server port (default: 30000)
   --model-path <path>          Model path, exported to server/client scripts
   --timeout <seconds>          Health check timeout (default: 600)
@@ -73,6 +76,7 @@ while [[ $# -gt 0 ]]; do
         --accuracy-baseline) ACCURACY_BASELINE="$2";  shift 2 ;;
         --accuracy-threshold) ACCURACY_THRESHOLD="$2"; shift 2 ;;
         --build-script)      BUILD_SCRIPT="$2";       shift 2 ;;
+        --error-pattern)     ERROR_PATTERN="$2";      shift 2 ;;
         --port)              PORT="$2";               shift 2 ;;
         --model-path)        MODEL_PATH="$2";         shift 2 ;;
         --timeout)           TIMEOUT="$2";            shift 2 ;;
@@ -232,6 +236,14 @@ check_server_log_fatal() {
         return 0
     fi
     return 1
+}
+
+# Check if the server log contains the user-specified --error-pattern.
+# Returns 0 if the pattern is found, 1 otherwise.
+check_error_pattern() {
+    [[ -n "$ERROR_PATTERN" ]] || return 1
+    [[ -f "$SERVER_LOG" ]] || return 1
+    grep -qP "$ERROR_PATTERN" "$SERVER_LOG" 2>/dev/null
 }
 
 # ── Health check ─────────────────────────────────────────────────────────────
@@ -398,8 +410,18 @@ evaluate_commit() {
         echo ""
         kill_server
         if [[ "$MODE" == "launch" ]]; then
-            VERDICT="BAD"
-            VERDICT_DETAIL="server failed to start within ${TIMEOUT}s (log: $SERVER_LOG)"
+            if [[ -n "$ERROR_PATTERN" ]]; then
+                if check_error_pattern; then
+                    VERDICT="BAD"
+                    VERDICT_DETAIL="server failed with matching error pattern '${ERROR_PATTERN}' (log: $SERVER_LOG)"
+                else
+                    VERDICT="GOOD"
+                    VERDICT_DETAIL="server failed but error does NOT match '${ERROR_PATTERN}'${FATAL_REASON:+ (actual: $FATAL_REASON)} (log: $SERVER_LOG)"
+                fi
+            else
+                VERDICT="BAD"
+                VERDICT_DETAIL="server failed to start within ${TIMEOUT}s (log: $SERVER_LOG)"
+            fi
         else
             VERDICT="SKIP"
             VERDICT_DETAIL="server failed to start (log: $SERVER_LOG)"
@@ -422,8 +444,18 @@ evaluate_commit() {
                 VERDICT_DETAIL="server started and handled test request"
             else
                 check_server_log_fatal
-                VERDICT="BAD"
-                VERDICT_DETAIL="server crashed on test request${FATAL_REASON:+: $FATAL_REASON}"
+                if [[ -n "$ERROR_PATTERN" ]]; then
+                    if check_error_pattern; then
+                        VERDICT="BAD"
+                        VERDICT_DETAIL="server crashed with matching error pattern '${ERROR_PATTERN}'"
+                    else
+                        VERDICT="GOOD"
+                        VERDICT_DETAIL="server crashed but error does NOT match '${ERROR_PATTERN}'${FATAL_REASON:+ (actual: $FATAL_REASON)}"
+                    fi
+                else
+                    VERDICT="BAD"
+                    VERDICT_DETAIL="server crashed on test request${FATAL_REASON:+: $FATAL_REASON}"
+                fi
             fi
             ;;
         perf)
@@ -562,6 +594,7 @@ if [[ "$FILTERED_COUNT" -gt 0 ]]; then
     CUTOFF_DATE=$(date -d "@$AFTER_EPOCH" '+%Y-%m-%d' 2>/dev/null || date -r "$AFTER_EPOCH" '+%Y-%m-%d' 2>/dev/null || echo "@$AFTER_EPOCH")
     echo "  WARNING: Filtered out $FILTERED_COUNT commits authored before $CUTOFF_DATE (outside date range)"
 fi
+[[ -n "$ERROR_PATTERN" ]] && echo "  Error pattern: '$ERROR_PATTERN' (only this error = BAD)"
 [[ -n "$MODEL_PATH" ]] && echo "  Model: $MODEL_PATH"
 echo "  Port: $PORT"
 echo "  Server logs: $BISECT_LOG_DIR/"
@@ -659,6 +692,7 @@ echo "=== RESULT ==="
 echo "  Mode: $MODE"
 echo "  Library: $LIB"
 echo "  Good: $GOOD_SHORT ($GOOD_DATE)  Bad: $BAD_SHORT ($BAD_DATE)"
+[[ -n "$ERROR_PATTERN" ]] && echo "  Error pattern: '$ERROR_PATTERN'"
 if [[ -n "$first_bad_idx" ]]; then
     bad_sha="${COMMITS[$first_bad_idx]}"
     bad_short=$(cd "$REPO_DIR" && git rev-parse --short "$bad_sha")
