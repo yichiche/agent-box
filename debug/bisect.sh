@@ -2,6 +2,7 @@
 # bisect.sh — Manual binary search across commits to find the exact regression.
 # Runs inside an already-running container with full git history available.
 set -euo pipefail
+cd /tmp 2>/dev/null || true
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 GOOD=""
@@ -17,7 +18,7 @@ ACCURACY_THRESHOLD="2.0"
 BUILD_SCRIPT=""
 PORT="30000"
 MODEL_PATH=""
-TIMEOUT="600"
+TIMEOUT="1800"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENT_BOX_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TRACE_ANALYZER_SCRIPT="${AGENT_BOX_DIR}/profile/trace_module_analyzer.py"
@@ -191,9 +192,9 @@ prepare_aiter_clean_source() {
 
 copy_clean_aiter() {
     log "replacing $REPO_DIR with clean aiter source..."
+    cd /tmp
     rm -rf "$REPO_DIR"
     cp -a "$AITER_CLEAN_DIR" "$REPO_DIR"
-    git config --global --add safe.directory "$REPO_DIR" 2>/dev/null || true
     git config --global --add safe.directory '*' 2>/dev/null || true
 }
 
@@ -502,24 +503,47 @@ cleanup() {
 trap cleanup EXIT
 
 # Get the list of commits between good and bad (exclusive of good, inclusive of bad)
-mapfile -t COMMITS < <(cd "$REPO_DIR" && git rev-list --reverse "$GOOD".."$BAD")
+# Filter by author date to avoid testing commits far outside the endpoint date range
+# (e.g. when good/bad are on different branches sharing a distant common ancestor).
+GOOD_EPOCH=$(cd "$REPO_DIR" && git log -1 --format='%at' "$GOOD")
+BAD_EPOCH=$(cd "$REPO_DIR" && git log -1 --format='%at' "$BAD")
+
+EARLIER_EPOCH=$GOOD_EPOCH
+[[ "$BAD_EPOCH" -lt "$EARLIER_EPOCH" ]] && EARLIER_EPOCH=$BAD_EPOCH
+AFTER_EPOCH=$EARLIER_EPOCH
+
+mapfile -t ALL_COMMITS < <(cd "$REPO_DIR" && git rev-list --reverse "$GOOD".."$BAD")
+mapfile -t COMMITS < <(cd "$REPO_DIR" && git rev-list --reverse --after="@${AFTER_EPOCH}" "$GOOD".."$BAD")
+ALL_COUNT=${#ALL_COMMITS[@]}
 NUM_COMMITS=${#COMMITS[@]}
+FILTERED_COUNT=$(( ALL_COUNT - NUM_COMMITS ))
+
+if [[ "$ALL_COUNT" -eq 0 ]]; then
+    fail "No commits found between $GOOD and $BAD. Check that --good is an ancestor of --bad."
+fi
+
+GOOD_SHORT=$(cd "$REPO_DIR" && git rev-parse --short "$GOOD")
+BAD_SHORT=$(cd "$REPO_DIR" && git rev-parse --short "$BAD")
+GOOD_DATE=$(cd "$REPO_DIR" && git log -1 --format='%ai' "$GOOD")
+BAD_DATE=$(cd "$REPO_DIR" && git log -1 --format='%ai' "$BAD")
 
 if [[ "$NUM_COMMITS" -eq 0 ]]; then
-    fail "No commits found between $GOOD and $BAD. Check that --good is an ancestor of --bad."
+    fail "All $ALL_COUNT commits were filtered out by date (all authored before cutoff). The good ($GOOD_DATE) and bad ($BAD_DATE) commits may be on divergent branches with no recent shared history."
 fi
 
 STEPS=$(awk "BEGIN {printf \"%d\", log($NUM_COMMITS)/log(2) + 1}")
 
 # Print header
-GOOD_SHORT=$(cd "$REPO_DIR" && git rev-parse --short "$GOOD")
-BAD_SHORT=$(cd "$REPO_DIR" && git rev-parse --short "$BAD")
 
 echo ""
 echo "=== Git Bisect: $MODE mode ==="
 echo "  Library: $LIB"
-echo "  Good: $GOOD_SHORT  Bad: $BAD_SHORT"
+echo "  Good: $GOOD_SHORT ($GOOD_DATE)  Bad: $BAD_SHORT ($BAD_DATE)"
 echo "  Commits to test: $NUM_COMMITS (~$STEPS steps)"
+if [[ "$FILTERED_COUNT" -gt 0 ]]; then
+    CUTOFF_DATE=$(date -d "@$AFTER_EPOCH" '+%Y-%m-%d' 2>/dev/null || date -r "$AFTER_EPOCH" '+%Y-%m-%d' 2>/dev/null || echo "@$AFTER_EPOCH")
+    echo "  WARNING: Filtered out $FILTERED_COUNT commits authored before $CUTOFF_DATE (outside date range)"
+fi
 [[ -n "$MODEL_PATH" ]] && echo "  Model: $MODEL_PATH"
 echo "  Port: $PORT"
 echo "  Server logs: $BISECT_LOG_DIR/"
