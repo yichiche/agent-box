@@ -193,6 +193,8 @@ copy_clean_aiter() {
     log "replacing $REPO_DIR with clean aiter source..."
     rm -rf "$REPO_DIR"
     cp -a "$AITER_CLEAN_DIR" "$REPO_DIR"
+    git config --global --add safe.directory "$REPO_DIR" 2>/dev/null || true
+    git config --global --add safe.directory '*' 2>/dev/null || true
 }
 
 # ── Launch server ────────────────────────────────────────────────────────────
