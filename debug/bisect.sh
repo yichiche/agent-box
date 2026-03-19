@@ -177,7 +177,7 @@ prepare_aiter_clean_source() {
             log "WARNING: Found $so_count compiled .so files, cleaning..."
             (cd "$AITER_CLEAN_DIR" && git clean -fdx -q)
         fi
-        (cd "$AITER_CLEAN_DIR" && git fetch --all -q)
+        (cd "$AITER_CLEAN_DIR" && git fetch --all -q --no-recurse-submodules)
     else
         log "No clean aiter source found at $AITER_CLEAN_DIR, cloning..."
         local remote_url=""
