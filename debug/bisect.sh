@@ -133,7 +133,7 @@ fi
 
 # Auto-detect port from server script if user didn't override --port
 if [[ "$PORT" == "30000" ]]; then
-    detected_port=$(grep -oP -- '--port\s+\K[0-9]+' "$SERVER_SCRIPT" | head -1 || true)
+    detected_port=$(grep -v '^\s*#' "$SERVER_SCRIPT" | grep -oP -- '--port\s+\K[0-9]+' | head -1 || true)
     if [[ -n "$detected_port" ]]; then
         PORT="$detected_port"
     fi
@@ -405,8 +405,20 @@ evaluate_commit() {
     # Mode-specific evaluation
     case "$MODE" in
         launch)
-            VERDICT="GOOD"
-            VERDICT_DETAIL="server started successfully"
+            log "sending test inference request..."
+            curl -s --max-time 180 -o /dev/null \
+                -H "Content-Type: application/json" \
+                -d '{"text":"Hello","sampling_params":{"max_new_tokens":1}}' \
+                "http://localhost:${PORT}/generate" 2>/dev/null || true
+            sleep 5
+            if kill -0 "$SERVER_PID" 2>/dev/null; then
+                VERDICT="GOOD"
+                VERDICT_DETAIL="server started and handled test request"
+            else
+                check_server_log_fatal
+                VERDICT="BAD"
+                VERDICT_DETAIL="server crashed on test request${FATAL_REASON:+: $FATAL_REASON}"
+            fi
             ;;
         perf)
             log "running benchmark..."
