@@ -44,6 +44,8 @@ Advanced options:
   --kv-cache-dtype <dtype>           KV cache dtype. Default: fp8_e4m3
   --attention-backend <name>         Attention backend. Default: aiter
   --server-extra-args "<args>"       Extra args appended to launch_server.
+  --server-env-vars "<vars>"         Extra env vars prepended to launch_server.
+                                     E.g.: --server-env-vars "FOO=1 BAR=2"
   --bench-extra-args "<args>"        Extra args appended to bench_serving.
   --pr <url_or_number>               Checkout a GitHub PR in sglang before benchmarking.
                                      Accepts full GitHub PR URL or bare PR number.
@@ -181,6 +183,7 @@ MEM_FRACTION_STATIC="0.8"
 KV_CACHE_DTYPE="fp8_e4m3"
 ATTENTION_BACKEND="aiter"
 SERVER_EXTRA_ARGS=""
+SERVER_ENV_VARS=""
 BENCH_EXTRA_ARGS=""
 PR=""
 AITER_PR=""
@@ -320,6 +323,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --server-extra-args)
       SERVER_EXTRA_ARGS="${2:-}"
+      shift 2
+      ;;
+    --server-env-vars)
+      SERVER_ENV_VARS="${2:-}"
       shift 2
       ;;
     --bench-extra-args)
@@ -765,7 +772,11 @@ if [[ -n "$SERVER_EXTRA_ARGS" ]]; then
 fi
 
 SERVER_CMD="$(quote_join "${SERVER_ARGS[@]}")"
-START_SERVER_CMD="cd /sgl-workspace/sglang/python && SGLANG_AITER_MLA_PERSIST=1 ${SERVER_CMD} > $(quote_one "$CONTAINER_SERVER_LOG") 2>&1"
+SERVER_ENV_PREFIX="SGLANG_AITER_MLA_PERSIST=1"
+if [[ -n "$SERVER_ENV_VARS" ]]; then
+  SERVER_ENV_PREFIX="${SERVER_ENV_PREFIX} ${SERVER_ENV_VARS}"
+fi
+START_SERVER_CMD="cd /sgl-workspace/sglang/python && ${SERVER_ENV_PREFIX} ${SERVER_CMD} > $(quote_one "$CONTAINER_SERVER_LOG") 2>&1"
 
 log "Launching server inside container"
 docker_cmd exec -d "$CONTAINER_NAME" bash -lc "$START_SERVER_CMD"
