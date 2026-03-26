@@ -674,6 +674,7 @@ if [[ -n "$AITER_PR_NUMBER" || -n "$AITER_COMMIT" || -n "$AITER_BRANCH" ]]; then
   docker_cmd exec "$CONTAINER_NAME" bash -lc \
     "git clone https://github.com/ROCm/aiter.git /sgl-workspace/aiter" \
     || die "Failed to clone aiter repo"
+  log "Aiter repo cloned successfully"
 
   if [[ -n "$AITER_PR_NUMBER" ]]; then
     log "Fetching aiter PR #${AITER_PR_NUMBER} from GitHub"
