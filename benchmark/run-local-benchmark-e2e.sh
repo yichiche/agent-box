@@ -631,6 +631,10 @@ docker_cmd exec "$CONTAINER_NAME" mkdir -p "$CONTAINER_RESULT_DIR"
 
 # ── Apply GitHub PR to sglang inside container (if requested) ─────────
 if [[ -n "$PR_NUMBER" ]]; then
+  log "Backing up original sglang to /sgl-workspace/sglang_orig"
+  docker_cmd exec "$CONTAINER_NAME" bash -lc \
+    "rm -rf /sgl-workspace/sglang_orig && cp -a /sgl-workspace/sglang /sgl-workspace/sglang_orig"
+
   log "Fetching sglang PR #${PR_NUMBER} from GitHub"
   docker_cmd exec "$CONTAINER_NAME" bash -lc \
     "cd /sgl-workspace/sglang && git fetch --depth=100 origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}" \
@@ -653,7 +657,7 @@ if [[ -n "$PR_NUMBER" ]]; then
     "cd /sgl-workspace/sglang/python && pip install -e . --no-deps -q" \
     || log "WARNING: sglang reinstall failed (non-fatal if only Python files changed)"
 
-  log "PR #${PR_NUMBER} applied successfully"
+  log "PR #${PR_NUMBER} applied successfully (original saved at /sgl-workspace/sglang_orig)"
 fi
 
 # ── Apply GitHub PR/commit/branch to aiter inside container (if requested) ──
@@ -749,12 +753,15 @@ SERVER_ARGS=(
   --host 0.0.0.0
   --port "$SERVER_PORT"
   --log-requests
-  --disable-radix-cache
   --mem-fraction-static "$MEM_FRACTION_STATIC"
   --max-running-requests "$MAX_RUNNING_REQUESTS"
   --kv-cache-dtype "$KV_CACHE_DTYPE"
   --attention-backend "$ATTENTION_BACKEND"
 )
+
+if (( ACCURACY_ONLY == 0 )); then
+  SERVER_ARGS+=(--disable-radix-cache)
+fi
 
 if (( MTP_MODE == 1 )); then
   SERVER_ARGS+=(
