@@ -17,6 +17,7 @@ ACCURACY_BASELINE=""
 ACCURACY_THRESHOLD="2.0"
 BUILD_SCRIPT=""
 ERROR_PATTERN=""
+PATCH_FILE=""
 PORT="30000"
 MODEL_PATH=""
 TIMEOUT="1800"
@@ -47,6 +48,8 @@ Options:
   --build-script <path>        Override the default rebuild step
   --error-pattern <regex>      launch mode: only treat failures matching this pattern as BAD;
                                other failures are treated as GOOD (e.g. "Memory access fault")
+  --patch <file>               Apply a git diff/patch file after each checkout+rebuild.
+                               Useful to work around known breakages unrelated to bisect target.
   --port <int>                 Server port (default: 30000)
   --model-path <path>          Model path, exported to server/client scripts
   --timeout <seconds>          Health check timeout (default: 600)
@@ -77,6 +80,7 @@ while [[ $# -gt 0 ]]; do
         --accuracy-threshold) ACCURACY_THRESHOLD="$2"; shift 2 ;;
         --build-script)      BUILD_SCRIPT="$2";       shift 2 ;;
         --error-pattern)     ERROR_PATTERN="$2";      shift 2 ;;
+        --patch)             PATCH_FILE="$2";         shift 2 ;;
         --port)              PORT="$2";               shift 2 ;;
         --model-path)        MODEL_PATH="$2";         shift 2 ;;
         --timeout)           TIMEOUT="$2";            shift 2 ;;
@@ -121,6 +125,9 @@ if [[ -n "$ACCURACY_SCRIPT" && ! -f "$ACCURACY_SCRIPT" ]]; then
 fi
 if [[ -n "$BUILD_SCRIPT" && ! -f "$BUILD_SCRIPT" ]]; then
     fail "--build-script not found: $BUILD_SCRIPT"
+fi
+if [[ -n "$PATCH_FILE" && ! -f "$PATCH_FILE" ]]; then
+    fail "--patch not found: $PATCH_FILE"
 fi
 
 # Default repo dir based on --lib
@@ -201,6 +208,17 @@ copy_clean_aiter() {
     rm -rf "$REPO_DIR"
     cp -a "$AITER_CLEAN_DIR" "$REPO_DIR"
     git config --global --add safe.directory '*' 2>/dev/null || true
+}
+
+# ── Apply patch ──────────────────────────────────────────────────────────────
+apply_patch() {
+    [[ -n "$PATCH_FILE" ]] || return 0
+    log "applying patch: $PATCH_FILE"
+    if ! (cd "$REPO_DIR" && git apply --check "$PATCH_FILE" 2>/dev/null); then
+        log "patch does not apply cleanly (may already be applied), skipping"
+        return 0
+    fi
+    (cd "$REPO_DIR" && git apply "$PATCH_FILE")
 }
 
 # ── Launch server ────────────────────────────────────────────────────────────
@@ -402,6 +420,9 @@ evaluate_commit() {
         return
     fi
 
+    # Apply optional patch after rebuild
+    apply_patch
+
     # Launch server
     launch_server "$short_sha"
     log "launching server... (log: $SERVER_LOG)"
@@ -595,6 +616,7 @@ if [[ "$FILTERED_COUNT" -gt 0 ]]; then
     echo "  WARNING: Filtered out $FILTERED_COUNT commits authored before $CUTOFF_DATE (outside date range)"
 fi
 [[ -n "$ERROR_PATTERN" ]] && echo "  Error pattern: '$ERROR_PATTERN' (only this error = BAD)"
+[[ -n "$PATCH_FILE" ]] && echo "  Patch: $PATCH_FILE (applied after each checkout)"
 [[ -n "$MODEL_PATH" ]] && echo "  Model: $MODEL_PATH"
 echo "  Port: $PORT"
 echo "  Server logs: $BISECT_LOG_DIR/"
@@ -609,6 +631,7 @@ if [[ "$MODE" == "profile" ]]; then
     fi
     (cd "$REPO_DIR" && git checkout "$GOOD" --quiet)
     rebuild > /tmp/bisect_build.log 2>&1 || fail "Cannot build good commit"
+    apply_patch
     launch_server "$GOOD_SHORT"
     step "  waiting for health check"
     if ! wait_for_server; then
