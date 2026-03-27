@@ -816,10 +816,6 @@ SERVER_ARGS=(
   --attention-backend "$ATTENTION_BACKEND"
 )
 
-if (( ACCURACY_ONLY == 0 )); then
-  SERVER_ARGS+=(--disable-radix-cache)
-fi
-
 if (( MTP_MODE == 1 )); then
   SERVER_ARGS+=(
     --speculative-algorithm EAGLE
