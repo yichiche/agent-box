@@ -47,6 +47,11 @@ Advanced options:
   --server-env-vars "<vars>"         Extra env vars prepended to launch_server.
                                      E.g.: --server-env-vars "FOO=1 BAR=2"
   --bench-extra-args "<args>"        Extra args appended to bench_serving.
+  --patch <path>                     Apply a local patch file to sglang before benchmarking.
+                                     The file is copied into the container and applied via
+                                     git apply on /sgl-workspace/sglang.
+                                     Can be combined with --pr (patch applies after PR checkout).
+                                     E.g.: --patch /home/user/fix.patch
   --pr <url_or_number>               Checkout a GitHub PR in sglang before benchmarking.
                                      Accepts full GitHub PR URL or bare PR number.
                                      E.g.: --pr 19216
@@ -186,6 +191,7 @@ SERVER_EXTRA_ARGS=""
 SERVER_ENV_VARS=""
 BENCH_EXTRA_ARGS=""
 PR=""
+PATCH=""
 AITER_PR=""
 RESOLVED_CONFIG=""
 LOAD_CONFIG=""
@@ -337,6 +343,10 @@ while [[ $# -gt 0 ]]; do
       PR="${2:-}"
       shift 2
       ;;
+    --patch)
+      PATCH="${2:-}"
+      shift 2
+      ;;
     --aiter-pr)
       AITER_PR="${2:-}"
       shift 2
@@ -475,6 +485,10 @@ if [[ -n "$AITER_PR" ]]; then
   parse_aiter_ref "$AITER_PR"
 fi
 
+if [[ -n "$PATCH" ]]; then
+  [[ -f "$PATCH" ]] || die "Patch file does not exist: $PATCH"
+fi
+
 [[ -n "$IMAGE" ]] || die "--image is required"
 [[ -n "$MODEL_PATH" ]] || die "--model-path is required"
 [[ -d "$MODEL_PATH" ]] || die "Model path does not exist or is not a directory: $MODEL_PATH"
@@ -517,7 +531,13 @@ if [[ -z "$CONTAINER_NAME" ]]; then
     _sanitized="${AITER_BRANCH//[^a-zA-Z0-9_.-]/-}"
     AITER_SUFFIX="-aiter-${_sanitized}"
   fi
-  CONTAINER_NAME="jacky-sglang-bench-${IMAGE_TAG}${PR_SUFFIX}${AITER_SUFFIX}-${TIMESTAMP}"
+  PATCH_SUFFIX=""
+  if [[ -n "$PATCH" ]]; then
+    _patch_base="$(basename "$PATCH" | sed 's/\.\(patch\|diff\)$//')"
+    _patch_base="${_patch_base//[^a-zA-Z0-9_.-]/-}"
+    PATCH_SUFFIX="-patch-${_patch_base}"
+  fi
+  CONTAINER_NAME="jacky-sglang-bench-${IMAGE_TAG}${PR_SUFFIX}${AITER_SUFFIX}${PATCH_SUFFIX}-${TIMESTAMP}"
 fi
 
 if [[ -z "$RESULT_DIR" ]]; then
@@ -530,7 +550,13 @@ if [[ -z "$RESULT_DIR" ]]; then
     _sanitized="${AITER_BRANCH//[^a-zA-Z0-9_.-]/-}"
     AITER_SUFFIX="-aiter-${_sanitized}"
   fi
-  RESULT_DIR="${HOST_HOME_DIR}/benchmark_runs/${TIMESTAMP}${PR_SUFFIX}${AITER_SUFFIX}"
+  PATCH_SUFFIX=""
+  if [[ -n "$PATCH" ]]; then
+    _patch_base="$(basename "$PATCH" | sed 's/\.\(patch\|diff\)$//')"
+    _patch_base="${_patch_base//[^a-zA-Z0-9_.-]/-}"
+    PATCH_SUFFIX="-patch-${_patch_base}"
+  fi
+  RESULT_DIR="${HOST_HOME_DIR}/benchmark_runs/${TIMESTAMP}${PR_SUFFIX}${AITER_SUFFIX}${PATCH_SUFFIX}"
 fi
 mkdir -p "$RESULT_DIR"
 
@@ -658,6 +684,36 @@ if [[ -n "$PR_NUMBER" ]]; then
     || log "WARNING: sglang reinstall failed (non-fatal if only Python files changed)"
 
   log "PR #${PR_NUMBER} applied successfully (original saved at /sgl-workspace/sglang_orig)"
+fi
+
+# ── Apply local patch to sglang inside container (if requested) ───────
+if [[ -n "$PATCH" ]]; then
+  PATCH_BASENAME="$(basename "$PATCH")"
+  CONTAINER_PATCH_PATH="/tmp/${PATCH_BASENAME}"
+
+  if [[ -z "$PR_NUMBER" ]]; then
+    log "Backing up original sglang to /sgl-workspace/sglang_orig"
+    docker_cmd exec "$CONTAINER_NAME" bash -lc \
+      "rm -rf /sgl-workspace/sglang_orig && cp -a /sgl-workspace/sglang /sgl-workspace/sglang_orig"
+  fi
+
+  log "Copying patch file into container: ${PATCH} -> ${CONTAINER_PATCH_PATH}"
+  docker_cmd cp "$PATCH" "${CONTAINER_NAME}:${CONTAINER_PATCH_PATH}"
+
+  log "Applying patch to sglang"
+  docker_cmd exec "$CONTAINER_NAME" bash -lc \
+    "cd /sgl-workspace/sglang && git apply --stat $(quote_one "$CONTAINER_PATCH_PATH") && git apply $(quote_one "$CONTAINER_PATCH_PATH")" \
+    || die "Failed to apply patch: ${PATCH_BASENAME}"
+
+  log "Reinstalling sglang after patch"
+  docker_cmd exec "$CONTAINER_NAME" bash -lc \
+    "cd /sgl-workspace/sglang/python && pip install -e . --no-deps -q" \
+    || log "WARNING: sglang reinstall failed (non-fatal if only Python files changed)"
+
+  log "Patch ${PATCH_BASENAME} applied successfully"
+
+  cp "$PATCH" "${RESULT_DIR}/${PATCH_BASENAME}"
+  log "Saved patch copy to ${RESULT_DIR}/${PATCH_BASENAME}"
 fi
 
 # ── Apply GitHub PR/commit/branch to aiter inside container (if requested) ──
