@@ -78,7 +78,18 @@ Key fused ops to check:
 - `fused_qk_rmsnorm_group_quant.py` — fused rmsnorm+group_quant
 - `fused_split_gdr_update.py` — fused split+gather+dequant+reduce+update
 
-### 1d. Design the change
+### 1d. Cross-check with trace data
+
+**Before writing the plan, read the actual trace analysis Excel** to identify which kernels come from the code you're about to change. Use the trace module analyzer output or the detail sheets in the analysis xlsx.
+
+For each kernel in the target region:
+1. Find the kernel name in the trace (e.g., `_rms_normalize_kernel`, `apply_rotary_emb_triton_kernel`)
+2. Trace it back to the exact source line that triggers it (e.g., `compress_hip.py:362 → self.q_norm(q)` → fires `_rms_normalize_kernel`)
+3. Record its duration from the trace
+
+This kernel-to-source mapping is **required** in the plan — don't propose changes without showing which trace kernels correspond to which source lines.
+
+### 1e. Design the change
 
 Write a plan with this structure:
 
@@ -87,20 +98,45 @@ Write a plan with this structure:
 Tier: <1/2/3>
 Expected savings: ~<X> us per layer
 
+## Kernel-to-source mapping (from trace)
+
+Map each kernel in the target region to the source line that produces it:
+
+┌──────┬────────────────────────────────────┬──────────┬─────────────────────────────────────────┐
+│ Row  │ Kernel Name                        │ Time(us) │ Source Line                              │
+├──────┼────────────────────────────────────┼──────────┼─────────────────────────────────────────┤
+│ r30  │ _rms_normalize_kernel              │     3.8  │ compress_hip.py:362  self.q_norm(q)      │
+│ r33  │ apply_rotary_emb_triton_kernel     │     4.4  │ compress_hip.py:365  apply_rotary(q)     │
+│ r34  │ apply_rotary_emb_triton_kernel     │     4.2  │ compress_hip.py:366  apply_rotary(k)     │
+└──────┴────────────────────────────────────┴──────────┴─────────────────────────────────────────┘
+                                               Total: 12.4 us
+
 ## Files to modify
 
 ### <file_path_1> (lines X-Y)
-Before: <what currently happens — describe which kernels fire>
-After:  <what should happen — describe which kernels fire>
+
+Before (source → kernel):
+  Line 362: `self.q_norm(q)`               → _rms_normalize_kernel (3.8 us)
+  Line 365: `apply_rotary(q, ...)`          → apply_rotary_emb_triton_kernel (4.4 us)
+  Line 366: `apply_rotary(k, ...)`          → apply_rotary_emb_triton_kernel (4.2 us)
+
+After (source → kernel):
+  Line 362: `fused_norm_rope_inplace(q, k)` → fused_norm_rope_kernel (~4.5 us)
+
 Change: <specific code change — function call, dispatch switch, new code>
 
 ### <file_path_2> (lines X-Y)
 ...
 
 ## Expected kernel trace change
-Before: <list of kernels with durations>
-After:  <list of kernels with durations>
-Net savings: <X> us
+
+Before: 3 kernels, 12.4 us
+  _rms_normalize_kernel (3.8 us) + apply_rotary_emb x2 (8.6 us)
+
+After: 1 kernel, ~4.5 us
+  fused_norm_rope_kernel (~4.5 us)
+
+Net savings: ~7.9 us per layer
 
 ## Risk assessment
 - Accuracy risk: <Low/Medium/High — why>
