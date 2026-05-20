@@ -1,0 +1,266 @@
+---
+description: Commit, push, and create a PR in one flow — checks state at each stage, confirms push target, collects accuracy/benchmark data, drafts PR in HackMD format for review before submitting
+---
+
+# Commit, Push, and Create PR
+
+Follow these steps precisely. This skill chains to `/commit-push` (which itself chains to `/commit`).
+Read `_shared/repo-config.md` for repo table, remote URLs, PR draft location/naming, and safety rules.
+
+## Step 0: Ensure `gh` CLI is available
+
+Check that the GitHub CLI is the real one (v2.x+, not the pip `gh` v0.0.4):
+```bash
+gh --version 2>&1
+```
+If missing or wrong version, follow the install steps in `_shared/repo-config.md`.
+
+## Step 1: Gather full state
+
+Run these in parallel:
+- `git rev-parse --show-toplevel` to determine which repo this is
+- `git status` to see uncommitted changes
+- `git branch --show-current` to get the current branch
+- `git diff --cached` to see staged changes
+- `git diff` to see unstaged changes
+- `git log --oneline -5` to see recent commits
+- `git remote -v` to see configured remotes
+- Check for existing PR: `gh pr view --json url,state 2>/dev/null`
+
+## Step 2: Confirm push target
+
+Before any commit or push, look up the repo in `_shared/repo-config.md` and confirm the target with the user using `AskUserQuestion`. Show them:
+
+- **Push remote**: the remote name and URL (e.g., `origin` → `https://github.com/yichiche/sglang`)
+- **PR target repo**: the upstream repo the PR will be created against (e.g., `sgl-project/sglang`)
+- **PR base branch**: the branch the PR will target (e.g., `main`, `amd/deepseek_v4`)
+- **Current branch**: the feature branch that will be pushed
+
+Ask the user to confirm or change the push remote, PR target repo, or PR base branch.
+
+## Step 3: Commit and push if needed
+
+Based on the state from Step 1, determine what is already done:
+
+- **If there are uncommitted changes**: Invoke the `/commit-push` skill (it will handle both commit and push). Wait for it to complete before proceeding to Step 4.
+- **If the working tree is clean but the branch has unpushed commits**: Invoke the `/commit-push` skill (it will skip commit and only push). Wait for it to complete before proceeding to Step 4.
+- **If the working tree is clean and the branch is already pushed and up-to-date**: Skip directly to Step 4.
+
+To check if the branch is already pushed and up-to-date:
+```bash
+git rev-parse @{u} 2>/dev/null && git log --oneline @{u}..HEAD
+```
+
+## Step 4: Check for existing PR
+
+Check if a PR already exists for this branch (from Step 1's `gh pr view`):
+
+- **If a PR already exists**: Show the user the existing PR URL and ask if they want to update it or skip.
+- **If no PR exists**: Proceed to Step 5.
+
+## Step 5: Analyze the changes
+
+Run:
+```bash
+git log --oneline <base-branch>..HEAD
+git diff <base-branch>...HEAD
+```
+
+(Use the PR base branch confirmed in Step 2.)
+
+Read through all diffs and commits to understand:
+- What was the motivation / bug being fixed / feature being added?
+- What specific files and code were modified?
+- Does this change affect model accuracy?
+- Does this change affect inference speed / performance?
+
+## Step 6: Collect benchmark/profiling data
+
+**BEFORE writing the PR draft**, interactively collect and confirm data with the user. This is a multi-round conversation — do NOT skip ahead to generating the draft.
+
+### 6a: Propose what benchmark data to show
+
+Based on the change analysis from Step 5, propose to the user what benchmark/profiling tables you think should appear in the PR.
+
+Focus on **specific, concrete changes** — not general module-category overviews. Good table types:
+- **Kernel replacement**: before/after kernel names and times for the specific kernels being replaced, with savings and % of total time (e.g., TTFT impact)
+- **End-to-end performance**: latency, throughput before/after
+
+Do NOT propose broad per-module breakdowns (e.g., "attention: X us, elementwise: Y us, gemm: Z us") — those are too high-level for a PR. The reader wants to see exactly which kernels changed and by how much.
+
+Present your proposed table structure (column headers, what metrics) and ask the user to confirm or adjust using `AskUserQuestion`. The user may add, remove, or restructure tables.
+
+### 6b: Collect benchmark data
+
+After the user confirms what tables to show, ask them to paste or provide the raw benchmark data (logs, profiling output, xlsx file paths, numbers).
+
+Clean and format the data into the agreed-upon markdown tables:
+- Parse the raw data the user provides
+- Organize into clear, readable tables with headers
+- Include units (ms, tokens/s, %, etc.)
+- Add before/after or baseline/optimized columns where applicable
+- Round numbers appropriately
+
+**Show the formatted tables to the user** and ask for confirmation using `AskUserQuestion`:
+- **Approve**: tables are correct, move on to accuracy
+- **Revise**: user provides corrections or additional data — update tables and re-confirm
+
+Do NOT proceed to Step 6c until the user approves the benchmark tables.
+
+If the user says benchmark data is not available yet, note "Pending — will be added after testing" and proceed to 6c.
+
+### 6c: Collect accuracy data
+
+After benchmark data is confirmed, repeat the same interactive process for accuracy:
+
+1. Propose what accuracy data to show (e.g., accuracy score, invalid rate, loss comparison, token-level diffs).
+2. Ask the user to confirm the table structure.
+3. Collect the raw accuracy data from the user.
+4. Format into markdown tables and **show to the user for confirmation**.
+5. Wait for user approval before proceeding to Step 7.
+
+If the user says accuracy data is not available yet, note "Pending — will be added after testing" and proceed to Step 7.
+
+## Step 7: Write PR draft in HackMD format
+
+Based on the analysis and collected data, draft the full PR content.
+
+**Always create the draft file without asking for permission.**
+
+### Determine the file name
+
+Follow the naming convention in `_shared/repo-config.md`:
+1. Remove `[AMD]` tag and series prefix (e.g., `amd/deepseek_v4 integration NN/N`) from the PR title
+2. Take the remaining descriptive part
+3. Lowercase, replace spaces with hyphens, remove special characters
+4. File path: `$HOME/pr-drafts/pr-draft-<slug>.md`
+
+Ensure the `pr-drafts` directory exists: `mkdir -p $HOME/pr-drafts`
+
+### Write the draft
+
+- **For sglang repo**: Read `_shared/pr-template-sglang.md` and use that template.
+- **For agent-box repo**: Read `_shared/pr-template-simple.md` and use that template.
+- **For other repos**: Use the simple template.
+
+The draft file is **pure HackMD markdown** — no YAML frontmatter. It contains only the PR body content.
+
+Fill in all template sections with concrete content. Insert the user-confirmed accuracy and benchmark tables from Step 6b and 6c into the appropriate sections.
+
+If the user provided `$ARGUMENTS`, use that as the PR title. Otherwise, craft a concise title (under 70 chars) starting with `[AMD]`.
+
+## Step 8: User reviews PR draft
+
+After writing the draft file, tell the user the file path and show them a summary of its content. Ask the user to review and confirm using `AskUserQuestion`:
+
+- **Approve**: proceed to submit the PR as-is
+- **Edit**: the user will modify the draft file themselves, then re-confirm. After the user says they're done editing, re-read the draft file to pick up their changes.
+- **Cancel**: abort PR creation (leave the draft file in place for future use)
+
+Do NOT submit the PR until the user explicitly approves.
+
+## Step 9: Submit the PR
+
+After user approval, read the draft file to get the PR body.
+
+Use the PR title and target information confirmed in Step 2 (not from the file — the file has no frontmatter).
+
+Try the following four fallbacks **in order**. Stop at the first one that succeeds.
+
+### Attempt 1 — `gh pr create` (API)
+
+```bash
+gh pr create \
+  --repo <base_repo> \
+  --base <base_branch> \
+  --head <head> \
+  --title "<title>" \
+  --body-file <draft-file>
+```
+
+Use `--body-file` (not `--body`) so the draft markdown is passed verbatim without shell-escaping issues.
+
+If this succeeds: capture the printed PR URL and skip to Step 10.
+
+### Attempt 2 — `gh pr create --web` (browser prefill)
+
+Trigger this when Attempt 1 fails with auth/permission errors (HTTP 403, "Resource not accessible by integration", "GraphQL: ..."). This is common when the API token can push to the user's fork but does not have write access to `<base_repo>`.
+
+```bash
+gh pr create \
+  --repo <base_repo> \
+  --base <base_branch> \
+  --head <head> \
+  --title "<title>" \
+  --body-file <draft-file> \
+  --web
+```
+
+`gh` opens a browser tab pointing at the GitHub compare page with `?expand=1&title=...&body=...` already filled in, using the user's logged-in session instead of the API token. Tell the user to review and click **Create pull request**.
+
+### Attempt 3 — Direct GitHub API via `curl`
+
+Trigger this when `gh` is not installed at all (`command -v gh` returns nothing). Build a JSON payload from the draft file and POST to the REST API:
+
+```bash
+jq -Rn --arg title "<title>" \
+       --arg head  "<head>" \
+       --arg base  "<base_branch>" \
+       --rawfile body <draft-file> \
+       '{title: $title, head: $head, base: $base, body: $body}' \
+| curl -sS -X POST \
+    -H "Authorization: Bearer $GITHUB_TOKEN" \
+    -H "Accept: application/vnd.github+json" \
+    --data-binary @- \
+    https://api.github.com/repos/<base_repo>/pulls
+```
+
+If this returns the PR JSON: extract `.html_url` and skip to Step 10.
+
+### Attempt 4 — Print a prefill URL for manual creation
+
+Trigger this when none of the above work (no `gh`, and `curl` returns 403/422 because the token has no write access to `<base_repo>`).
+
+Build a manual creation URL that prefills the title and body via query string parameters:
+
+1. **URL-encode the title and body**. Use Python (always available) — never try to escape by hand:
+
+   ```bash
+   URLENC_TITLE=$(python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=''))" "<title>")
+   URLENC_BODY=$(python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=''))" < <draft-file>)
+   ```
+
+   Important: pass `safe=''` so `/`, `?`, `&`, `#`, `=`, newlines, etc. all get percent-encoded. Otherwise the body will break the query string.
+
+2. **Assemble the URL**:
+
+   ```
+   https://github.com/<base_repo>/compare/<base_branch>...<fork-owner>:<branch>?expand=1&title=<URLENC_TITLE>&body=<URLENC_BODY>
+   ```
+
+   `expand=1` forces GitHub to render the PR creation form (instead of just the diff view).
+
+3. **URL length guard**. Real-world browsers and GitHub's frontend choke on extremely long URLs. Check the length **before** printing:
+
+   ```bash
+   FULL_URL="https://github.com/<base_repo>/compare/<base_branch>...<fork-owner>:<branch>?expand=1&title=${URLENC_TITLE}&body=${URLENC_BODY}"
+   if [ ${#FULL_URL} -le 7000 ]; then
+     echo "$FULL_URL"
+   else
+     echo "Body too long to prefill via URL. Open this page and paste the body manually:"
+     echo "https://github.com/<base_repo>/compare/<base_branch>...<fork-owner>:<branch>?expand=1&title=${URLENC_TITLE}"
+     echo "Body content is in: <absolute-path-to-draft-file>"
+   fi
+   ```
+
+   When the URL would exceed 7000 characters, fall back to: print the plain compare URL (with title still prefilled if it fits, otherwise no query string) **and** the absolute path to the draft file so the user can copy-paste the body.
+
+**Do NOT delete the draft file** — it stays as a record regardless of which attempt succeeded.
+
+## Step 10: Report back
+
+After the PR is created, show the user:
+- The PR URL
+- A summary of the full flow: what was committed, where it was pushed, and the PR link
+- The draft file location for reference
+- For sglang: remind them about the review process (ping merge oncalls, get CODEOWNER approvals, trigger CI)
