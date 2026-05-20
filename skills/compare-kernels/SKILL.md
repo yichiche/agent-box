@@ -204,7 +204,7 @@ When listing files to check, use this mapping of module → source files:
 | ReplicatedLinear, ColumnParallelLinear, RowParallelLinear | `layers/linear.py` (lines 44-55: HIP quant disable), `layers/quantization/fp8_utils.py` (lines 350-465: `dispatch_w8a8_block_fp8_linear()` — deep_gemm vs ck_gemm vs a8w8) |
 | FP8 quantization dispatch | `layers/quantization/fp8.py` (lines 106-115), `layers/quantization/fp8_utils.py` |
 | MQALayer / Attention | `layers/attention/dsv4/compressor.py` (line 396: HIP path), `layers/attention/hip_flash_mla.py`, `layers/attention/deepseek_v4_backend_hip_radix.py` |
-| Compressor / MHC | `layers/attention/dsv4/compressor.py`, `layers/attention/dsv4/tilelang_kernel.py`, `layers/mhc.py` |
+| Compressor / MHC | `layers/attention/dsv4/compressor.py`, `layers/attention/dsv4/compress_hip.py` (HIP decode/extend fused paths), `layers/attention/dsv4/tilelang_kernel.py`, `layers/mhc.py` |
 | FusedMoE | `layers/moe/moe_runner/deep_gemm.py` (lines 45-66), `layers/moe/cutlass_moe.py`, `layers/moe/rocm_moe_utils.py` |
 | MoE TopK | `layers/moe/topk.py` |
 | MoE Token Dispatch | `layers/moe/token_dispatcher/standard.py`, `layers/moe/token_dispatcher/moriep.py` |
@@ -285,8 +285,25 @@ These are changes in SGLang Python code that reduce kernel count or improve disp
 Tier 1: Code refactor — estimated savings: ~X us
   Change: [specific code change]
   File:   [exact file path and line range]
-  Before: [what currently happens — which kernels fire]
-  After:  [what should happen — which kernels fire]
+
+  Before (N kernels, X us):
+  ┌────────────────┬──────────┬────────────────────────────────────┐
+  │ Category       │ Time(us) │ Kernel                             │
+  ├────────────────┼──────────┼────────────────────────────────────┤
+  │ normalization  │     3.8  │ _rms_normalize_kernel              │
+  │ embedding      │     4.4  │ apply_rotary_emb_triton_kernel     │
+  └────────────────┴──────────┴────────────────────────────────────┘
+                                                       Total: 8.2 us
+
+  After (M kernels, Y us):
+  ┌────────────────┬──────────┬────────────────────────────────────┐
+  │ Category       │ Time(us) │ Kernel                             │
+  ├────────────────┼──────────┼────────────────────────────────────┤
+  │ embedding      │    ~4.5  │ fused_norm_rope_inplace_triton     │
+  └────────────────┴──────────┴────────────────────────────────────┘
+                                                       Total: ~4.5 us
+
+  Savings: ~3.7 us (2 kernels → 1 kernel)
   Risk:   Low — no new kernel code, just dispatch/ordering change
 ```
 
@@ -311,10 +328,27 @@ When fusion isn't possible with existing kernels, write a Triton kernel:
 Tier 2: Triton kernel — estimated savings: ~X us
   What to fuse: [op1 + op2 + op3]
   Reference:    [B200 kernel name that does this fused]
-  Inputs:       [tensor shapes and dtypes]
-  Outputs:      [tensor shapes and dtypes]
   Template:     [existing Triton kernel to base on, if any]
   File to create/modify: [path]
+
+  Before (N kernels, X us):
+  ┌────────────────┬──────────┬────────────────────────────────────┐
+  │ Category       │ Time(us) │ Kernel                             │
+  ├────────────────┼──────────┼────────────────────────────────────┤
+  │ quantization   │     4.3  │ dynamic_per_group_scaled_quant     │
+  │ gemm           │    19.5  │ ck_gemm_xdl_cshuffle_v3            │
+  └────────────────┴──────────┴────────────────────────────────────┘
+                                                       Total: 23.8 us
+
+  After (M kernels, Y us):
+  ┌────────────────┬──────────┬────────────────────────────────────┐
+  │ Category       │ Time(us) │ Kernel                             │
+  ├────────────────┼──────────┼────────────────────────────────────┤
+  │ quantization   │   ~12.0  │ fused_quant_gemm_triton            │
+  └────────────────┴──────────┴────────────────────────────────────┘
+                                                       Total: ~12.0 us
+
+  Savings: ~11.8 us (2 kernels → 1 kernel)
   Risk:   Medium — new Triton code, needs testing on ROCm
 ```
 
@@ -334,14 +368,32 @@ When Triton isn't sufficient (need CK tile, assembly, or low-level HIP):
 ```
 Tier 3: aiter kernel — estimated savings: ~X us
   Target kernel: [aiter kernel name]
-  Current perf:  [X us for shape MxNxK]
-  Target perf:   [Y us (matching B200)]
   Root cause:    [why it's slow — tile size, occupancy, memory pattern]
   Files to check:
     - /sgl-workspace/aiter/aiter/ops/[...].py        (Python binding)
     - /sgl-workspace/aiter/aiter/jit/module_[...].so  (compiled kernel)
     - /sgl-workspace/aiter/csrc/[...]/               (C++/HIP source)
     - /sgl-workspace/aiter/op_tests/test_[...].py    (unit test)
+
+  Before (N kernels, X us):
+  ┌────────────────┬──────────┬────────────────────────────────────┐
+  │ Category       │ Time(us) │ Kernel                             │
+  ├────────────────┼──────────┼────────────────────────────────────┤
+  │ gemm           │    21.7  │ moe_gemm1_0                        │
+  │ gemm           │    10.8  │ moe_gemm2_0                        │
+  └────────────────┴──────────┴────────────────────────────────────┘
+                                                       Total: 32.5 us
+
+  After (target):
+  ┌────────────────┬──────────┬────────────────────────────────────┐
+  │ Category       │ Time(us) │ Kernel                             │
+  ├────────────────┼──────────┼────────────────────────────────────┤
+  │ gemm           │   ~15.0  │ moe_gemm1_0 (tuned CK tiles)       │
+  │ gemm           │    ~8.0  │ moe_gemm2_0 (tuned CK tiles)       │
+  └────────────────┴──────────┴────────────────────────────────────┘
+                                                       Total: ~23.0 us
+
+  Savings: ~9.5 us
   Risk:   High — requires CK/HIP expertise, longer dev cycle
 ```
 
@@ -443,5 +495,6 @@ Implementation Roadmap for [Block Name]:
 - **Name specific kernels and their durations** — not just categories. `ck_gemm_xdl (74.6 us) vs deep_gemm (16.3 us)` is actionable; `gemm is slower` is not.
 - **Include the source file paths** so the user knows exactly where to look for the dispatch logic.
 - **For decode traces** (CUDA graph replayed layers without Module column data), fall back to the sequential kernel-by-kernel comparison from the original approach.
+- **Decode vs prefill compressor paths differ significantly on HIP**. In decode, the compressor uses fused kernels (`_c4_decode_kernel`, `_compress_norm_rope_kernel`, `fp8_paged_mqa_logits_kernel`, `_triton_fused_store_indexer_kernel`, `_triton_fused_store_flashmla_kernel`) — there is NO separate `cunn_SpatialSoftMaxForward`, elementwise mul, or reduce/sum kernel. The unfused `softmax + mul + sum` path (from `compress_decode_old` / the generic Python compressor) only appears in prefill/extend traces or when fused paths are disabled. When analyzing decode traces and seeing no softmax/mul/sum in the compressor region, this is expected — don't flag it as missing.
 - **Always check for existing fused aiter ops first** before proposing new kernels. The `/sgl-workspace/aiter/aiter/ops/` directory has many fused variants that may already solve the problem.
 - **Priority order is strict**: code refactor → Triton → aiter C++/HIP. Never propose Tier 3 if Tier 1 or 2 can achieve the same savings.
