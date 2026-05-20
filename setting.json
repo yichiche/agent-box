@@ -17,5 +17,5 @@
       "mcp__ide__executeCode"
     ]
   },
-  "fastMode": true
+  "model": "claude-opus-4-6[1m]"
 }
