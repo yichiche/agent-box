@@ -179,10 +179,10 @@ After making changes, run:
 
 ```bash
 # Syntax check — import the modified module
-cd /home/yichiche/sglang && python3 -c "import sglang.srt.layers.<module_name>"
+cd /home/yichiche/sglang/python && python3 -c "import sglang.srt.layers.<module_name>"
 
 # Lint check
-cd /home/yichiche/sglang && python3 -m ruff check <changed_files> --fix
+cd /home/yichiche/sglang/python && python3 -m ruff check <changed_files> --fix
 ```
 
 If either fails, fix the issues before proceeding.
@@ -191,16 +191,13 @@ If either fails, fix the issues before proceeding.
 
 ## Step 3: Validate
 
-**Do NOT commit before validation passes.** Invoke the `/validate` skill first:
+**Do NOT commit before validation passes.** Immediately invoke `/validate` — do NOT ask the user for confirmation, just trigger it:
 
 ```
-Skill: validate
+Skill(skill="validate")
 ```
 
-This runs the full validation pipeline:
-1. **Accuracy test** (GSM8K, 2000 questions) — must pass threshold (default 0.88 for DSv4)
-2. **Profiling run** — trace analysis to confirm the kernel change took effect
-3. **Benchmark** — full performance benchmark
+This automatically runs the full validation pipeline (server startup, accuracy, profiling, benchmark). No manual approval needed — the validate skill handles all interaction internally.
 
 ### Interpreting profiling results
 
@@ -317,7 +314,68 @@ All SGLang paths relative to `/home/yichiche/sglang/python/sglang/srt/`.
 
 - **Priority order is strict**: Tier 1 → Tier 2 → Tier 3. Never propose Tier 3 if Tier 1/2 can achieve the same savings.
 - **Always check aiter ops first** — many fused variants already exist but aren't wired up in SGLang.
-- **Guard new HIP paths** with `is_hip()` or `_use_aiter` — never break the CUDA path.
-- **Add env var escape hatch** for Tier 2/3 changes: `SGLANG_OPT_<FEATURE>=1` so the old path remains accessible.
+- **Guard new HIP paths** with `_use_aiter` — never break the CUDA path. Follow the Backend-Gated Changes rules below.
+- **No custom env vars** for gating. Use `_use_aiter` (and `_is_gfx95_supported` when needed) as the standard on/off switch. `SGLANG_USE_AITER=0` disables all aiter paths system-wide.
 - **Test decode AND extend** — some optimizations only apply to one mode.
 - **Small-M vs large-M** — decode uses M=1-8, extend uses M=hundreds. Kernel performance characteristics differ dramatically between these regimes.
+
+---
+
+## Backend-Gated Changes (mandatory for all kernel implementations)
+
+When adding HIP/aiter/ROCm-specific optimizations to SGLang, gate all imports and code paths behind module-level feature flags. Keep the common path byte-identical.
+
+### Core Principles
+
+1. All backend-specific imports go inside `if _use_aiter:` blocks at module top
+2. Common path stays byte-for-byte identical when feature flag is off
+3. Prefer optional kwargs (default `None`) over state mutation across module boundaries
+4. Minimize diff: inline `x_quant if x_quant is not None else x` at call sites so `x` is never reassigned
+5. Use explicit flag checks (`_use_aiter and _is_gfx95_supported`) — makes kernel path reasons visible at the branch site
+6. Changes to base / shared classes require explicit user confirmation BEFORE implementing
+
+### Canonical Gating Pattern
+
+Mirror `python/sglang/srt/layers/communicator.py:81-103`:
+
+```python
+from sglang.srt.utils.common import (
+    get_bool_env_var, is_hip, is_gfx95_supported,
+)
+
+_is_hip = is_hip()
+_use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+
+if _use_aiter:
+    from aiter.ops.something import some_op as _aiter_some_op
+    if is_gfx95_supported():
+        from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+```
+
+Rules:
+- Optional libraries (`aiter`, `aiter.ops.triton.*`) MUST be inside the gate. Top-level `import aiter` is forbidden.
+- Compute `_use_aiter` once at module top. Use `if _use_aiter:` as the outer gate, then nest hardware checks inside.
+- Downstream code branches on `_use_aiter` to select kernel paths.
+
+### Forbidden Patterns
+
+| Anti-pattern | Use instead |
+|---|---|
+| `self.other_module._private_attr = ...` | Optional kwarg |
+| `self._cached = ...; self._cached = None` | Local variable |
+| `import aiter` at top level | `if _use_aiter: import aiter` |
+| Required kwarg added to shared class | Optional with default |
+| Removing existing branch | Add new branch alongside |
+| Branching on `is_hip()` inside hot path | Module-level flag |
+| Custom `SGLANG_OPT_*` env var for gating | `_use_aiter` flag |
+
+### Implementation Checklist
+
+Before declaring done:
+- [ ] All new imports of optional packages inside `if _use_aiter:` gates
+- [ ] Module-level feature flags computed once, not per-call
+- [ ] Common-path branch (`else:`) produces byte-identical behavior
+- [ ] No `self._foo = ...` state for cross-module data sharing
+- [ ] No new required kwargs on base / shared classes
+- [ ] Each branch uses explicit flag checks showing why the kernel path differs
+- [ ] `SGLANG_USE_AITER=0` disables all new paths (standard escape hatch)
