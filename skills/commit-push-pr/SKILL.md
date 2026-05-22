@@ -264,3 +264,13 @@ After the PR is created, show the user:
 - A summary of the full flow: what was committed, where it was pushed, and the PR link
 - The draft file location for reference
 - For sglang: remind them about the review process (ping merge oncalls, get CODEOWNER approvals, trigger CI)
+
+## Step 11: Offer to return to the base branch
+
+After reporting, ask the user with `AskUserQuestion` whether they want to switch back to the base integration branch (e.g., `amd/deepseek_v4`). This is useful when the PR was submitted from a feature branch and the user wants to continue working on the next task from the integration branch.
+
+Options:
+- **Yes — checkout `<base_branch>`**: Run `git checkout <base_branch>` to return to the integration branch. Show the resulting `git log --oneline -3` so the user can confirm they're at the right commit.
+- **No — stay on `<current_branch>`**: Do nothing, keep the current feature branch checked out.
+
+Only offer this step when the current branch is different from the PR base branch (i.e., the user is on a feature branch, not already on the base).
