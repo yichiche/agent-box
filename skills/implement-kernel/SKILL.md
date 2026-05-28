@@ -18,7 +18,18 @@ If no description is provided, ask with `AskUserQuestion`.
 
 ## Step 0: Gather optimization design
 
-### If the user provided a description after `/implement-kernel`:
+### 0a: Detect the active SGLang installation
+
+Before doing anything else, determine which SGLang repo is in use. There may be multiple SGLang directories on the system (e.g., `/sgl-workspace/sglang`, `$HOME/sglang`). **Always use the one that's currently installed in the active Python environment.**
+
+```bash
+SGLANG_ROOT=$(python3 -c "import sglang, pathlib; print(pathlib.Path(sglang.__file__).resolve().parents[2])")
+echo "Active SGLang root: $SGLANG_ROOT"
+```
+
+Use `$SGLANG_ROOT` for all subsequent paths instead of hardcoded paths like `$HOME/sglang` or `/sgl-workspace/sglang`. All file paths in the source reference table below should be prefixed with `$SGLANG_ROOT/python/sglang/srt/` rather than a hardcoded path.
+
+### 0b: If the user provided a description after `/implement-kernel`:
 
 Parse the free text for:
 - **What to optimize**: the specific kernel, module, or operation
@@ -179,10 +190,10 @@ After making changes, run:
 
 ```bash
 # Syntax check — import the modified module
-cd /home/yichiche/sglang/python && python3 -c "import sglang.srt.layers.<module_name>"
+cd "$SGLANG_ROOT/python" && python3 -c "import sglang.srt.layers.<module_name>"
 
 # Lint check
-cd /home/yichiche/sglang/python && python3 -m ruff check <changed_files> --fix
+cd "$SGLANG_ROOT/python" && python3 -m ruff check <changed_files> --fix
 ```
 
 If either fails, fix the issues before proceeding.
@@ -278,7 +289,7 @@ If all validation passes, tell the user the changes are ready for `/commit-push`
 
 When identifying target files, use this mapping of module/block to source files.
 
-All SGLang paths relative to `/home/yichiche/sglang/python/sglang/srt/`.
+All SGLang paths relative to `$SGLANG_ROOT/python/sglang/srt/` (where `$SGLANG_ROOT` was detected in Step 0a).
 
 | Module / Block | SGLang Source Files |
 |---|---|

@@ -210,7 +210,7 @@ When listing files to check, use this mapping of module → source files:
 | MoE Token Dispatch | `layers/moe/token_dispatcher/standard.py`, `layers/moe/token_dispatcher/moriep.py` |
 | MoE Triton Config | `layers/moe/moe_runner/triton_utils/fused_moe_triton_config.py` |
 
-All paths relative to `$HOME/sglang/python/sglang/srt/`.
+All paths relative to `$SGLANG_ROOT/python/sglang/srt/` (where `$SGLANG_ROOT` is the active SGLang install, detected via `python3 -c "import sglang, pathlib; print(pathlib.Path(sglang.__file__).resolve().parents[2])"`). Do NOT hardcode `$HOME/sglang` or `/sgl-workspace/sglang`.
 
 ## Step 6: Flag category mismatches
 
