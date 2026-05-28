@@ -1,12 +1,25 @@
 ---
-description: Validate SGLang code changes — accuracy test, profiling, and benchmark. Use when the user says "validate the result" or "/validate" after making SGLang changes.
+description: Validate SGLang code changes — baseline benchmark, accuracy test, profiling, and after benchmark with before/after comparison. Use when the user says "validate the result" or "/validate" after making SGLang changes.
 ---
 
 # Validate SGLang Changes
 
-End-to-end validation of code changes in SGLang. Starts the server, confirms accuracy, profiles to verify the change actually works, and runs a normal benchmark. Collects all results so they are ready for PR submission.
+End-to-end validation of code changes in SGLang. Collects baseline benchmark (with change reverted), then runs accuracy, profiling, and after benchmark (with change applied). Produces a before/after comparison table ready for PR submission.
 
 ## Step 0: Gather context
+
+### 0a: Detect the active SGLang installation
+
+Before doing anything else, determine which SGLang repo is in use. There may be multiple SGLang directories on the system (e.g., `/sgl-workspace/sglang`, `$HOME/sglang`). **Always use the one that's currently installed in the active Python environment.**
+
+```bash
+SGLANG_ROOT=$(python3 -c "import sglang, pathlib; print(pathlib.Path(sglang.__file__).resolve().parents[2])")
+echo "Active SGLang root: $SGLANG_ROOT"
+```
+
+Use `$SGLANG_ROOT` for all subsequent paths (benchmarks, scripts, git operations, etc.) instead of hardcoded paths like `$HOME/sglang` or `/sgl-workspace/sglang`.
+
+### 0b: Ask the user
 
 Ask the user using `AskUserQuestion`:
 
@@ -17,27 +30,61 @@ Ask the user using `AskUserQuestion`:
 
 Parse the server script to extract the **port** (look for `--port <N>` in the launch command).
 
-## Step 1: Start the server
+## Step 1: Baseline Benchmark
 
-### 1a: Check if server is already running
+The purpose of this step is to collect performance numbers **without** the code change, so we can compare before/after in the PR.
+
+### 1a: Determine how to revert
+
+Check `git status` and `git log` to determine the state:
+
+```bash
+git status --porcelain
+git log --oneline -3
+```
+
+- **If there are uncommitted changes** (modified/added files): use `git stash` to revert, `git stash pop` to restore.
+- **If the working tree is clean but on a feature branch with commits ahead of the base**: use `git checkout HEAD~1` to go back one commit (the pre-change state), then `git checkout -` to return.
+- **If neither applies** (e.g., changes are mixed with other work, or can't determine baseline): ask the user with `AskUserQuestion` whether to skip baseline or provide a baseline branch/commit.
+
+### 1b: Revert the changes
+
+Based on 1a:
+
+```bash
+# Option A: uncommitted changes
+git stash
+
+# Option B: committed on feature branch
+git checkout HEAD~1
+```
+
+Verify the revert worked — the changed files should no longer contain the optimization.
+
+### 1c: Start server (baseline code)
+
+Check if a server is already running:
 
 ```bash
 curl -s -o /dev/null -w "%{http_code}" http://localhost:<PORT>/health
 ```
 
-If `200`, skip to Step 2.
+If `200`, kill it first — we need the baseline code running:
 
-### 1b: Launch the server in background
+```bash
+pkill -f "sglang.launch_server.*--port <PORT>" 2>/dev/null
+sleep 5
+pkill -9 -f "sglang" 2>/dev/null
+sleep 3
+```
 
-Run the server script in the background using the Bash tool with `run_in_background: true`:
+Launch the server in the background:
 
 ```bash
 bash <server_script>
 ```
 
-### 1c: Wait for server readiness
-
-Poll until the server is ready (health endpoint returns 200). Use a loop with short sleeps:
+Poll until ready:
 
 ```bash
 for i in $(seq 1 120); do
@@ -52,14 +99,81 @@ echo "Server failed to start after 1200s"
 exit 1
 ```
 
-If the server doesn't start within ~20 minutes, **STOP** and report the failure.
+If the server doesn't start within ~20 minutes, **restore changes immediately** (stash pop / checkout -), warn the user, and skip baseline.
 
-## Step 2: Accuracy Test
+### 1d: Run baseline e2e benchmark
+
+Run the client benchmark script as-is:
+
+```bash
+bash <client_script>
+```
+
+**Parse and record these metrics from the output:**
+- `Total token throughput (tok/s)`
+- `Output token throughput (tok/s)`
+- `Median TTFT (ms)`
+- `Median ITL (ms)`
+- `Median TPOT (ms)`
+- `Median E2E Latency (ms)`
+
+Store these as "baseline" numbers for the summary report.
+
+### 1e: Kill the baseline server
+
+```bash
+pkill -f "sglang.launch_server.*--port <PORT>" 2>/dev/null
+sleep 5
+pkill -9 -f "sglang" 2>/dev/null
+sleep 3
+```
+
+Verify it's stopped:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}" http://localhost:<PORT>/health 2>/dev/null
+```
+
+### 1f: Restore the changes
+
+```bash
+# Option A: if we used git stash
+git stash pop
+
+# Option B: if we used git checkout HEAD~1
+git checkout -
+```
+
+Verify the changes are back — check `git status` or `git diff` to confirm.
+
+**IMPORTANT:** If anything in steps 1c-1e fails, ALWAYS restore the changes before proceeding. Never leave the user's working tree in the reverted state.
+
+## Step 2: Start the server (with changes)
+
+### 2a: Check if server is already running
+
+```bash
+curl -s -o /dev/null -w "%{http_code}" http://localhost:<PORT>/health
+```
+
+If `200`, skip to Step 3.
+
+### 2b: Launch the server in background
+
+```bash
+bash <server_script>
+```
+
+### 2c: Wait for server readiness
+
+Poll until ready (same loop as Step 1c). If the server doesn't start within ~20 minutes, **STOP** and report the failure.
+
+## Step 3: Accuracy Test
 
 Run the GSM8K accuracy benchmark:
 
 ```bash
-cd $HOME/sglang && python3 benchmarks/gsm8k/bench_sglang.py --num-questions 2000 --parallel 1000 --num-shots 5 --port <PORT>
+cd "$SGLANG_ROOT" && python3 benchmark/gsm8k/bench_sglang.py --num-questions 2000 --parallel 1000 --num-shots 5 --port <PORT>
 ```
 
 **Interpret the results:**
@@ -75,11 +189,11 @@ cd $HOME/sglang && python3 benchmarks/gsm8k/bench_sglang.py --num-questions 2000
 **Save the result:**
 - Record: `accuracy = <value>`, `num_questions = 2000`, `num_shots = 5`, `parallel = 1000`
 
-## Step 3: Profiling Run
+## Step 4: Profiling Run
 
 The purpose of this step is to confirm the code change actually has the intended effect at the kernel/module level. This is NOT a performance benchmark — it is a correctness check for the optimization.
 
-### 3a: Prepare the profiling client command
+### 4a: Prepare the profiling client command
 
 Take the client benchmark script and modify it for profiling:
 
@@ -88,11 +202,11 @@ Take the client benchmark script and modify it for profiling:
 
 Show the modified profiling command to the user and confirm before running.
 
-### 3b: Run the profiling client
+### 4b: Run the profiling client
 
 Execute the modified client command. The trace files will be generated under `/tmp/` by default.
 
-### 3c: Locate and copy the trace files
+### 4c: Locate and copy the trace files
 
 After the profiling run completes:
 
@@ -103,7 +217,7 @@ After the profiling run completes:
    ```
 3. Identify the GPU 0 trace file: `*TP-0.trace.json.gz`
 
-### 3d: Analyze the trace
+### 4d: Analyze the trace
 
 ```bash
 python3 $HOME/agent-box/profile/trace_module_analyzer.py \
@@ -111,7 +225,7 @@ python3 $HOME/agent-box/profile/trace_module_analyzer.py \
   -o analysis_<change_description>
 ```
 
-### 3e: Interpret profiling results
+### 4e: Interpret profiling results
 
 Review the trace analysis output:
 - Look for the specific kernels that the code change was supposed to affect
@@ -120,46 +234,106 @@ Review the trace analysis output:
 
 Ask the user to confirm the profiling results look correct before proceeding.
 
-## Step 4: Normal Benchmark
+## Step 5: E2E Benchmark (after)
 
-Run the client benchmark script as-is — full performance benchmark without `--profile`:
+Run the client benchmark script as-is — the **same command** used for baseline in Step 1d:
 
 ```bash
 bash <client_script>
 ```
 
-**Record the results:**
-- Parse output for key metrics: throughput (tokens/s), latency (TTFT, ITL, E2E)
-- Save all numbers for PR submission
+**Parse and record the same metrics** as baseline:
+- `Total token throughput (tok/s)`
+- `Output token throughput (tok/s)`
+- `Median TTFT (ms)`
+- `Median ITL (ms)`
+- `Median TPOT (ms)`
+- `Median E2E Latency (ms)`
 
-## Step 5: Summary Report
+Store these as "after" numbers.
+
+## Step 6: Summary Report
+
+### 6a: Kernel-to-E2E impact analysis
+
+After profiling (Step 4) and the after benchmark (Step 5) are both complete, calculate the expected e2e impact from the kernel-level changes observed in the trace. This connects the micro-level optimization to macro-level metrics and helps the reader judge whether the benchmark deltas are real signal or noise.
+
+**How to calculate:**
+
+1. From the profiling trace analysis (Step 4d), read the detail sheets for each layer type. For each layer type, identify:
+   - Which kernels changed (appeared, disappeared, or changed duration)
+   - The per-layer kernel time savings (sum of eliminated/reduced kernel times)
+
+2. Multiply per-layer savings by the number of layers of that type per iteration:
+   ```
+   total_savings_us = sum(per_layer_savings[type] * layer_count[type] for type in layer_types)
+   ```
+
+3. Compute expected ITL impact:
+   ```
+   expected_itl_delta_pct = total_savings_us / (baseline_itl_ms * 1000) * 100
+   ```
+
+4. For TTFT: note whether the kernel change applies to prefill. Prefill is typically dominated by large GEMMs, so small kernel fusions have negligible TTFT impact. State this explicitly.
+
+5. Compare expected vs observed:
+   - If observed delta is within ~2x of expected: consistent (kernel savings may be partially masked by run-to-run variance)
+   - If observed delta is much larger than expected: other factors at play (warmup, scheduling, memory)
+   - If observed delta is opposite direction from expected: the optimization may not be working as intended — investigate
+
+### 6b: Compose the report
+
+Compute deltas between baseline and after for each metric. For throughput metrics (higher is better), delta = `(after - baseline) / baseline * 100`. For latency metrics (lower is better), delta = `(after - baseline) / baseline * 100` (negative means improvement).
 
 ```
 === Validation Summary ===
 
 Model: <model name>
 
-1. Accuracy Test: PASS / FAIL
+1. E2E Benchmark Comparison:
+   | Metric                    | Baseline | After   | Delta   |
+   |---------------------------|----------|---------|---------|
+   | Total throughput (tok/s)   | 1550.2   | 1583.5  | +2.1%   |
+   | Output throughput (tok/s)  | 172.3    | 175.9   | +2.1%   |
+   | Median TTFT (ms)           | 1560     | 1542    | -1.2%   |
+   | Median ITL (ms)            | 20.58    | 20.56   | -0.1%   |
+   | Median TPOT (ms)           | 21.15    | 21.10   | -0.2%   |
+   | Median E2E Latency (ms)    | 23200    | 23079   | -0.5%   |
+
+2. Kernel-to-E2E Impact Analysis:
+   | Layer Type | Layers | Kernel Savings/Layer | Total Savings |
+   |------------|--------|---------------------|---------------|
+   | C-type     | 30     | 6.3 us              | 189 us        |
+   | A-type     | 61     | 0 us                | 0 us          |
+   | B-type     | 30     | 0 us                | 0 us          |
+   | **Total**  |        |                     | **189 us**    |
+
+   Expected ITL improvement: 189 / 20570 = 0.92%
+   Observed ITL improvement: 0.05%
+   Assessment: Kernel savings (~189 us) is <1% of iteration time (~20.6 ms),
+               within run-to-run benchmark noise. Observed delta is consistent.
+
+   TTFT impact: Negligible — prefill dominated by large GEMMs.
+
+3. Accuracy Test: PASS / FAIL
    - Score: <accuracy> (threshold: <threshold>)
    - Questions: 2000, Shots: 5, Parallel: 1000
 
-2. Profiling: CONFIRMED / NOT CONFIRMED
+4. Profiling: CONFIRMED / NOT CONFIRMED
    - <Key observations about the code change's effect>
    - Trace analysis output: <path to analysis xlsx>
-
-3. Benchmark:
-   - <Key performance metrics>
-   - <Throughput / latency numbers>
 ```
+
+If baseline was skipped (Step 1 failed or was skipped), show only the "after" numbers and note "Baseline: not available". The kernel-to-e2e analysis can still be computed using the "after" profiling trace and baseline ITL.
 
 Tell the user:
 - Results are ready for PR submission
 - Profiling analysis file path for reference
 - If any step failed or was skipped, highlight it clearly
 
-## Step 6: Kill the server
+## Step 7: Kill the server
 
-After the summary report is printed, shut down the server that was launched in Step 1:
+After the summary report is printed, shut down the server that was launched in Step 2:
 
 ```bash
 pkill -f "sglang.launch_server.*--port <PORT>" 2>/dev/null
@@ -174,4 +348,4 @@ curl -s -o /dev/null -w "%{http_code}" http://localhost:<PORT>/health 2>/dev/nul
 
 If the health check returns `000` or a non-200 code, report "Server stopped." to the user.
 
-**Note:** If the server was already running before validation started (i.e., Step 1a detected a running server and we skipped launching), do NOT kill it — the user may need it for other work. Only kill the server if we launched it ourselves in Step 1b.
+**Note:** If the server was already running before validation started (i.e., Step 2a detected a running server and we skipped launching), do NOT kill it — the user may need it for other work. Only kill the server if we launched it ourselves in Step 2b.

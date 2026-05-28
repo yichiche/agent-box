@@ -47,8 +47,13 @@ Summarize each session into a one-line activity description. Focus on:
 
 ## Step 3: Gather data from git
 
-Run across all known repo roots. Check `_shared/repo-config.md` for the repo table, plus scan common locations:
-- `$HOME/sglang`
+Run across all known repo roots. Check `_shared/repo-config.md` for the repo table, plus detect the active SGLang and scan common locations:
+
+```bash
+SGLANG_ROOT=$(python3 -c "import sglang, pathlib; print(pathlib.Path(sglang.__file__).resolve().parents[2])" 2>/dev/null)
+```
+
+- `$SGLANG_ROOT` (the active SGLang installation)
 - `$HOME/agent-box`
 
 For each repo, run:

@@ -13,8 +13,10 @@ jacky.cheng <yichiche@amd.com>
 
 | Repo root | Push remote URL | PR base repo | PR base branch | Commit on main? |
 |---|---|---|---|---|
-| `$HOME/sglang` | `https://github.com/yichiche/sglang` | `sgl-project/sglang` | `main` | No — must use feature branch |
+| `$SGLANG_ROOT` (detect via `python3 -c "import sglang, pathlib; print(pathlib.Path(sglang.__file__).resolve().parents[2])"`) | `https://github.com/yichiche/sglang` | `sgl-project/sglang` | `main` | No — must use feature branch |
 | `$HOME/agent-box` | `https://github.com/yichiche/agent-box` | `yichiche/agent-box` | `main` | Yes — commit directly on main |
+
+**IMPORTANT:** The SGLang repo root may be at different paths on different machines (e.g., `/sgl-workspace/sglang`, `$HOME/sglang`). Always detect it dynamically from the active Python environment instead of hardcoding a path.
 
 For any repo not listed above, ask the user for the remote URL, PR base repo, and base branch.
 
