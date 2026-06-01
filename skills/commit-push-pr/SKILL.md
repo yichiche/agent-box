@@ -7,13 +7,19 @@ description: Commit, push, and create a PR in one flow — checks state at each 
 Follow these steps precisely. This skill chains to `/commit-push` (which itself chains to `/commit`).
 Read `_shared/repo-config.md` for repo table, remote URLs, PR draft location/naming, and safety rules.
 
-## Step 0: Ensure `gh` CLI is available
+## Step 0: Ensure `gh` CLI is available and authenticated
 
 Check that the GitHub CLI is the real one (v2.x+, not the pip `gh` v0.0.4):
 ```bash
 gh --version 2>&1
 ```
 If missing or wrong version, follow the install steps in `_shared/repo-config.md`.
+
+After `gh` is installed, check authentication:
+```bash
+gh auth status 2>&1
+```
+If not logged in, ask the user to run `! gh auth login` in the prompt (the `!` prefix runs the command in this session so its output lands directly in the conversation). Wait for the user to confirm they've completed the login flow before proceeding.
 
 ## Step 1: Gather full state
 
@@ -182,9 +188,16 @@ Use `--body-file` (not `--body`) so the draft markdown is passed verbatim withou
 
 If this succeeds: capture the printed PR URL and skip to Step 10.
 
+If Attempt 1 fails with an **auth error** (e.g., "please run `gh auth login`", "token lifetime", "OAuth token", expired/invalid token), do NOT fall through to Attempt 2 immediately. Instead:
+
+1. Tell the user the auth failed and ask them to run `! gh auth login` in the prompt.
+2. Use `AskUserQuestion` to wait for the user to confirm they've completed the login flow.
+3. Verify with `gh auth status`.
+4. **Retry Attempt 1** with `gh pr create`. Only proceed to Attempt 2 if this retry also fails.
+
 ### Attempt 2 — `gh pr create --web` (browser prefill)
 
-Trigger this when Attempt 1 fails with auth/permission errors (HTTP 403, "Resource not accessible by integration", "GraphQL: ..."). This is common when the API token can push to the user's fork but does not have write access to `<base_repo>`.
+Trigger this when Attempt 1 fails with **permission errors** (HTTP 403, "Resource not accessible by integration", "GraphQL: ...") even after successful auth. This is common when the API token can push to the user's fork but does not have write access to `<base_repo>`.
 
 ```bash
 gh pr create \

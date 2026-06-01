@@ -11,15 +11,28 @@ Generate a standup-format summary of what the user accomplished today (or a spec
 - `/standup` — summarize today
 - `/standup yesterday` — summarize yesterday
 - `/standup 2026-05-19` — summarize a specific date
+- `/standup 7 days` or `/standup 7d` — summarize the last 7 days (multi-day range)
 
-If `$ARGUMENTS` is provided, parse it as a date or relative day. Default: today.
+If `$ARGUMENTS` is provided, parse it as a date, relative day, or multi-day range. Default: today.
 
-## Step 1: Determine the target date
+## Step 1: Determine the target date(s)
 
 - Default: today's date (from the system)
 - If user says "yesterday", compute yesterday's date
 - If user provides a date string (e.g., `2026-05-19`), use that
-- Store as `$TARGET_DATE` (YYYY-MM-DD) and `$PREV_DATE` (the day before `$TARGET_DATE`)
+- If user provides a number of days (e.g., `7 days`, `7d`, `5 days`), compute a date range: from `today - N + 1` to `today`
+- Store as `$START_DATE` and `$END_DATE` (both YYYY-MM-DD). For single-day mode, `$START_DATE == $END_DATE`.
+- Also store `$PREV_DATE` (the day before `$START_DATE`)
+
+### Multi-day mode
+
+When a range spans multiple days:
+- In Step 2 and 3, query from `$START_DATE 00:00` to `$END_DATE 23:59` instead of a single day
+- In Step 4, use the header format `Jacky – M/D–M/D` (e.g., `Jacky – 5/23–5/29`)
+- Group work thematically rather than by day — the audience wants a weekly summary, not 7 separate dailies
+- Still follow the same bullet-point rules (high-level, max 3 per category, concrete numbers)
+- **Focus on performance results and PR status** — the audience wants to know what shipped, what's in review, and what perf numbers changed. Omit internal tooling (agent-box, skills) unless the user specifically asks.
+- **Organize by PR / deliverable**, not by activity type. Each bullet should reference a PR link and its status (merged, open, closed).
 
 ## Step 2: Gather data from Claude history
 
@@ -29,7 +42,7 @@ Read `~/.claude/history.jsonl`. Each line is a JSON object with fields:
 - `project`: working directory
 - `sessionId`: session UUID
 
-Filter entries where `timestamp` falls on `$TARGET_DATE` (convert to local time).
+Filter entries where `timestamp` falls between `$START_DATE` and `$END_DATE` inclusive (convert to local time).
 
 Group by `sessionId`. For each session:
 1. Find the transcript file: `~/.claude/projects/*/SESSION_ID.jsonl`
@@ -58,14 +71,14 @@ SGLANG_ROOT=$(python3 -c "import sglang, pathlib; print(pathlib.Path(sglang.__fi
 
 For each repo, run:
 ```bash
-git -C <repo> log --author="yichiche" --since="$TARGET_DATE 00:00" --until="$TARGET_DATE 23:59" --oneline --no-merges
+git -C <repo> log --author="yichiche" --since="$START_DATE 00:00" --until="$END_DATE 23:59" --oneline --no-merges
 ```
 
 Collect commit messages and counts.
 
-Also check for PRs created or merged on `$TARGET_DATE`:
+Also check for PRs created or merged in the date range:
 ```bash
-gh pr list --repo <pr-base-repo> --author=yichiche --search "created:$TARGET_DATE" --state all --json number,title,url,state 2>/dev/null
+gh pr list --repo <pr-base-repo> --author=yichiche --search "created:$START_DATE..$END_DATE" --state all --json number,title,url,state 2>/dev/null
 ```
 
 ## Step 4: Compose the standup
@@ -84,8 +97,8 @@ Today:
 
 ### Rules
 
-1. **Header**: `Jacky – M/D` where M/D is the target date (no leading zeros, e.g., `5/20` not `05/20`)
-2. **"Yesterday" section** contains what was done on `$TARGET_DATE`. Despite the name, this section always describes the target date's work (standup convention: you report "yesterday" in tomorrow's standup).
+1. **Header**: `Jacky – M/D` for single day, or `Jacky – M/D–M/D` for multi-day (no leading zeros, e.g., `5/20` not `05/20`)
+2. **"Yesterday" section** contains what was done on the target date(s). Despite the name, this section always describes the target period's work (standup convention). For multi-day ranges, this becomes a thematic summary, not per-day.
 3. **Group by project/workstream** (e.g., "dsv4 pro", "wan 2.2", "agent-box tooling"). Use short readable names, not full paths.
 4. **Max 3 bullets per category.** Merge related items into a single high-level bullet. Prefer outcome over activity — say what changed, not each step taken.
 5. **High-level tone.** Write for a manager or cross-team audience, not a detailed changelog. One bullet = one theme (e.g., "Profiled decode phase, MI355 at ~56% of B200" not separate bullets for each kernel).
