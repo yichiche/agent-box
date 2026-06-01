@@ -147,7 +147,7 @@ For each GPU 0 trace file (decode and/or extend):
 ```bash
 python3 $HOME/agent-box/profile/trace_module_analyzer.py \
   $HOME/dsv4/<profile_label>/<trace-file> \
-  -o analysis_<phase>
+  -o analysis_<phase>.xlsx
 ```
 
 Where `<phase>` is `decode`, `extend`, or `combined` depending on what trace is being analyzed.
