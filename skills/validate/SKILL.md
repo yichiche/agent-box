@@ -173,7 +173,7 @@ Poll until ready (same loop as Step 1c). If the server doesn't start within ~20 
 Run the GSM8K accuracy benchmark:
 
 ```bash
-cd "$SGLANG_ROOT" && python3 benchmark/gsm8k/bench_sglang.py --num-questions 2000 --parallel 1000 --num-shots 5 --port <PORT>
+cd "$SGLANG_ROOT" && python3 benchmark/gsm8k/bench_sglang.py --num-questions 200 --parallel 2000 --port <PORT>
 ```
 
 **Interpret the results:**
@@ -187,7 +187,7 @@ cd "$SGLANG_ROOT" && python3 benchmark/gsm8k/bench_sglang.py --num-questions 200
 - If accuracy **passes**: record the exact accuracy number and proceed
 
 **Save the result:**
-- Record: `accuracy = <value>`, `num_questions = 2000`, `num_shots = 5`, `parallel = 1000`
+- Record: `accuracy = <value>`, `num_questions = 200`, `parallel = 2000`
 
 ## Step 4: Profiling Run
 
@@ -317,7 +317,7 @@ Model: <model name>
 
 3. Accuracy Test: PASS / FAIL
    - Score: <accuracy> (threshold: <threshold>)
-   - Questions: 2000, Shots: 5, Parallel: 1000
+   - Questions: 200, Parallel: 2000
 
 4. Profiling: CONFIRMED / NOT CONFIRMED
    - <Key observations about the code change's effect>

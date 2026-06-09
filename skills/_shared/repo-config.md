@@ -74,6 +74,22 @@ The draft file is pure HackMD markdown — **no YAML frontmatter**. It contains 
 - `[Tag] <one sentence description>`
 - No `Co-Authored-By` or any other trailers — forbidden by project convention.
 
+## GitHub CLI Auth
+
+The `GH_TOKEN` env var contains a fine-grained PAT that is blocked by the LMSYS Corp enterprise token lifetime policy (>366 days). **Always prefix `gh` commands with `GH_TOKEN=""`** to fall through to the OAuth token from `gh auth login` stored in `~/.config/gh/hosts.yml`.
+
+```bash
+# Correct
+GH_TOKEN="" gh pr create --repo sgl-project/sglang ...
+GH_TOKEN="" gh pr view ...
+GH_TOKEN="" gh api ...
+
+# Wrong — will fail with enterprise token lifetime error
+gh pr create --repo sgl-project/sglang ...
+```
+
+This applies to all `gh` commands that target `sgl-project/sglang`. Commands targeting `yichiche/agent-box` may work with either token.
+
 ## Safety Rules
 
 - NEVER force push unless the user explicitly asks
