@@ -4,6 +4,8 @@ description: Implement a kernel optimization for SGLang on MI355/ROCm. Takes a f
 
 # Implement Kernel Optimization
 
+> **PIPELINE_MODE**: When `pipeline_mode: true` — **NO `EnterPlanMode`**, **NO `AskUserQuestion`**, **NO `/validate`**, **NO `/commit`**. Implement the Tier-1 change directly and return. The pipeline orchestrates validation and commit externally.
+
 End-to-end workflow: design → implement → validate → commit a kernel optimization for SGLang on MI355 (ROCm/HIP). **Never commit before validation passes.**
 
 ## Usage
@@ -13,6 +15,15 @@ End-to-end workflow: design → implement → validate → commit a kernel optim
 ```
 
 If no description is provided, ask with `AskUserQuestion`.
+
+### PIPELINE_MODE (from `/kernel-fusion-pipeline`)
+
+When invoked with `PIPELINE_MODE=1` or CONFIG containing `"pipeline_mode": true`:
+
+- **Tier 1 only** — skip `EnterPlanMode` / `ExitPlanMode` and plan approval; read HIP path and implement immediately.
+- Use `CONFIG.worktree` as `$SGLANG_ROOT` if set.
+- Do **not** use `AskUserQuestion`.
+- Do **not** invoke `/validate` or `/commit` from this skill — the pipeline handles those per worktree.
 
 ---
 
@@ -50,11 +61,13 @@ Use `AskUserQuestion` with these questions:
 
 ### Identify target files
 
-Use the source file reference table (at the bottom of this document) to identify which files the optimization will touch. If ambiguous, ask the user.
+Use the source file reference table (at the bottom of this document) to identify which files the optimization will touch. If ambiguous, ask the user. (**PIPELINE_MODE**: infer from the Tier-1 description, do not ask.)
 
 ---
 
 ## Step 1: Design the implementation (plan mode)
+
+**Skip this entire step when PIPELINE_MODE is active and tier is 1** — go directly to Step 2.
 
 Enter plan mode with `EnterPlanMode`.
 
@@ -175,7 +188,7 @@ After plan approval, make the code edits.
 ### For Tier 2 (new Triton kernel):
 1. Write the Triton kernel in the appropriate file
 2. Add a Python wrapper function
-3. Add dispatch logic in the calling layer (guard with `is_hip()` or `_use_aiter`)
+3. Add dispatch logic in the calling layer (guard with `_is_hip` for non-aiter kernels, `_use_aiter` for aiter-dependent kernels)
 4. Add import statements
 5. Add a fallback path that uses the old code (behind an env var or flag)
 
@@ -325,8 +338,10 @@ All SGLang paths relative to `$SGLANG_ROOT/python/sglang/srt/` (where `$SGLANG_R
 
 - **Priority order is strict**: Tier 1 → Tier 2 → Tier 3. Never propose Tier 3 if Tier 1/2 can achieve the same savings.
 - **Always check aiter ops first** — many fused variants already exist but aren't wired up in SGLang.
-- **Guard new HIP paths** with `_use_aiter` — never break the CUDA path. Follow the Backend-Gated Changes rules below.
-- **No custom env vars** for gating. Use `_use_aiter` (and `_is_gfx95_supported` when needed) as the standard on/off switch. `SGLANG_USE_AITER=0` disables all aiter paths system-wide.
+- **Guard new HIP paths** correctly — never break the CUDA path. Follow the Backend-Gated Changes rules below.
+  - Kernels imported from **aiter**: guard with `_use_aiter`
+  - Kernels **not** from aiter (custom Triton, sgl_kernel, etc.): guard with `_is_hip`
+- **No custom env vars** for gating. Use `_use_aiter` for aiter-dependent paths and `_is_hip` for non-aiter HIP paths. `SGLANG_USE_AITER=0` disables aiter paths but NOT custom Triton kernels gated by `_is_hip`.
 - **Test decode AND extend** — some optimizations only apply to one mode.
 - **Small-M vs large-M** — decode uses M=1-8, extend uses M=hundreds. Kernel performance characteristics differ dramatically between these regimes.
 
@@ -338,7 +353,7 @@ When adding HIP/aiter/ROCm-specific optimizations to SGLang, gate all imports an
 
 ### Core Principles
 
-1. All backend-specific imports go inside `if _use_aiter:` blocks at module top
+1. Imports from **aiter** go inside `if _use_aiter:` blocks. Non-aiter HIP kernels (custom Triton, sgl_kernel) go inside `if _is_hip:` blocks or are imported unconditionally if they work on both CUDA and HIP
 2. Common path stays byte-for-byte identical when feature flag is off
 3. Prefer optional kwargs (default `None`) over state mutation across module boundaries
 4. Minimize diff: inline `x_quant if x_quant is not None else x` at call sites so `x` is never reassigned
@@ -364,9 +379,10 @@ if _use_aiter:
 ```
 
 Rules:
-- Optional libraries (`aiter`, `aiter.ops.triton.*`) MUST be inside the gate. Top-level `import aiter` is forbidden.
-- Compute `_use_aiter` once at module top. Use `if _use_aiter:` as the outer gate, then nest hardware checks inside.
-- Downstream code branches on `_use_aiter` to select kernel paths.
+- **aiter imports** (`aiter`, `aiter.ops.*`) MUST be inside `if _use_aiter:`. Top-level `import aiter` is forbidden.
+- **Non-aiter HIP kernels** (custom Triton kernels in `sglang.jit_kernel.triton.*`, `sgl_kernel.*`): gate with `if _is_hip:` instead. These don't depend on the aiter library and should remain available even when `SGLANG_USE_AITER=0`.
+- Compute `_use_aiter` and `_is_hip` once at module top.
+- Downstream code branches on the appropriate flag: `_use_aiter` for aiter ops, `_is_hip` for non-aiter HIP kernels.
 
 ### Forbidden Patterns
 
@@ -378,15 +394,16 @@ Rules:
 | Required kwarg added to shared class | Optional with default |
 | Removing existing branch | Add new branch alongside |
 | Branching on `is_hip()` inside hot path | Module-level flag |
-| Custom `SGLANG_OPT_*` env var for gating | `_use_aiter` flag |
+| Custom `SGLANG_OPT_*` env var for gating | `_use_aiter` or `_is_hip` flag |
+| `_use_aiter` for non-aiter Triton kernel | `_is_hip` (aiter not required) |
 
 ### Implementation Checklist
 
 Before declaring done:
-- [ ] All new imports of optional packages inside `if _use_aiter:` gates
+- [ ] aiter imports inside `if _use_aiter:` gates; non-aiter HIP kernels inside `if _is_hip:` gates
 - [ ] Module-level feature flags computed once, not per-call
 - [ ] Common-path branch (`else:`) produces byte-identical behavior
 - [ ] No `self._foo = ...` state for cross-module data sharing
 - [ ] No new required kwargs on base / shared classes
 - [ ] Each branch uses explicit flag checks showing why the kernel path differs
-- [ ] `SGLANG_USE_AITER=0` disables all new paths (standard escape hatch)
+- [ ] `SGLANG_USE_AITER=0` disables aiter-dependent paths; `_is_hip`-gated paths remain active on HIP
