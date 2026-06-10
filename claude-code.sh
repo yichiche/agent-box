@@ -21,14 +21,11 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 # Claude initialization / config linking
 echo "[claude] finished"
 
-## Login with personal API.
-# mkdir -p /sgl-workspace/.claude
-# cp ${HOST_HOME}/agent-box/CLAUDE.md /sgl-workspace/
-# ln ${HOST_HOME}/agent-box/setting.json ~/.claude/settings.json
-# if [ -f "${HOST_HOME}/.claude.json" ]; then
-#   ln -sf "${HOST_HOME}/.claude.json" /root/.claude.json
-# else
-#   claude
-#   cp /root/.claude.json "${HOST_HOME}/"
-#   echo "[claude] First-time initialization"
-# fi
+# Install Codex CLI (pinned to 0.132.0 — newer breaks AMD Gateway)
+if ! command -v codex >/dev/null 2>&1; then
+  echo "[codex] Installing @openai/codex@0.132.0..."
+  npm install -g @openai/codex@0.132.0 2>&1 | tail -1
+  echo "[codex] finished"
+else
+  echo "[codex] already installed ($(codex --version 2>/dev/null))"
+fi
