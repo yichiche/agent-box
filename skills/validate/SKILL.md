@@ -30,6 +30,25 @@ Ask the user using `AskUserQuestion`:
 
 Parse the server script to extract the **port** (look for `--port <N>` in the launch command).
 
+### PIPELINE_MODE (from `/kernel-fusion-pipeline`)
+
+When CONFIG contains `"pipeline_mode": true`:
+
+- **Skip Step 0b** — use CONFIG fields directly:
+  - `server_script`, `client_script`, `port`, `gpus`, `label`, `threshold`
+  - `worktree` — run all git/server commands with `git -C "$WORKTREE"` and `cd "$WORKTREE"`
+  - `pythonpath` — `export PYTHONPATH="$PYTHONPATH"` before launching server
+- **NO `AskUserQuestion`** — ever, for any reason. Specifically:
+  - Step 0b: skipped (use CONFIG fields).
+  - Step 1a fallback: auto-skip baseline if revert method is ambiguous. The pipeline handles before/after via worktree git stash.
+  - Step 4a: run profiling command immediately without confirmation.
+  - Step 4e: auto-proceed if accuracy passed and fused kernel is visible in trace. Only return failure if the expected kernel change is NOT visible.
+- Baseline revert (Step 1a): use worktree only; prefer `git stash` if dirty, else `git checkout HEAD~1` when exactly one fusion commit ahead of base.
+- **On accuracy failure**: do NOT stop and ask. Return `status: fail` with the accuracy number. The pipeline decides whether to retry or skip.
+- **On profiling mismatch**: log the mismatch, return `status: warn` with details. Do NOT ask for confirmation.
+
+---
+
 ## Step 1: Baseline Benchmark
 
 The purpose of this step is to collect performance numbers **without** the code change, so we can compare before/after in the PR.
@@ -45,7 +64,7 @@ git log --oneline -3
 
 - **If there are uncommitted changes** (modified/added files): use `git stash` to revert, `git stash pop` to restore.
 - **If the working tree is clean but on a feature branch with commits ahead of the base**: use `git checkout HEAD~1` to go back one commit (the pre-change state), then `git checkout -` to return.
-- **If neither applies** (e.g., changes are mixed with other work, or can't determine baseline): ask the user with `AskUserQuestion` whether to skip baseline or provide a baseline branch/commit.
+- **If neither applies** (e.g., changes are mixed with other work, or can't determine baseline): ask the user with `AskUserQuestion` whether to skip baseline or provide a baseline branch/commit. (**PIPELINE_MODE**: auto-skip baseline, do not ask.)
 
 ### 1b: Revert the changes
 
@@ -184,6 +203,7 @@ cd "$SGLANG_ROOT" && python3 benchmark/gsm8k/bench_sglang.py --num-questions 200
   - Show the accuracy number and sample outputs
   - Ask the user how to proceed (fix code, re-run, or skip)
   - Do NOT continue to profiling until accuracy passes
+  - (**PIPELINE_MODE**: do NOT stop or ask. Return `status: fail` with the accuracy number. The pipeline decides retry/skip.)
 - If accuracy **passes**: record the exact accuracy number and proceed
 
 **Save the result:**
@@ -200,7 +220,7 @@ Take the client benchmark script and modify it for profiling:
 1. **Add `--profile`** flag to the `sglang.bench_serving` command
 2. **Change `num_prompts`** to `num_prompts=$((max_concurrency * 2))` — profiling only needs a short run
 
-Show the modified profiling command to the user and confirm before running.
+Show the modified profiling command to the user and confirm before running. (**PIPELINE_MODE**: skip confirmation, run immediately.)
 
 ### 4b: Run the profiling client
 
@@ -232,7 +252,7 @@ Review the trace analysis output:
 - Confirm the change is reflected (new kernel appears, old kernel is gone, time changed)
 - If NOT visible, warn the user — the optimization may not be working
 
-Ask the user to confirm the profiling results look correct before proceeding.
+Ask the user to confirm the profiling results look correct before proceeding. (**PIPELINE_MODE**: auto-proceed if accuracy passed and expected kernel change is visible. Only return failure if the expected kernel change is NOT visible.)
 
 ## Step 5: E2E Benchmark (after)
 

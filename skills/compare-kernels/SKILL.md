@@ -226,6 +226,8 @@ Suggest running `--recategorize` if mismatches are found.
 
 ## Step 7: Deep-dive implementation guidance
 
+> **PIPELINE_MODE**: Skip this entire step. Return after Step 6 with the Tier-1 fusion list. Do NOT use `AskUserQuestion`.
+
 After printing the comparison and recommendations, use `AskUserQuestion` to ask the user which recommendation they want to deep-dive into. Present the numbered recommendations as options.
 
 When the user picks one, perform a **detailed implementation analysis** following these steps:
@@ -487,6 +489,19 @@ Implementation Roadmap for [Block Name]:
     - Or implement assembly-level fused kernel
     - Expected: W us → ~Y us (B200 parity)
 ```
+
+---
+
+## PIPELINE_MODE contract (from `/kernel-fusion-pipeline`)
+
+When invoked with `pipeline_mode: true`:
+
+- **Stop after Step 6** (category mismatches). Do NOT enter Step 7 (deep-dive / AskUserQuestion).
+- Return the ranked Tier-1 fusion list directly to the pipeline.
+- Do **not** use `AskUserQuestion` for any reason.
+- The pipeline only needs: block name, slug, target op, kernels, savings, sglang file.
+
+---
 
 ## Important Notes
 
