@@ -35,14 +35,21 @@ fi
 mkdir -p /root/.codex
 cat > /root/.codex/amd-gateway-proxy.py <<'PYEOF'
 #!/usr/bin/env python3
-"""Reverse proxy: Bearer auth -> Ocp-Apim-Subscription-Key, path rewrite for AMD LLM Gateway."""
+"""Reverse proxy: Bearer auth -> Ocp-Apim-Subscription-Key, path rewrite for AMD LLM Gateway.
+
+Supports SSE streaming (chunked transfer encoding) for the Responses API.
+Rejects WebSocket upgrade attempts cleanly so Codex falls back without a scary warning.
+"""
 
 import http.server
-import urllib.request
-import urllib.error
+import http.client
+import json
+import ssl
+import urllib.parse
 
-UPSTREAM = "https://llm-api.amd.com/OpenAI"
-LISTEN_PORT = 18741
+UPSTREAM_HOST = "llm-api.amd.com"
+UPSTREAM_BASE = "/OpenAI"
+LISTEN_PORT = 18742
 
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
@@ -51,46 +58,103 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
-    def do_request(self):
-        path = self.path
-        if path.startswith("/v1"):
-            path = path[3:]
-        upstream_url = UPSTREAM.rstrip("/") + path
+    def _is_websocket_upgrade(self):
+        upgrade = self.headers.get("Upgrade", "").lower()
+        return upgrade == "websocket"
 
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length) if content_length else None
+    def _reject_websocket(self):
+        body = json.dumps({"error": "WebSocket not supported, use HTTPS"}).encode()
+        self.send_response(426)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
 
+    def _build_headers(self):
         headers = {}
         for key, val in self.headers.items():
             k = key.lower()
-            if k in ("host", "transfer-encoding"):
+            if k in ("host", "transfer-encoding", "upgrade", "connection"):
                 continue
             if k == "authorization" and val.lower().startswith("bearer "):
                 api_key = val.split(" ", 1)[1]
                 headers["Ocp-Apim-Subscription-Key"] = api_key
                 continue
             headers[key] = val
+        return headers
 
-        req = urllib.request.Request(upstream_url, data=body, headers=headers, method=self.command)
+    def _is_streaming_request(self, body):
+        if not body:
+            return False
         try:
-            with urllib.request.urlopen(req, timeout=300) as resp:
+            data = json.loads(body)
+            return data.get("stream", False)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return False
+
+    def do_request(self):
+        if self._is_websocket_upgrade():
+            self._reject_websocket()
+            return
+
+        path = self.path
+        if path.startswith("/v1"):
+            path = path[3:]
+        upstream_path = UPSTREAM_BASE + path
+
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_length) if content_length else None
+
+        headers = self._build_headers()
+        is_streaming = self._is_streaming_request(body)
+
+        ctx = ssl.create_default_context()
+        conn = http.client.HTTPSConnection(UPSTREAM_HOST, timeout=300, context=ctx)
+        try:
+            conn.request(self.command, upstream_path, body=body, headers=headers)
+            resp = conn.getresponse()
+
+            self.send_response(resp.status)
+            for key, val in resp.getheaders():
+                k = key.lower()
+                if k in ("transfer-encoding", "connection", "content-length"):
+                    continue
+                self.send_header(key, val)
+
+            if is_streaming and resp.status == 200:
+                self.send_header("Transfer-Encoding", "chunked")
+                self.send_header("Connection", "keep-alive")
+                self.end_headers()
+                while True:
+                    chunk = resp.read(4096)
+                    if not chunk:
+                        break
+                    self.wfile.write(f"{len(chunk):x}\r\n".encode())
+                    self.wfile.write(chunk)
+                    self.wfile.write(b"\r\n")
+                    self.wfile.flush()
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+            else:
                 resp_body = resp.read()
-                self.send_response(resp.status)
-                for key, val in resp.getheaders():
-                    if key.lower() not in ("transfer-encoding", "connection", "content-length"):
-                        self.send_header(key, val)
                 self.send_header("Content-Length", str(len(resp_body)))
                 self.end_headers()
                 self.wfile.write(resp_body)
-        except urllib.error.HTTPError as e:
-            resp_body = e.read()
-            self.send_response(e.code)
-            for key, val in e.headers.items():
-                if key.lower() not in ("transfer-encoding", "connection", "content-length"):
-                    self.send_header(key, val)
-            self.send_header("Content-Length", str(len(resp_body)))
-            self.end_headers()
-            self.wfile.write(resp_body)
+        except BrokenPipeError:
+            pass
+        except Exception as e:
+            error_body = json.dumps({"error": str(e)}).encode()
+            try:
+                self.send_response(502)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(error_body)))
+                self.end_headers()
+                self.wfile.write(error_body)
+            except Exception:
+                pass
+        finally:
+            conn.close()
 
     do_GET = do_request
     do_POST = do_request
@@ -100,8 +164,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     do_OPTIONS = do_request
 
 
+class ReusableHTTPServer(http.server.HTTPServer):
+    allow_reuse_address = True
+
+
 if __name__ == "__main__":
-    server = http.server.HTTPServer(("127.0.0.1", LISTEN_PORT), ProxyHandler)
+    server = ReusableHTTPServer(("127.0.0.1", LISTEN_PORT), ProxyHandler)
     server.serve_forever()
 PYEOF
 
@@ -119,8 +187,8 @@ chmod 600 /root/.codex/auth.json
 # Write Codex config (preserve existing project trust levels)
 if [ ! -f /root/.codex/config.toml ] || ! grep -q "openai_base_url" /root/.codex/config.toml 2>/dev/null; then
   cat > /root/.codex/config.toml <<'EOF'
-model = "gpt-4.5"
-openai_base_url = "http://127.0.0.1:18741/v1"
+model = "gpt-5.5"
+openai_base_url = "http://127.0.0.1:18742/v1"
 
 [projects."/sgl-workspace"]
 trust_level = "untrusted"
@@ -155,4 +223,4 @@ if ! pgrep -f "amd-gateway-proxy" >/dev/null 2>&1; then
 fi
 export OPENAI_API_KEY="${CODEX_KEY}"
 
-echo "[codex] Setup complete (proxy on :18741, model: gpt-4.5)"
+echo "[codex] Setup complete (proxy on :18742, model: gpt-5.5)"
