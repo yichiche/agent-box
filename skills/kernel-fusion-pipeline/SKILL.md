@@ -1,422 +1,373 @@
 ---
-description: "End-to-end kernel fusion pipeline: compare two trace analysis Excel files, identify Tier-1 fusion opportunities (existing aiter fused ops), implement each fusion on the SGLang side, validate (accuracy + profiling + benchmark), and commit. Composes /compare-kernels, /implement-kernel, /validate, and /commit. Use when the user says '/kernel-fusion-pipeline' followed by two xlsx paths."
+description: "End-to-end kernel fusion pipeline: compare two trace analysis Excel files, identify Tier-1 fusion opportunities (existing aiter fused ops OR custom Triton kernels — no aiter modifications), implement each fusion on the SGLang side in git worktrees, validate (accuracy + profiling + benchmark) with upfront GPU slot planning, and commit. Composes /compare-kernels, /implement-kernel, /validate, and /commit. Use when the user says '/kernel-fusion-pipeline' followed by two xlsx paths."
 ---
 
 # Kernel Fusion Pipeline
 
-Automated pipeline that chains trace comparison → fusion identification → implementation → validation → commit. Focuses on **Tier 1 fusions only** — switching SGLang dispatch to existing fused aiter ops. Each fusion is implemented, validated, and committed individually (sequential, git-bisectable).
+Automated pipeline: trace comparison → Tier-1 fusion identification → **parallel implement in git worktrees** → **validate each worktree independently** → **commit-push-pr per worktree** (1 worktree = 1 PR).
+
+Scripts live in `$SKILL_DIR/scripts/` where:
+
+```bash
+SKILL_DIR="$HOME/agent-box/skills/kernel-fusion-pipeline"
+STATE_FILE="$HOME/.kernel-fusion-pipeline/state.json"
+```
 
 ## Usage
 
 ```
-/kernel-fusion-pipeline <file_A.xlsx> <file_B.xlsx>
+/kernel-fusion-pipeline <file_A.xlsx> <file_B.xlsx> [options]
 ```
 
-If the user doesn't provide two xlsx paths, ask for them.
+Options (optional, parse from args):
+- `--server=~/run_qwen3.5_mxfp4_perf.sh`
+- `--client=~/run_qwen3.5_inferencemax_client.sh`
+- `--threshold=0.85`
+- `--label=Qwen3.5-MXFP4`
+- `--only=slug1,slug2` — implement only these fusions
+- `--interactive` — allow AskUserQuestion (default: autonomous)
+- `--resume` — continue from `$STATE_FILE`
+
+If two xlsx paths are missing, ask once for them. Otherwise **do not ask** for config, GPUs, or fusion selection.
 
 ---
 
-## Step 0: Upfront Context Gathering
+## Operating Principles
 
-**Gather ALL operational details before any analysis or implementation.** This prevents mid-pipeline interruptions.
+1. **Autonomous by default** — no `AskUserQuestion` unless `--interactive`, missing xlsx, or zero free GPU slots for TP.
+2. **Plan GPUs once at start** — run `rocm-smi` in Step 0; assign all slots before any implement/validate. Never re-scan at validate time except after a wave completes (optional refresh).
+3. **Notify, don't confirm** — print config + GPU plan + fusion→slot map; proceed.
+4. **Default scope = all Tier-1** — ranked by savings; use `--only` to narrow.
+5. **Worktree isolation** — edit code only inside worktrees; `$SGLANG_ROOT` is orchestrator-only.
+6. **Parallel implement, wave validate** — implement all worktrees in parallel (Task subagents); validate by **wave** using pre-assigned slots (wave 0 runs up to `max_parallel` jobs at once).
+7. **Fail-forward** — on implement/validate failure: debug up to 3 retries → revert worktree + skip → next fusion. Only stop entire pipeline if `--interactive` and user says abort, or zero GPU slots at start.
+8. **PIPELINE_MODE** — when calling sub-skills, pass pre-built CONFIG (see bottom). Sub-skills must not re-ask.
 
-### 0a: Detect the active SGLang installation
+---
+
+## Sub-Skill Contract (PIPELINE_MODE)
+
+When this pipeline invokes sub-skills, ALL of them receive `pipeline_mode: true`. This means:
+
+- **NO `AskUserQuestion`** — ever, for any reason, in any sub-skill
+- **NO `EnterPlanMode`** — Tier 1 changes are implemented directly
+- **NO interactive confirmation** — profiling commands, accuracy checks, and results are auto-evaluated
+- **NO deep-dive prompts** — `/compare-kernels` stops after extracting the Tier-1 list (skips Step 7)
+- **Fail = skip + continue** — sub-skill failures mark the fusion as SKIP and return control to the pipeline
+
+If a sub-skill's default behavior would ask the user, PIPELINE_MODE overrides it to auto-proceed or auto-skip.
+
+**Terminal stop points** (pipeline exits cleanly, no AskUserQuestion):
+- No Tier-1 fusions found → print Tier 2/3 list and exit
+- `max_parallel == 0` → print occupied GPUs and exit
+- All fusions failed after retries → print failure summary and exit
+
+---
+
+## Step 0: Context + GPU Plan (upfront)
+
+### 0a: Detect SGLang root
 
 ```bash
 SGLANG_ROOT=$(python3 -c "import sglang, pathlib; print(pathlib.Path(sglang.__file__).resolve().parents[2])")
 echo "Active SGLang root: $SGLANG_ROOT"
 ```
 
-Use `$SGLANG_ROOT` for all subsequent paths.
+### 0b: Parse xlsx paths
 
-### 0b: Parse the two xlsx paths
+From args, extract two paths and verify they exist. If missing, ask once.
 
-From `$ARGUMENTS`, extract two file paths. Verify both exist:
+### 0c: Auto-discover validation config
+
+Infer from xlsx path / dirname (first match wins):
+
+| Path contains | Label | Threshold | Server | Client |
+|---|---|---|---|---|
+| `qwen3.5`, `mxfp4` | Qwen3.5-MXFP4 | 0.85 | `~/run_qwen3.5_mxfp4_perf.sh` | `~/run_qwen3.5_inferencemax_client.sh` |
+| `dsv4`, `deepseek` | DSv4 | 0.88 | `~/run_dsv4.sh` | `~/run_dsv4_client.sh` |
+
+CLI flags `--server`, `--client`, `--threshold`, `--label` override inference.
+
+Parse from server script:
 
 ```bash
-ls -la <file_A.xlsx> <file_B.xlsx>
+TP=$(grep -oE '(^|[[:space:]])--tp[[:space:]]+[0-9]+' "$SERVER_SCRIPT" | grep -oE '[0-9]+$' | head -1)
+TP=${TP:-2}
+PORT_BASE=$(grep -oE '(^|[[:space:]])--port[[:space:]]+[0-9]+' "$SERVER_SCRIPT" | grep -oE '[0-9]+$' | head -1)
+PORT_BASE=${PORT_BASE:-8000}
+MODEL_PATH=$(grep -oE '--model-path[[:space:]]+"[^"]+"' "$SERVER_SCRIPT" | head -1)
 ```
 
-If the user didn't provide two paths, ask:
+### 0d: GPU inventory + slot plan (mandatory, run once)
 
-```
-AskUserQuestion: "Please provide two trace analysis Excel files to compare (e.g., B200 baseline vs MI355)."
-```
+**Before any analysis or coding**, run the planner (must execute in the same environment as validation — docker shell if applicable):
 
-### 0c: Collect validation parameters
-
-Use `AskUserQuestion` with **all four questions** to gather everything needed for later `/validate` and `/implement-kernel` steps:
-
-#### Question 1: Server launch script
-
-```
-"Which server launch script should be used for validation?"
+```bash
+python3 "$SKILL_DIR/scripts/plan_gpu_slots.py" \
+  --tp "$TP" \
+  --port-base "$PORT_BASE"
 ```
 
-Options:
-- **Provide path** — the user gives a path like `~/run_dsv4.sh`
+This reads `rocm-smi`, marks GPUs free when VRAM < 10GB and no `sglang.launch_server` holds them, builds contiguous TP groups (0,1 / 2,3 / …), and writes `$STATE_FILE`.
 
-Parse the server script to extract:
-- **Port**: look for `--port <N>` in the launch command
-- **Model path**: look for `--model-path <path>`
-
-#### Question 2: Client benchmark script
+Example output when 8 GPUs free and TP=2:
 
 ```
-"Which client benchmark script should be used for validation?"
+Max parallel: 4 validate job(s) at once
+Slot 0: HIP_VISIBLE_DEVICES=0,1  port=8000
+Slot 1: HIP_VISIBLE_DEVICES=2,3  port=8001
+...
 ```
 
-Options:
-- **Provide path** — the user gives a path like `~/run_dsv4_client.sh`
+**If `max_parallel == 0`**: stop and report which GPUs are occupied (from state). Do not start implement. Suggest freeing GPUs or lowering scope.
 
-#### Question 3: Accuracy threshold
-
-```
-"What accuracy threshold should be used for GSM8K validation?"
-```
-
-Options:
-- **0.88 (DSv4 default)** (Recommended)
-- **Custom threshold** — user provides a number
-
-#### Question 4: Model label
+Print full config (notify only — do not confirm):
 
 ```
-"Short label for this model (used in reports)?"
+Kernel Fusion Pipeline
+  SGLang:     $SGLANG_ROOT
+  File A/B:   ...
+  Server:     $SERVER_SCRIPT  (TP=$TP)
+  Client:     $CLIENT_SCRIPT
+  Threshold:  $THRESHOLD  Label: $LABEL
+  GPU slots:  $MAX_PARALLEL parallel (TP=$TP)
+  State:      $STATE_FILE
 ```
-
-Options:
-- **DSv4** (Recommended)
-- **Custom label**
-
-### 0d: Confirm all parameters
-
-Print the complete configuration and confirm with `AskUserQuestion`:
-
-```
-Kernel Fusion Pipeline Configuration:
-  SGLang Root:      <SGLANG_ROOT>
-  File A:           <file_A.xlsx>
-  File B:           <file_B.xlsx>
-  Server Script:    <server_script>
-  Port:             <PORT>
-  Model:            <model_path>
-  Client Script:    <client_script>
-  Accuracy Threshold: <threshold>
-  Label:            <label>
-
-Proceed with this configuration?
-```
-
-Options:
-- **Yes, proceed** (Recommended)
-- **Change something** — go back and re-ask
-
-**Do NOT proceed past Step 0 until all parameters are confirmed.**
 
 ---
 
 ## Step 1: Compare Kernels
 
-Invoke the `/compare-kernels` analysis on the two xlsx files. This step follows the full `/compare-kernels` workflow:
-
-### 1a: Recategorize both files
+### 1a: Recategorize
 
 ```bash
 python3 $HOME/agent-box/profile/trace_module_analyzer.py --recategorize <file_A.xlsx> <file_B.xlsx>
 ```
 
-### 1b: Run the full comparison
+### 1b–1d: Compare + Tier-1 extraction
 
-Follow the `/compare-kernels` skill Steps 1-6:
+Follow `/compare-kernels` Steps 1–6, then extract Tier-1 opportunities. Tier-1 now includes:
+- **Existing aiter fused op** → Python-only dispatch change
+- **Custom Triton kernel** → write a new Triton kernel to fuse multiple elementwise/small ops (no aiter modifications needed)
 
-1. Read detail sheets from both files (using openpyxl)
-2. Re-classify every kernel against current `kernel_categories.csv`
-3. Group kernels by Module and produce side-by-side comparison
-4. Print module-grouped comparison with FUSION/IMPROVE/MISSING annotations
-5. Print module-grouped time totals
-6. Generate actionable optimization recommendations
-7. Flag category mismatches
+Verify aiter ops under `$HOME/aiter/aiter/ops/` or `/sgl-workspace/aiter/aiter/ops/`. For custom Triton fusions, verify the pattern exists in SGLang source. Drop invalid candidates.
 
-**Instead of Step 7 (deep-dive)**, this skill proceeds to extract fusion opportunities.
+Rescan `fused*.py` and `gated*.py` at runtime.
 
-### 1c: Extract Tier 1 fusion opportunities
+For each opportunity record: **block name**, **slug** (snake_case), **target op**, **kernels**, **savings**, **sglang file**.
 
-From the comparison output, identify all blocks where:
-
-1. **File A (typically B200) uses fewer kernels** than File B (typically MI355) for the same module
-2. **An existing fused aiter op** can replace the separate MI355 kernels
-3. **The change is Python-level only** — switching dispatch, removing redundant ops, enabling existing fused paths
-
-For each opportunity, record:
-- **Block name** (e.g., "Q Proj", "Attn Prep", "Gate Norm")
-- **Current MI355 kernels**: list of kernel names and durations
-- **Target fused op**: the aiter fused op that replaces them (from the aiter ops directory)
-- **Estimated savings**: sum of replaced kernel times minus estimated fused kernel time
-- **SGLang file to modify**: from the source file reference table
-
-### 1d: Verify aiter fused ops exist
-
-For each candidate fusion, verify the target aiter op actually exists:
-
-```bash
-ls /sgl-workspace/aiter/aiter/ops/<fused_op_name>.py 2>/dev/null
-```
-
-Check the op's function signature to confirm it can replace the separate kernels:
-
-```bash
-grep -n "^def \|^class " /sgl-workspace/aiter/aiter/ops/<fused_op_name>.py
-```
-
-Also check for usage examples in aiter tests:
-
-```bash
-ls /sgl-workspace/aiter/op_tests/test_*<keyword>*.py 2>/dev/null
-```
-
-**Drop any candidate whose target aiter op doesn't exist or whose signature doesn't match.**
-
-### Aiter fused ops reference
-
-These are the known fused ops to check against:
-
-| Fused Op | File | Replaces |
-|---|---|---|
-| gated_rmsnorm_fp8_group_quant | `aiter/ops/gated_rmsnorm_fp8_group_quant.py` | RMSNorm + FP8 group quantization |
-| fused_qk_norm_rope_cache_quant | `aiter/ops/fused_qk_norm_rope_cache_quant.py` | QK norm + RoPE + cache store + quantization |
-| fused_qk_rmsnorm_group_quant | `aiter/ops/fused_qk_rmsnorm_group_quant.py` | QK RMSNorm + group quantization |
-| fused_split_gdr_update | `aiter/ops/fused_split_gdr_update.py` | Split + gather_dequant_reduce + update |
-| fused_qk_norm_mrope_cache_quant | `aiter/ops/fused_qk_norm_mrope_cache_quant.py` | QK norm + mRoPE + cache + quantization |
-
-**Always re-scan** `/sgl-workspace/aiter/aiter/ops/fused*.py` and `/sgl-workspace/aiter/aiter/ops/gated*.py` in case new fused ops have been added since this skill was written.
+If none found, report Tier 2/3 list and stop.
 
 ---
 
-## Step 2: Present Opportunities and Select
+## Step 2: Fusion list + upfront slot assignment
 
-### 2a: Print the ranked fusion list
+### 2a: Print ranked Tier-1 list
 
-Show the user all Tier 1 fusion opportunities, ordered by estimated savings (largest first):
+Order by estimated savings. Default: **implement all** (unless `--only`).
 
-```
-=== Tier 1 Kernel Fusion Opportunities ===
+### 2b: Assign fusions to GPU slots (upfront)
 
-#  Block              Current (MI355)           Target (aiter fused)           Est. Savings
-1. Gate Norm           rmsnorm (3.8 us)         gated_rmsnorm_fp8_group_quant   ~3.8 us/layer
-                      + fp8_quant (4.2 us)      (fused norm+quant)
-                      = 8.0 us, 2 kernels       → 1 kernel, ~4.2 us
+After slugs are known:
 
-2. Attn Prep           rmsnorm (3.5 us)         fused_qk_norm_rope_cache_quant  ~6.0 us/layer
-                      + rope x2 (8.8 us)        (fused norm+rope+cache+quant)
-                      + cache_store (2.1 us)
-                      = 14.4 us, 4 kernels      → 1 kernel, ~8.4 us
-
-3. ...
-
-Total estimated savings: ~X us/layer × N layers = ~Y us/iteration
+```bash
+python3 "$SKILL_DIR/scripts/plan_gpu_slots.py" \
+  --tp "$TP" --port-base "$PORT_BASE" \
+  --assign slug1 slug2 slug3 ...
 ```
 
-### 2b: Ask user to select
-
-Use `AskUserQuestion` with multi-select:
+This writes `fusion_plan` to `$STATE_FILE`:
 
 ```
-"Which kernel fusions should be implemented? (Select all that apply)"
+wave 0  sigmoid_gate_mul           → GPUs 0,1  port 8000
+wave 0  fused_qk_gemma_rmsnorm...  → GPUs 2,3  port 8001
+wave 1  next_fusion                → GPUs 0,1  port 8000  (reuse slot after wave 0 done)
 ```
 
-Present each fusion as an option with its block name and estimated savings. Include an "All of the above" option as the first choice.
-
-**If no Tier 1 opportunities were found**, report this to the user:
-
-```
-No Tier 1 (Python-level) fusion opportunities found.
-All identified gaps require Tier 2 (Triton) or Tier 3 (aiter C++/HIP) changes.
-
-Tier 2/3 opportunities for future work:
-  - <list from compare-kernels output>
-```
-
-And stop the pipeline.
+**Execution rule:** finish all fusions in wave N before starting wave N+1 (same physical GPUs reused across waves).
 
 ---
 
-## Step 3: Sequential Implement → Validate → Commit Loop
+## Step 1.5: Worktree farm
 
-For each selected fusion, execute the following sub-steps **sequentially**. Do NOT batch — each fusion is independently implemented, validated, and committed before moving to the next.
+For each fusion slug:
 
-### 3a: Implement the fusion
-
-Invoke `/implement-kernel` by calling:
-
-```
-Skill(skill="implement-kernel", args="Tier 1: Switch <block_name> to use <aiter_fused_op> — replace <N> separate kernels (<kernel_list>) with single fused call. SGLang file: <file_path>. Estimated savings: ~<X> us/layer.")
+```bash
+python3 "$SKILL_DIR/scripts/worktree_farm.py" \
+  --sglang-root "$SGLANG_ROOT" \
+  --slugs slug1 slug2 ...
 ```
 
-The `/implement-kernel` skill will:
-1. Enter plan mode and read the CUDA vs HIP code paths
-2. Check for the aiter fused op (which we already verified exists)
-3. Design the dispatch change
-4. Get user approval on the plan
-5. Implement the code change
-6. Run syntax and lint checks
+Worktrees: `$HOME/.kernel-fusion-pipeline/worktrees/<repo-name>/<slug>/` on branch `fusion/<slug>`.
 
-**Wait for `/implement-kernel` to complete before proceeding.**
-
-If `/implement-kernel` fails (syntax error, lint error, user rejects plan), report the failure and ask:
-
-```
-AskUserQuestion: "Fusion #N (<block_name>) failed during implementation: <error>.
-How should we proceed?"
-```
-
-Options:
-- **Skip this fusion and continue** — move to the next one
-- **Retry with modifications** — user provides guidance
-- **Abort pipeline** — stop all remaining fusions
-
-### 3b: Validate the change
-
-Invoke `/validate` by calling:
-
-```
-Skill(skill="validate")
-```
-
-The `/validate` skill will ask for server script, client script, etc. Since the user already provided these in Step 0, provide the answers immediately:
-
-- Server script: `<server_script>` (from Step 0c)
-- Client script: `<client_script>` (from Step 0c)
-- Model name: `<label>` (from Step 0c)
-- Accuracy threshold: `<threshold>` (from Step 0c)
-
-**Wait for `/validate` to complete.**
-
-### 3c: Interpret validation results
-
-Check the validation output for:
-
-1. **Accuracy**: Did GSM8K pass the threshold?
-2. **Profiling**: Are the old kernels gone and new fused kernel visible?
-3. **Benchmark**: Is throughput maintained or improved? Is latency not regressed?
-
-**If validation PASSES:**
-
-Print:
-```
-✓ Fusion #N (<block_name>) PASSED validation
-  Accuracy:  <score> (threshold: <threshold>)
-  Profiling: Old kernels removed, fused kernel visible
-  Benchmark: <throughput> tok/s, ITL=<X>ms
-```
-
-Proceed to commit.
-
-**If validation FAILS:**
-
-Print:
-```
-✗ Fusion #N (<block_name>) FAILED validation
-  Failed step: <accuracy/profiling/benchmark>
-  Error: <details>
-```
-
-Ask the user:
-
-```
-AskUserQuestion: "Fusion #N failed validation. How should we proceed?"
-```
-
-Options:
-- **Debug and fix** — investigate the failure, modify the implementation, re-validate
-- **Revert and skip** — undo the change, move to next fusion
-- **Abort pipeline** — stop all remaining fusions
-
-If "Debug and fix": read the error output, identify the issue, make fixes, and re-run `/validate`. Allow up to 2 retry attempts before forcing a decision.
-
-If "Revert and skip": revert the changes using `git checkout -- <modified_files>` and move to the next fusion.
-
-### 3d: Commit the change
-
-If validation passed, invoke `/commit`:
-
-```
-Skill(skill="commit", args="<block_name>: switch to <aiter_fused_op> — fuse <N> kernels into 1, saves ~<X> us/layer")
-```
-
-**Wait for `/commit` to complete before moving to the next fusion.**
-
-### 3e: Record results and continue
-
-Record the result for this fusion:
-- Block name
-- Fused op used
-- Kernels replaced (count and names)
-- Savings achieved (from profiling)
-- Commit hash
-- Pass/fail/skipped status
-
-Move to the next selected fusion and repeat from 3a.
+Implement only inside the worktree path. Set `PYTHONPATH=$WORKTREE/python` for server launches.
 
 ---
 
-## Step 4: Final Summary Report
+## Step 3: Implement → Validate → Commit
 
-After all selected fusions have been processed, print the comprehensive summary:
+### 3a: Parallel implement (all worktrees)
+
+Launch Task subagents in parallel — one per fusion worktree. Each agent:
 
 ```
-=== Kernel Fusion Pipeline Results ===
-
-Model: <label>
-SGLang Root: <SGLANG_ROOT>
-Comparison: <file_A.xlsx> vs <file_B.xlsx>
-
-### Fusions Implemented
-
-| #  | Block          | Fused Op                         | Kernels Replaced | Savings/Layer | Status  | Commit  |
-|----|----------------|----------------------------------|-----------------|---------------|---------|---------|
-| 1  | Gate Norm      | gated_rmsnorm_fp8_group_quant     | 2 → 1           | ~3.8 us       | PASS    | abc1234 |
-| 2  | Attn Prep      | fused_qk_norm_rope_cache_quant    | 4 → 1           | ~6.0 us       | PASS    | def5678 |
-| 3  | ...            | ...                               | ...             | ...           | SKIP    | —       |
-
-### Cumulative Impact
-
-Kernel-level savings:
-  - Per-layer: ~<X> us (sum of all passed fusions)
-  - Per-iteration (N layers): ~<Y> us
-  - Expected ITL improvement: <Y>/<baseline_ITL_us> = <Z>%
-
-E2E benchmark (first baseline vs final after):
-  | Metric                   | First Baseline | Final After | Delta   |
-  |--------------------------|----------------|-------------|---------|
-  | Total throughput (tok/s)  | ...            | ...         | +X.X%   |
-  | Median ITL (ms)           | ...            | ...         | -X.X%   |
-  | ...                       | ...            | ...         | ...     |
-
-### Remaining Opportunities (Tier 2/3 — not attempted)
-
-These require new Triton kernels or aiter C++/HIP changes:
-  - <block>: <description> — estimated <X> us savings
-  - ...
-
-### Next Steps
-
-  - Push changes: /commit-push
-  - Create PR: /pr
-  - Profile the cumulative result: /generate-profile
-  - Compare final traces: /compare-kernels <original_MI355.xlsx> <new_after.xlsx>
+PIPELINE_MODE=1
+Worktree: <path>
+Tier 1: Switch <block> to <aiter_op> — file <path>
+Skip EnterPlanMode. Follow sglang-backend-gated-changes. Max 3 lint/syntax retries.
 ```
+
+Or inline Tier-1 edits without `/implement-kernel` plan approval.
+
+On failure after 3 retries: mark worktree `status: skip`, continue others.
+
+### 3b: Wave validate (use pre-assigned slots only)
+
+For each **wave** in `fusion_plan`:
+
+1. Group fusions in that wave (same wave index).
+2. For each fusion in the wave, build ephemeral scripts from the **pre-assigned** `gpus` and `port` (do not re-run GPU planner):
+
+```bash
+# Ephemeral server script for this fusion's slot
+EPHEMERAL_SERVER=$(mktemp /tmp/kfp-server-XXXX.sh)
+sed -e "s/HIP_VISIBLE_DEVICES=[0-9,]*/HIP_VISIBLE_DEVICES=${GPUS}/" \
+    -e "s/--port [0-9]*/--port ${PORT}/" \
+    "$SERVER_SCRIPT" > "$EPHEMERAL_SERVER"
+chmod +x "$EPHEMERAL_SERVER"
+
+EPHEMERAL_CLIENT=$(mktemp /tmp/kfp-client-XXXX.sh)
+sed -e "s/^PORT=[0-9]*/PORT=${PORT}/" \
+    "$CLIENT_SCRIPT" > "$EPHEMERAL_CLIENT"
+chmod +x "$EPHEMERAL_CLIENT"
+```
+
+3. Invoke `/validate` with PIPELINE_MODE CONFIG:
+
+```json
+{
+  "pipeline_mode": true,
+  "worktree": "<worktree_path>",
+  "pythonpath": "<worktree_path>/python",
+  "server_script": "<EPHEMERAL_SERVER>",
+  "client_script": "<EPHEMERAL_CLIENT>",
+  "port": <PORT>,
+  "gpus": "<GPUS>",
+  "label": "<LABEL>",
+  "threshold": <THRESHOLD>
+}
+```
+
+4. Run validations in the wave **in parallel** (one subprocess per fusion, each with its own GPUS+PORT from the plan).
+
+5. After wave completes: kill servers on those ports, then optional `plan_gpu_slots.py` refresh if GPUs may have leaked.
+
+**Server launch in worktree:**
+
+```bash
+cd "$WORKTREE"
+export PYTHONPATH="$WORKTREE/python:${PYTHONPATH:-}"
+bash "$EPHEMERAL_SERVER"
+```
+
+Poll health in foreground on `$PORT` (never background TaskOutput for health checks).
+
+### 3c: Validation pass/fail (per worktree)
+
+Each worktree is validated and benchmarked **independently**. The benchmark results for each worktree are used in that worktree's individual PR.
+
+Pass = accuracy ≥ threshold, fused kernel visible in profile, benchmark not regressed >2% ITL.
+
+Fail: debug in worktree (≤3 retries) → `git checkout -- .` in worktree → mark SKIP → continue wave.
+
+### 3d: Commit-push-PR per worktree
+
+**Each worktree that passes validation gets its own commit, push, and PR — never batch multiple fusions into one PR.**
+
+After validation passes for a worktree:
+
+1. **Commit** in the worktree:
+   ```bash
+   cd "$WORKTREE"
+   Skill(commit): "[AMD] <slug>: <description> — fuse N kernels, ~X us/layer"
+   ```
+
+2. **Push + PR** from the worktree:
+   ```
+   Skill(commit-push-pr)
+   ```
+   Each PR body includes the **individual benchmark results** for that worktree's fusion only.
+
+3. Record commit hash and PR URL in `$STATE_FILE` under `results[<slug>]`.
+
+**Key rule**: 1 worktree = 1 branch = 1 commit = 1 benchmark = 1 PR. No combining.
+
+### 3e: Cleanup worktree after PR
+
+After `/commit-push-pr` succeeds for a worktree:
+
+```bash
+cd "$SGLANG_ROOT"
+git worktree remove "$WORKTREE"
+# Keep the local branch — it tracks the remote and may need fixes
+```
+
+**Worktrees are only needed during parallel implementation.** Once the code is committed and pushed, the worktree is a redundant checkout. All further work on that fusion uses the branch directly:
+
+```bash
+# To fix a PR after review feedback:
+cd "$SGLANG_ROOT"
+git checkout fusion/<slug>
+# make edits, commit, push
+git checkout main   # return when done
+```
+
+**Do NOT delete the local branch** until the PR is merged. GitHub deletes the remote branch on merge; clean up the local branch afterward if desired.
+
+### 3f: Next wave
+
+Repeat 3b–3e for wave 1, 2, … until all fusions processed.
+
+---
+
+## Step 4: Final summary
+
+Print table: slug, branch, slot (GPUs/port), wave, status, commit, PR URL.
+
+All worktrees should be cleaned up by this point (removed in Step 3e). Branches remain for PR tracking.
+
+Include individual benchmark results per fusion. List Tier 2/3 not attempted.
+
+Suggest: `/generate-profile`, `/compare-kernels`.
+
+To fix a PR later: `git checkout fusion/<slug>`, edit, commit, push, `git checkout main`.
+
+---
+
+## PIPELINE_MODE contract (sub-skills)
+
+When `pipeline_mode: true` in CONFIG:
+
+### `/implement-kernel`
+- Skip `EnterPlanMode` / plan approval for Tier 1.
+- `SGLANG_ROOT` = worktree path if provided.
+- No AskUserQuestion.
+
+### `/validate`
+- Skip Step 0b AskUserQuestion; use CONFIG scripts/port/threshold/label.
+- `git -C worktree` for stash/revert baseline.
+- `PYTHONPATH=worktree/python` for all server launches.
+- Baseline: `git stash` in worktree if dirty, else `git checkout HEAD~1` if one commit ahead of base.
 
 ---
 
 ## Important Notes
 
-- **Tier 1 only**: This skill only implements fusions using existing aiter fused ops. It does NOT write new Triton or C++/HIP kernels. For Tier 2/3, use `/implement-kernel` directly.
-- **Sequential execution**: Each fusion is implemented → validated → committed individually. This ensures every change is independently verified and git-bisectable.
-- **Upfront context**: All server/client/accuracy parameters are gathered once in Step 0 and reused throughout the pipeline. No mid-pipeline interruptions.
-- **Fail-stop**: If validation fails, the pipeline stops for that fusion and asks the user. It never silently skips or continues past a failure.
-- **Backend-gated changes**: All implementations must follow the Backend-Gated Changes rules from `/implement-kernel` — gate behind `_use_aiter`, no top-level aiter imports, common path byte-identical.
-- **Dynamic paths**: Always use `$SGLANG_ROOT` detected from the active Python environment. Never hardcode `/sgl-workspace/sglang` or `$HOME/sglang`.
-- **Aiter ops may change**: Always re-scan `/sgl-workspace/aiter/aiter/ops/fused*.py` and `gated*.py` at runtime rather than relying on the static reference table. New fused ops may be added.
-- **Server polling in foreground**: When `/validate` polls for server readiness, it must run in the foreground (per user feedback memory). Never use background + TaskOutput for health-check polling.
-- **Commit conventions**: All commits use the `[AMD]` tag prefix per the repo config. No `Co-Authored-By` trailers.
+- **Tier 1 = existing aiter ops OR custom Triton kernels** — no C++/HIP kernel work, no aiter modifications. Custom Triton fusions (e.g., fusing `sigmoid + mul` into one kernel) are Tier 1.
+- **1 worktree = 1 PR** — each fusion gets its own worktree, its own benchmark, its own commit, and its own PR via `/commit-push-pr`. NEVER combine multiple fusions into a single PR.
+- **GPU plan is upfront** — `plan_gpu_slots.py` once at Step 0; `--assign` after fusion list. Slots fixed per wave; no last-minute allocation.
+- **TP2 example** — 8 free GPUs → 4 slots → up to 4 parallel validates in wave 0; 5th fusion waits for wave 1 on reused slots 0,1 @ port 8000.
+- **Backend-gated** — `_use_aiter`, no top-level aiter imports, common path byte-identical.
+- **Dynamic paths** — detect `$SGLANG_ROOT` from Python env; aiter under `$HOME/aiter` or `/sgl-workspace/aiter`.
+- **Commits** — `[AMD]` prefix, no `Co-Authored-By`.
+- **Resume** — read `$STATE_FILE`; skip fusions with `status: pass|skip`; continue from next pending wave.
