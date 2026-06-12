@@ -19,4 +19,17 @@ else
     echo "Skills symlinked: $SKILLS_DST -> $SKILLS_SRC"
 fi
 
-echo "Setup complete: submodules initialized, git hooks activated, skills linked."
+# Symlink workflows into Claude Code config
+WORKFLOWS_SRC="$(cd "$(dirname "$0")" && pwd)/workflow"
+WORKFLOWS_DST="$HOME/.claude/workflows"
+if [ -L "$WORKFLOWS_DST" ]; then
+    echo "Workflows symlink already exists: $WORKFLOWS_DST -> $(readlink "$WORKFLOWS_DST")"
+elif [ -d "$WORKFLOWS_DST" ]; then
+    echo "Warning: $WORKFLOWS_DST is a directory (not a symlink). Back it up and re-run, or manually replace with:"
+    echo "  rm -rf $WORKFLOWS_DST && ln -s $WORKFLOWS_SRC $WORKFLOWS_DST"
+else
+    ln -s "$WORKFLOWS_SRC" "$WORKFLOWS_DST"
+    echo "Workflows symlinked: $WORKFLOWS_DST -> $WORKFLOWS_SRC"
+fi
+
+echo "Setup complete: submodules initialized, git hooks activated, skills linked, workflows linked."
