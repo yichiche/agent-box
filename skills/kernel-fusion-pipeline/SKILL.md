@@ -81,14 +81,38 @@ From args, extract two paths and verify they exist. If missing, ask once.
 
 Infer from xlsx path / dirname (first match wins):
 
-| Path contains | Label | Threshold | Server | Client |
-|---|---|---|---|---|
-| `qwen3.5`, `mxfp4` | Qwen3.5-MXFP4 | 0.85 | `~/run_qwen3.5_mxfp4_perf.sh` | `~/run_qwen3.5_inferencemax_client.sh` |
-| `dsv4`, `deepseek` | DSv4 | 0.88 | `~/run_dsv4.sh` | `~/run_dsv4_client.sh` |
+| Path contains | Label | Threshold | Agent Script | Server (fallback) | Client (fallback) |
+|---|---|---|---|---|---|
+| `qwen3.5`, `mxfp4` | Qwen3.5-MXFP4 | 0.85 | `~/run_qwen3.5_mxfp4_perf_agent.sh` | `~/run_qwen3.5_mxfp4_perf.sh` | `~/run_qwen3.5_inferencemax_client.sh` |
+| `dsv4`, `deepseek` | DSv4 | 0.88 | *(none)* | `~/run_dsv4.sh` | `~/run_dsv4_client.sh` |
+
+When an **agent script** exists, use it instead of separate server+client. Agent scripts provide:
+- Single source of truth for MODEL, PORT, HIP_VISIBLE_DEVICES (no mismatch possible)
+- Pre-flight checks (port free, GPUs free, no sglang conflicts)
+- 3-signal health monitoring (process alive + `/health_generate` + fatal log scan, 8 min timeout)
+- Auto-kill after client finishes
+
+The pipeline overrides defaults via env vars:
+```bash
+PORT=${PORT} HIP_VISIBLE_DEVICES=${GPUS} PYTHONPATH_OVERRIDE=${WORKTREE}/python \
+  bash "$AGENT_SCRIPT"
+```
 
 CLI flags `--server`, `--client`, `--threshold`, `--label` override inference.
 
-Parse from server script:
+### Parsing config from scripts
+
+**Agent script** (preferred — parse defaults from bash parameter expansion):
+
+```bash
+TP=$(grep -oP 'TP:-\K[0-9]+' "$AGENT_SCRIPT" | head -1)
+TP=${TP:-2}
+PORT_BASE=$(grep -oP 'PORT:-\K[0-9]+' "$AGENT_SCRIPT" | head -1)
+PORT_BASE=${PORT_BASE:-8001}
+MODEL_PATH=$(grep -oP 'MODEL:-\K[^\}]+' "$AGENT_SCRIPT" | head -1)
+```
+
+**Raw server script** (fallback when no agent script):
 
 ```bash
 TP=$(grep -oE '(^|[[:space:]])--tp[[:space:]]+[0-9]+' "$SERVER_SCRIPT" | grep -oE '[0-9]+$' | head -1)
@@ -226,10 +250,27 @@ On failure after 3 retries: mark worktree `status: skip`, continue others.
 For each **wave** in `fusion_plan`:
 
 1. Group fusions in that wave (same wave index).
-2. For each fusion in the wave, build ephemeral scripts from the **pre-assigned** `gpus` and `port` (do not re-run GPU planner):
+2. For each fusion in the wave, prepare the validation command from the **pre-assigned** `gpus` and `port` (do not re-run GPU planner):
+
+**When agent script is available (preferred):**
+
+No ephemeral scripts needed. The agent script accepts env var overrides:
 
 ```bash
-# Ephemeral server script for this fusion's slot
+PORT=${PORT} \
+HIP_VISIBLE_DEVICES=${GPUS} \
+PYTHONPATH_OVERRIDE=${WORKTREE}/python \
+KEEP_SERVER=1 \
+  bash "$AGENT_SCRIPT"
+```
+
+The agent script handles pre-flight checks, server launch with PID tracking, 3-signal health monitoring (process alive + `/health_generate` + fatal log scan, 8 min timeout), client benchmark with same MODEL/PORT, and auto-kill after client.
+
+`KEEP_SERVER=1` leaves the server running so accuracy and profiling tests can run afterward.
+
+**When no agent script (fallback — raw server+client):**
+
+```bash
 EPHEMERAL_SERVER=$(mktemp /tmp/kfp-server-XXXX.sh)
 sed -e "s/HIP_VISIBLE_DEVICES=[0-9,]*/HIP_VISIBLE_DEVICES=${GPUS}/" \
     -e "s/--port [0-9]*/--port ${PORT}/" \
@@ -238,6 +279,7 @@ chmod +x "$EPHEMERAL_SERVER"
 
 EPHEMERAL_CLIENT=$(mktemp /tmp/kfp-client-XXXX.sh)
 sed -e "s/^PORT=[0-9]*/PORT=${PORT}/" \
+    -e "s|^MODEL=.*|MODEL=\"${MODEL_PATH}\"|" \
     "$CLIENT_SCRIPT" > "$EPHEMERAL_CLIENT"
 chmod +x "$EPHEMERAL_CLIENT"
 ```
@@ -249,20 +291,21 @@ chmod +x "$EPHEMERAL_CLIENT"
   "pipeline_mode": true,
   "worktree": "<worktree_path>",
   "pythonpath": "<worktree_path>/python",
-  "server_script": "<EPHEMERAL_SERVER>",
-  "client_script": "<EPHEMERAL_CLIENT>",
-  "port": <PORT>,
+  "agent_script": "<AGENT_SCRIPT or null>",
+  "server_script": "<EPHEMERAL_SERVER (fallback)>",
+  "client_script": "<EPHEMERAL_CLIENT (fallback)>",
+  "port": "<PORT>",
   "gpus": "<GPUS>",
   "label": "<LABEL>",
-  "threshold": <THRESHOLD>
+  "threshold": "<THRESHOLD>"
 }
 ```
 
 4. Run validations in the wave **in parallel** (one subprocess per fusion, each with its own GPUS+PORT from the plan).
 
-5. After wave completes: kill servers on those ports, then optional `plan_gpu_slots.py` refresh if GPUs may have leaked.
+5. After wave completes: kill servers on those ports (`pkill -f "sglang.launch_server.*--port ${PORT}"`), then optional `plan_gpu_slots.py` refresh if GPUs may have leaked.
 
-**Server launch in worktree:**
+**Server launch in worktree (fallback only — agent script handles this automatically):**
 
 ```bash
 cd "$WORKTREE"
@@ -355,6 +398,8 @@ When `pipeline_mode: true` in CONFIG:
 
 ### `/validate`
 - Skip Step 0b AskUserQuestion; use CONFIG scripts/port/threshold/label.
+- **If CONFIG has `agent_script`**: invoke it with env var overrides (`PORT`, `HIP_VISIBLE_DEVICES`, `PYTHONPATH_OVERRIDE`, `KEEP_SERVER`). The agent script handles server launch, 3-signal health monitoring, client benchmark, and cleanup. Skip validate's own server launch/poll/kill steps.
+- **If CONFIG has `server_script` + `client_script` (no agent)**: use existing validate flow (server launch, blind health poll, client, manual kill).
 - `git -C worktree` for stash/revert baseline.
 - `PYTHONPATH=worktree/python` for all server launches.
 - Baseline: `git stash` in worktree if dirty, else `git checkout HEAD~1` if one commit ahead of base.
@@ -371,3 +416,4 @@ When `pipeline_mode: true` in CONFIG:
 - **Dynamic paths** — detect `$SGLANG_ROOT` from Python env; aiter under `$HOME/aiter` or `/sgl-workspace/aiter`.
 - **Commits** — `[AMD]` prefix, no `Co-Authored-By`.
 - **Resume** — read `$STATE_FILE`; skip fusions with `status: pass|skip`; continue from next pending wave.
+- **Agent scripts preferred** — when available, agent scripts replace raw server+client pairs. They eliminate port/model mismatches via single source of truth and provide 3-signal health monitoring (crash detected in seconds, not 20 min). Env var overrides (`PORT`, `HIP_VISIBLE_DEVICES`, `PYTHONPATH_OVERRIDE`, `KEEP_SERVER`, `SKIP_CLIENT`) are the integration contract.
