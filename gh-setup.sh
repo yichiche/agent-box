@@ -7,12 +7,14 @@
 #   2. Logs in to github.com with HTTPS git protocol via non-interactive
 #      `gh auth login --with-token`, using the PAT from ~/.git-credentials
 #      (or ${HOST_HOME}/.git-credentials inside Docker where $HOME=/root).
-#   3. Writes a managed block to ~/.bashrc that puts ${HOST_HOME}/bin on PATH.
+#   3. Writes a managed block at the *start* of ~/.bashrc (prepend) so
+#      `source ~/.bashrc` in non-interactive bash (e.g. docker bash -c init) still
+#      adds PATH before Debian's "if not interactive, return" guard.
 #      Does NOT export GH_TOKEN — that env var blocks `gh auth login` and stored creds.
 #
 # Usage:
-#   - Container init (run_docker.sh):  bash .../gh-setup.sh   then exec bash
-#   - Existing shell (immediate gh):     source .../gh-setup.sh
+#   - Container init (run_docker.sh): bash .../gh-setup.sh && . /root/.bashrc && ...
+#   - Existing shell (immediate gh): source .../gh-setup.sh
 #
 # Running with `bash` only updates ~/.bashrc and future shells; `source` also
 # puts gh on PATH in the current shell.
@@ -107,7 +109,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 2) Managed PATH block in ~/.bashrc (replaces legacy GH_TOKEN block)
+# 2) Managed PATH block at start of ~/.bashrc (replaces legacy GH_TOKEN block)
 #    Inside docker, $HOME is typically /root; on host it's the user home.
 # ---------------------------------------------------------------------------
 BASHRC="${HOME}/.bashrc"
@@ -128,17 +130,21 @@ _gh_remove_bashrc_block() {
 _gh_write_bashrc_block() {
   _gh_remove_bashrc_block
   mkdir -p "$(dirname "$BASHRC")"
-  cat >>"$BASHRC" <<EOF
-
-${MARKER_BEGIN}
-# Managed by agent-box/gh-setup.sh — do not edit between these markers.
-# Adds gh to PATH. Auth is stored via \`gh auth login\` (HTTPS), not GH_TOKEN.
-export PATH="${GH_BIN_DIR}:\$PATH"
-export GH_CONFIG_DIR="${GH_CONFIG_DIR}"
-unset GH_TOKEN
-${MARKER_END}
-EOF
-  echo "[gh-setup] wrote managed block to $BASHRC"
+  [ -f "$BASHRC" ] || touch "$BASHRC"
+  local tmp="${BASHRC}.gh-setup.tmp"
+  {
+    echo "${MARKER_BEGIN}"
+    echo "# Managed by agent-box/gh-setup.sh — do not edit between these markers."
+    echo "# Prepended so \`source ~/.bashrc\` applies PATH even in non-interactive bash (e.g. docker init)."
+    echo "# Auth is stored via \`gh auth login\` (HTTPS), not GH_TOKEN."
+    echo "export PATH=\"${GH_BIN_DIR}:\$PATH\""
+    echo "export GH_CONFIG_DIR=\"${GH_CONFIG_DIR}\""
+    echo "unset GH_TOKEN"
+    echo "${MARKER_END}"
+    echo ""
+    cat "$BASHRC"
+  } >"$tmp" && mv "$tmp" "$BASHRC"
+  echo "[gh-setup] wrote managed block to start of $BASHRC"
 }
 
 _gh_write_bashrc_block
