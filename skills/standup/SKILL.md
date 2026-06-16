@@ -1,25 +1,39 @@
 ---
-description: "Generate a daily standup summary from Claude conversation history, git commits, and PRs. Formats as 'Yesterday / Today' with key accomplishments, metrics, and next steps. Use when the user says '/standup' or asks for a daily summary."
+description: "Generate or formalize a daily standup: auto-gather from history/git/gh, or rewrite user-pasted notes into Teams-ready bullets (Yesterday / Today / Blocker). Use when the user says '/standup', 'formalize' standup, or pastes draft standup text."
 ---
 
 # Daily Standup Summary
 
-Generate a standup-format summary of what the user accomplished today (or a specified date), using Claude conversation history, git logs, and GitHub PRs.
+Generate a standup-format summary of what the user accomplished (or a specified date range), using Claude conversation history, git commits, and GitHub PRs — **or**, when they already wrote notes, **formalize** those notes into the same Teams-ready output.
+
+## Draft supplied by user ("formalize" mode)
+
+**When this applies:** The user pasted, attached, or `@`-referenced **draft standup material** in the same message as `/standup` or a request to **formalize** / **clean up** / **Teams format** standup. Triggers include: scratch bullets, `Yesterday:` / `Today:` fragments, terminal log snippets, partial PR lists, or multi-line notes that clearly describe what they did.
+
+**Behavior:**
+
+1. Treat the **user-supplied text as the source of truth** for this turn. **Skip Steps 2 and 3** (no `history.jsonl`, no `git log`, no `gh` PR queries) unless the user explicitly asks to verify, refresh PR state, or combine pasted notes **with** an auto-gathered window.
+2. **Primary task:** Rewrite into the **Teams-ready format** in Step 4 (template + rules): correct header `Name – M/D` (use the date from their draft if present; otherwise infer from context or the system "today" when they say "today"), normalize sections **Yesterday:** / **Today:** / **Blocker:**, every substantive line under those sections as a `- ` bullet, full `https://github.com/...` PR URLs on the same line, fix typos and stray indentation, merge to **max 3 bullets** per section when the draft is long (unless the user explicitly asks to keep more structure).
+3. **Preserve facts:** PR numbers, repo names, links, metrics — do not invent work that is not in the draft.
+4. If the draft has **no Blocker** section, add `Blocker:` with `- None` unless they clearly described a blocker.
+5. Still follow **Step 5** after output: one short question about adjusting Today or Blocker.
 
 ## Usage
 
-- `/standup` — summarize today
-- `/standup yesterday` — summarize yesterday
+- `/standup` — summarize the **default reporting window** (see Step 1)
+- `/standup yesterday` — summarize **calendar yesterday** (typical before a morning standup)
+- `/standup today` — summarize **today** (end-of-day recap)
 - `/standup 2026-05-19` — summarize a specific date
 - `/standup 7 days` or `/standup 7d` — summarize the last 7 days (multi-day range)
 
-If `$ARGUMENTS` is provided, parse it as a date, relative day, or multi-day range. Default: today.
+If `$ARGUMENTS` is provided, parse it as a date, relative day, or multi-day range.
 
 ## Step 1: Determine the target date(s)
 
-- Default: today's date (from the system)
-- If user says "yesterday", compute yesterday's date
-- If user provides a date string (e.g., `2026-05-19`), use that
+- **Default reporting window**: **calendar yesterday** (local date). Rationale: most `/standup` runs are for a **morning Teams update** where "Yesterday" means the prior workday. For an **end-of-day** recap for *today*, use `/standup today` or pass today's date explicitly.
+- If user says **`today`**: use today's date for `$START_DATE` and `$END_DATE`.
+- If user says **`yesterday`**: use yesterday's date for both.
+- If user provides a date string (e.g., `2026-05-19`), use that for both.
 - If user provides a number of days (e.g., `7 days`, `7d`, `5 days`), compute a date range: from `today - N + 1` to `today`
 - Store as `$START_DATE` and `$END_DATE` (both YYYY-MM-DD). For single-day mode, `$START_DATE == $END_DATE`.
 - Also store `$PREV_DATE` (the day before `$START_DATE`)
@@ -27,8 +41,9 @@ If `$ARGUMENTS` is provided, parse it as a date, relative day, or multi-day rang
 ### Multi-day mode
 
 When a range spans multiple days:
+
 - In Step 2 and 3, query from `$START_DATE 00:00` to `$END_DATE 23:59` instead of a single day
-- In Step 4, use the header format `Jacky – M/D–M/D` (e.g., `Jacky – 5/23–5/29`)
+- In Step 4, use the header format `Name – M/D–M/D` (e.g., `Jacky – 5/23–5/29`)
 - Group work thematically rather than by day — the audience wants a weekly summary, not 7 separate dailies
 - Still follow the same bullet-point rules (high-level, max 3 per category, concrete numbers)
 - **Focus on performance results and PR status** — the audience wants to know what shipped, what's in review, and what perf numbers changed. Omit internal tooling (agent-box, skills) unless the user specifically asks.
@@ -36,7 +51,10 @@ When a range spans multiple days:
 
 ## Step 2: Gather data from Claude history
 
+**Skip entirely** if **Draft supplied by user ("formalize" mode)** applies (user pasted or attached standup notes in the same request).
+
 Read `~/.claude/history.jsonl`. Each line is a JSON object with fields:
+
 - `display`: the user's prompt text
 - `timestamp`: epoch milliseconds
 - `project`: working directory
@@ -44,7 +62,10 @@ Read `~/.claude/history.jsonl`. Each line is a JSON object with fields:
 
 Filter entries where `timestamp` falls between `$START_DATE` and `$END_DATE` inclusive (convert to local time).
 
+If `history.jsonl` is missing or unreadable, skip this step and rely more on git/GitHub; note the gap briefly in Step 5 if material.
+
 Group by `sessionId`. For each session:
+
 1. Find the transcript file: `~/.claude/projects/*/SESSION_ID.jsonl`
 2. Read the transcript and extract:
    - **ai-title**: the session's auto-generated title (look for `type: "ai-title"`)
@@ -52,6 +73,7 @@ Group by `sessionId`. For each session:
 3. From history entries, note the `project` (working directory) and `display` text
 
 Summarize each session into a one-line activity description. Focus on:
+
 - What was built, fixed, or analyzed
 - Specific tools/skills invoked (e.g., `/compare-kernels`, `/validate`, `/implement-kernel`)
 - File paths or PR URLs mentioned
@@ -60,75 +82,108 @@ Summarize each session into a one-line activity description. Focus on:
 
 ## Step 3: Gather data from git
 
-Run across all known repo roots. Check `_shared/repo-config.md` for the repo table, plus detect the active SGLang and scan common locations:
+**Skip entirely** if **Draft supplied by user ("formalize" mode)** applies.
+
+Run across all known repo roots. Check `$HOME/agent-box/skills/_shared/repo-config.md` for the repo table, plus detect the active SGLang and scan common locations:
 
 ```bash
 SGLANG_ROOT=$(python3 -c "import sglang, pathlib; print(pathlib.Path(sglang.__file__).resolve().parents[2])" 2>/dev/null)
 ```
 
-- `$SGLANG_ROOT` (the active SGLang installation)
+- `$SGLANG_ROOT` (the active SGLang installation), if non-empty
 - `$HOME/agent-box`
 
+Resolve **git author** from repo-config (`yichiche` / email in that file) and use `git log --author=...` consistently with local commits.
+
 For each repo, run:
+
 ```bash
-git -C <repo> log --author="yichiche" --since="$START_DATE 00:00" --until="$END_DATE 23:59" --oneline --no-merges
+git -C <repo> log --author="<author-pattern>" --since="$START_DATE 00:00" --until="$END_DATE 23:59" --oneline --no-merges
 ```
 
 Collect commit messages and counts.
 
-Also check for PRs created or merged in the date range:
+Also check for PRs created or merged in the date range (use **`GH_TOKEN=""`** when calling `gh` against `sgl-project/sglang` if enterprise PAT issues apply — see repo-config):
+
 ```bash
-gh pr list --repo <pr-base-repo> --author=yichiche --search "created:$START_DATE..$END_DATE" --state all --json number,title,url,state 2>/dev/null
+GH_TOKEN="" gh pr list --repo sgl-project/sglang --author=<github-username> --search "created:$START_DATE..$END_DATE" --state all --json number,title,url,state
+GH_TOKEN="" gh pr list --repo sgl-project/sglang --author=<github-username> --search "merged:$START_DATE..$END_DATE" --state merged --json number,title,url,state
 ```
 
 ## Step 4: Compose the standup
 
-### Format
+### Display name (header)
+
+Use the first token of `git config user.name` (run in any configured repo), unless the user gave a name in the chat. Fallback: ask or use a neutral placeholder.
+
+### Teams-ready format (required)
+
+Output **only** the standup block: no preamble, no wrapping markdown code fence (plain text pastes cleanly into Teams). Use lines starting with `- ` for bullets.
+
+**Single-day template:**
 
 ```
-Jacky – M/D
+Name – M/D
+
 Yesterday:
-<project-name>
-<bullet points of accomplishments with specific metrics, kernel timings, percentages, PR links>
+- …
+- …
 
 Today:
-<planned next steps — infer from the last session's conversation or ask the user>
+- …
+
+Blocker:
+- None
+```
+
+**Multi-day template:**
+
+```
+Name – M/D–M/D
+
+Yesterday:
+- … (group by PR / theme; full PR URLs)
+
+Today:
+- …
+
+Blocker:
+- None
 ```
 
 ### Rules
 
-1. **Header**: `Jacky – M/D` for single day, or `Jacky – M/D–M/D` for multi-day (no leading zeros, e.g., `5/20` not `05/20`)
-2. **"Yesterday" section** contains what was done on the target date(s). Despite the name, this section always describes the target period's work (standup convention). For multi-day ranges, this becomes a thematic summary, not per-day.
-3. **Group by project/workstream** (e.g., "dsv4 pro", "wan 2.2", "agent-box tooling"). Use short readable names, not full paths.
-4. **Max 3 bullets per category.** Merge related items into a single high-level bullet. Prefer outcome over activity — say what changed, not each step taken.
-5. **High-level tone.** Write for a manager or cross-team audience, not a detailed changelog. One bullet = one theme (e.g., "Profiled decode phase, MI355 at ~56% of B200" not separate bullets for each kernel).
-6. **Include concrete numbers** only when they convey the headline result (e.g., performance ratio, % uplift). Omit per-kernel µs unless it's the main finding.
-7. **Include PR links** if any were created or merged.
-8. **"Today" section**: Infer from the last conversation's direction. If unclear, put a placeholder and ask the user what they plan to work on next.
-9. **Keep it concise** — each bullet should be 1 line max. The whole standup should fit in a Slack message.
-10. **No preamble or explanation** — output the standup text directly, ready to copy-paste.
+1. **Header**: `Name – M/D` for single day, or `Name – M/D–M/D` for multi-day (no leading zeros, e.g., `6/5` not `06/05`).
+2. **Yesterday:** bullets = completed work in `$START_DATE`…`$END_DATE` (standup naming convention).
+3. **Optional workstream tags**: prefix a bullet with `(sglang)` / `(agent-box)` when two repos appear — avoid extra subheadings unless the user asks.
+4. **Max 3 bullets** under Yesterday and under Today (merge related lines).
+5. **High-level tone** for managers / cross-team; one bullet = one outcome or theme.
+6. **Include concrete numbers** only for headline results (%, ratio, tok/s).
+7. **PR links**: use full `https://github.com/...` URLs on the same line as the bullet text.
+8. **Today:** infer from the latest conversation direction; if unknown, use `- (add plan)` and ask once in Step 5.
+9. **Blocker:** always include this section. Use `- None` when there are no blockers; otherwise one bullet with the blocker.
+10. **Length**: should fit a short Teams chat post.
 
 ### Example output
 
 ```
 Jacky – 5/20
+
 Yesterday:
-dsv4 pro
-- Profiled MI355 vs B200 decode: MI355 at ~56% of B200 E2E, top gaps in GEMM, elementwise, attention
-- Tested fused norm+rope in compressor — reverted pending further validation
-- Identified Compressor layer as 4.1x slower (13 vs 9 kernels)
-agent-box
-- Built /perf-summary, /compare-kernels, /implement-kernel skills for kernel optimization workflow
-- Made skills portable across containers with symlink setup
-- Enhanced trace analyzer: added variant detection, recategorize, and mhc category
+- (sglang) Profiled MI355 vs B200 decode: MI355 ~56% of B200 E2E; largest gaps GEMM, elementwise, attention
+- (sglang) Tested fused norm+rope in compressor — reverted pending validation
+- (agent-box) Trace analyzer: variant detection, recategorize, mhc category
 
 Today:
-- Validate fused compress-norm-rope kernel and re-land
-- Profile decode attention gap, explore FA3 for MI355
+- Re-land fused compress-norm-rope after validation
+- Profile decode attention gap; evaluate FA3 on MI355
+
+Blocker:
+- None
 ```
 
 ## Step 5: Present and refine
 
-1. Output the standup text
-2. Ask: "Does this look right? Want to adjust anything or add Today's plan?"
-3. If the user provides edits, incorporate them and output the final version
+1. Output the standup text (Teams format above).
+2. Ask once: "Does this look right? Adjust Today or Blocker?"
+3. If the user provides edits, incorporate them and output the final version only.
