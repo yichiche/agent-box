@@ -69,6 +69,12 @@ const VALIDATE_RESULT_SCHEMA = {
     // After median ITL (ms) — used by the pipeline pass/fail + logging
     itl_ms: { type: 'number' },
 
+    // Kernel-time perf gate (REQUIRED for the gate). Measured on the REPLACED kernel region
+    // from the profiling trace: before = sum of the kernels removed, after = the fused kernel(s).
+    kernel_time_before_us: { type: ['number', 'null'], description: 'Replaced-region kernel time before fusion (us)' },
+    kernel_time_after_us: { type: ['number', 'null'], description: 'Replaced-region kernel time after fusion (us)' },
+    kernel_time_improvement_pct: { type: ['number', 'null'], description: '(before-after)/before*100; positive = faster. Drives the >=1% perf gate.' },
+
     // E2E benchmark comparison (Step 6b table)
     baseline_available: { type: 'boolean' },
     benchmark: {
@@ -128,6 +134,7 @@ const PR_RESULT_SCHEMA = {
     slug: { type: 'string' },
     commit_hash: { type: 'string' },
     pr_url: { type: 'string' },
+    pr_title: { type: 'string', description: 'The descriptive PR title actually used' },
     status: { type: 'string', enum: ['pass', 'fail'] },
     error: { type: 'string' },
   },
@@ -160,7 +167,12 @@ You are setting up a kernel fusion pipeline. Do the following steps IN ORDER:
 3. Recategorize traces:
    python3 /home/yichiche/agent-box/profile/trace_module_analyzer.py --recategorize ${fileA} ${fileB}
 
-4. Compare kernels between the two xlsx files following the /compare-kernels skill (Steps 1-6).
+4. Compare kernels between the two xlsx files by READING AND FOLLOWING the skill file
+   /home/yichiche/agent-box/skills/compare-kernels/SKILL.md (Steps 0-6, PIPELINE_MODE — do not just
+   work from the skill name; the file holds the required module-grouped output format).
+   Produce its full comparison (Step 3c functional-block boxes with named kernels + us, Step 4 time
+   totals) and SAVE that markdown to ~/.kernel-fusion-pipeline/comparison.md. The distilled fusion
+   list below is for routing; comparison.md preserves the kernel-level Before/After tables the PR needs.
    Extract ALL Tier-1 fusion opportunities. Tier-1 includes:
    - Existing aiter fused ops (Python-only dispatch change)
    - Custom Triton kernels (fuse multiple elementwise/small ops)
@@ -266,6 +278,10 @@ try {
 const maxWave = fusionPlan.reduce((m, f) => Math.max(m, f.wave || 0), 0)
 
 const ACCURACY_THRESHOLD = args?.threshold || 0.85
+// Perf gate: a fusion must improve the replaced-kernel-region time by at least this %.
+// On-par or negative is NOT acceptable as a merge-ready perf change — such fusions still get a
+// PR (so the work is visible) but it is opened as a DRAFT with an explicit judgement.
+const PERF_GATE_PCT = args?.perf_gate_pct ?? 1.0
 const MAX_DEBUG_RETRIES = 3
 const validated = []
 const failedValidation = []
@@ -307,7 +323,14 @@ ${retryBlock}
 CONFIG = ${JSON.stringify(CONFIG, null, 2)}
 
 Output: return every field of the provided result schema. In particular, validation_report MUST be the
-complete "=== Validation Summary ===" markdown EXACTLY per SKILL Step 6b — it is embedded verbatim into the PR.
+complete "=== Validation Summary ===" markdown EXACTLY per SKILL Step 6b.
+
+PERF GATE (REQUIRED): from the profiling trace, measure the REPLACED kernel region:
+  kernel_time_before_us = sum of the kernels this fusion removes (baseline launches)
+  kernel_time_after_us  = time of the fused kernel(s) that replace them
+  kernel_time_improvement_pct = (before - after) / before * 100   (positive = faster)
+Report all three. If the trace cannot establish before/after for the region, set
+kernel_time_improvement_pct = null and explain in profiling_observations. Do NOT guess a positive number.
 `
 }
 
@@ -345,8 +368,20 @@ for (let wave = 0; wave <= maxWave; wave++) {
       const accuracyOk = r && typeof r.accuracy === 'number' && r.accuracy >= ACCURACY_THRESHOLD
 
       if (agentSaysPass && accuracyOk) {
-        validated.push({ ...fusion, validation: r })
-        log(`PASS: ${fusion.slug} (accuracy=${r.accuracy}, ITL=${r.itl_ms}ms)`)
+        // Accuracy is the hard correctness gate (retried above). Perf is NOT a retry condition —
+        // an on-par/negative result is a real outcome, so route it to a DRAFT PR with judgement.
+        const impr = typeof r.kernel_time_improvement_pct === 'number' ? r.kernel_time_improvement_pct : null
+        const meetsPerf = impr !== null && impr >= PERF_GATE_PCT
+        const shipMode = meetsPerf ? 'open' : 'draft'
+        const imprText = impr === null ? 'unmeasurable' : `${impr.toFixed(1)}%`
+        const perfJudgement = meetsPerf
+          ? `Kernel-region time improved ${imprText} (>= ${PERF_GATE_PCT}% gate). Ready for review.`
+          : `Kernel-region time improvement is ${imprText} — below the ${PERF_GATE_PCT}% gate (on-par or worse). `
+            + `This is NOT a merge-ready perf win; opened as DRAFT for maintainer judgement. `
+            + `Accuracy passed (${r.accuracy}), so the change is correct — it just does not speed up the hot path here.`
+        validated.push({ ...fusion, validation: r, shipMode, perfJudgement })
+        log(`${meetsPerf ? 'PASS (open)' : 'PASS (DRAFT — perf below gate)'}: ${fusion.slug} `
+          + `(accuracy=${r.accuracy}, kernelΔ=${imprText}, ITL=${r.itl_ms}ms)`)
         passed = true
         break
       }
@@ -382,75 +417,136 @@ if (validated.length === 0) {
 phase('Ship')
 log(`Shipping ${validated.length} fusion(s): ${validated.map(f => f.slug).join(', ')}`)
 
-const prResults = await parallel(validated.map(fusion => () => {
-  const v = fusion.validation || {}
-  const report = v.validation_report || '_No validation report was produced._'
-  const accText = v.accuracy ?? 'N/A'
-  const thr = v.accuracy_threshold ?? ACCURACY_THRESHOLD
-  const model = v.model || 'Qwen3.5-397B-A17B-MXFP4'
-  const tracePath = v.trace_analysis_path || 'see logs'
-  const profConfirmed = v.profiling_confirmed === false ? 'NOT CONFIRMED' : 'CONFIRMED'
-  const baselineNote = v.baseline_available === false ? ' (baseline not available — after-only)' : ''
-  const isTriton = (fusion.target_op || '').toLowerCase().includes('triton')
-  const modNote = isTriton
-    ? 'A new Triton kernel replaces the separate elementwise/normalization launches in the hot path.'
-    : 'Dispatch is switched to the existing fused aiter op.'
+// House-style exemplar (condensed real PR #27656). The ship agent matches THIS structure/tone —
+// narrative Motivation naming before-kernels+us, per-file Modifications, Accuracy table,
+// kernel-level Before/After table + savings math, E2E table. NOT a verbatim template.
+const REFERENCE_PR = `[AMD][Perf] Fuse QK RMSNorm + gate extraction Triton kernel for Qwen3.5 on HIP
 
-  const prBody = `## Motivation
-
-Fuse ${(fusion.kernels || []).length} kernel(s) in **${fusion.block_name}** to cut per-layer kernel launch/compute overhead for **${model}**. Estimated ~${fusion.savings_us || '?'} us/layer savings.
-
-- **Target op:** ${fusion.target_op}
-- **Kernels fused:** ${(fusion.kernels || []).join(', ') || 'see diff'}
-- **File modified:** ${fusion.sglang_file}
-- **Files changed:** ${fusion.impl?.files_changed?.join(', ') || 'see diff'}
+## Motivation
+In Qwen3.5's attention layers on HIP, the forward_prepare path runs three separate kernels:
+1. \`elementwise_kernel\` -- copy q from interleaved buffer (4.5 us)
+2. \`elementwise_kernel\` -- copy gate from interleaved buffer (4.8 us)
+3. \`_fused_qk_gemma_rmsnorm_kernel\` -- normalize q and k (4.5 us)
+This PR fuses all three into a single Triton kernel, eliminating 2 launches per attention layer.
 
 ## Modifications
+- **python/sglang/srt/models/utils.py**: Add \`_fused_qk_gemma_rmsnorm_gate_kernel\` Triton kernel and wrapper ...
+- **python/sglang/srt/models/qwen3_5.py**: Add \`forward_prepare_hip()\`; dispatch when \`_is_hip and self.attn_output_gate\`.
 
-Tier-1 fusion implemented behind the \`_use_aiter\` guard — no top-level aiter imports, common (non-aiter) path byte-identical. ${modNote}
+## Accuracy Tests
+Model: Qwen3.5-397B-A17B-MXFP4, TP=2, MI355x
+| Benchmark | Score | Threshold |
+|-----------|:-----:|:---------:|
+| GSM8K (2000 questions, parallel=2000) | 0.911 | 0.880 |
 
-## Accuracy Tests & Benchmarking${baselineNote}
+## Speed Tests and Profiling
+### Kernel-level (per attention layer, decode)
+| Kernel | Before (us) | After (us) | Notes |
+|--------|:-:|:-:|-------|
+| \`elementwise_kernel\` (q deinterleave) | 4.5 | -- | eliminated |
+| \`_fused_qk_gemma_rmsnorm_gate_kernel\` | -- | 4.6 | new fused kernel |
+| **Attention layer total** | **91.0** | **81.6** | **-9.4 us (-10.3%)** |
+15 attention layers x 9.4 us = ~141 us savings per decode iteration.
+### E2E benchmark
+| Metric | Before | After | Delta |
+|--------|:-:|:-:|:-:|
+| Median ITL (ms) | 10.59 | 10.47 | -1.1% |
+(+ official Checklist and Review-and-Merge-Process sections, kept verbatim from the repo template)`
 
-${report}
+const prResults = await parallel(validated.map(fusion => () => {
+  const v = fusion.validation || {}
+  const model = v.model || 'Qwen3.5-397B-A17B-MXFP4'
+  const isTriton = (fusion.target_op || '').toLowerCase().includes('triton')
+  const isDraft = fusion.shipMode === 'draft'
+  const perfJudgement = fusion.perfJudgement || ''
 
-## Checklist
-
-- [x] Accuracy validation (GSM8K, num-questions 200 / parallel 2000, threshold >= ${thr}) — score ${accText}
-- [x] Before/after E2E benchmark comparison (table above)
-- [x] Profiling trace confirms the kernel change (${profConfirmed}) — analysis: ${tracePath}
-- [x] Kernel-to-E2E impact analysis (expected vs observed ITL)
-- [x] Server launch + health check via agent script
-
-## Review Process
-- [ ] Maintainer review of the fused kernel correctness and \`_use_aiter\` gating`
+  // Repo-relative paths only — never leak worktree/absolute paths into the PR.
+  const toRepoRel = (p) => {
+    if (!p) return p
+    const s = String(p)
+    const m = s.match(/(python\/sglang\/.*)$/) || s.match(/(sgl-kernel\/.*)$/)
+    return m ? m[1] : s
+  }
+  const sglangFileRel = toRepoRel(fusion.sglang_file)
+  const filesChangedRel = (fusion.impl?.files_changed || []).map(toRepoRel)
 
   // SSOT: the lint/commit/push/PR-create+update process lives in commit-push-pr/SKILL.md
-  // (PIPELINE_MODE). The orchestrator only composes the PR body and injects CONFIG.
+  // (PIPELINE_MODE). The ship agent COMPOSES the title+body (no verbatim template) then injects CONFIG.
   const shipConfig = {
     pipeline_mode: true,
     worktree: `read from ~/.kernel-fusion-pipeline/state.json -> worktrees.${fusion.slug}.path`,
     sglang_root: 'read sglang_root from ~/.kernel-fusion-pipeline/state.json',
     repo: 'sgl-project/sglang',
     base: 'main',
-    commit_subject: `[AMD] ${fusion.slug}: ${fusion.block_name} — fuse ${(fusion.kernels || []).length} kernels, ~${fusion.savings_us || '?'} us/layer`,
-    pr_title: `[AMD] ${fusion.slug}: ${fusion.block_name}`,
     pr_body_file: `/tmp/pr_body_${fusion.slug}.md`,
     gh_env: 'GH_CONFIG_DIR=/home/yichiche/.gh GH_TOKEN=""',
+    draft: isDraft,
   }
 
   return agent(`
-You are shipping a validated kernel fusion. PIPELINE_MODE — fully autonomous.
+You are COMPOSING and shipping a PR for a validated kernel fusion. PIPELINE_MODE — fully autonomous.
+Produce a PR indistinguishable in style from the reference below. Do NOT dump raw validation logs;
+COMPOSE clean prose + tables from the data.
 
-1. Write the PR body below VERBATIM to ${shipConfig.pr_body_file} (preserve the markdown tables exactly,
-   do not summarize or reformat):
------ BEGIN PR BODY -----
-${prBody}
------ END PR BODY -----
+== Fusion ==
+slug: ${fusion.slug}
+block: ${fusion.block_name}
+target_op: ${fusion.target_op}
+kernels_fused: ${JSON.stringify(fusion.kernels || [])}
+model: ${model}
+file (repo-relative): ${sglangFileRel}
+files_changed (repo-relative): ${JSON.stringify(filesChangedRel)}
+implementation_type: ${isTriton ? 'custom Triton kernel' : 'existing fused aiter op (dispatch switch)'}
 
-2. Then read and FOLLOW /home/yichiche/agent-box/skills/commit-push-pr/SKILL.md PIPELINE_MODE with:
-CONFIG = ${JSON.stringify(shipConfig, null, 2)}
+== Validation data — DISTILL into tables, DO NOT paste verbatim ==
+${JSON.stringify(v, null, 2)}
 
-Return: slug, commit_hash, pr_url, status.
+If ~/.kernel-fusion-pipeline/comparison.md exists, read it for the kernel-level Before/After table.
+
+STEPS:
+1. cd into the worktree (path from state.json). Run \`git diff\` against ${shipConfig.base} so Modifications
+   reflects the ACTUAL change. Read .github/pull_request_template.md in the worktree — its section structure
+   (Motivation / Modifications / Accuracy Tests / Speed Tests and Profiling / Checklist / Review and Merge
+   Process) is REQUIRED. Keep its Checklist + Review-and-Merge-Process sections verbatim from the template
+   (tick only boxes you actually satisfied).
+2. Compose the BODY, matching the reference:
+   - Motivation: narrative; name the BEFORE kernels with their us timings and how many launches are eliminated.
+   - Modifications: one **bold repo-relative path** bullet per changed file, human description; note the
+     \`_use_aiter\` gating and that the common (non-aiter) path is byte-identical.
+   - Accuracy Tests: table | Benchmark | Score | Threshold | Status | + model config line.
+   - Speed Tests and Profiling: kernel-level Before/After table (named kernels + us), savings/iter math
+     (savings/layer x layer_count), and an E2E table | Metric | Before | After | Delta |.
+   - HONESTY: if there is no measurable e2e speedup, say so plainly and frame as kernel-launch reduction /
+     CUDA-path parity. Do not oversell.
+3. HARD EXCLUSIONS — must not appear anywhere in the body:
+   - absolute/worktree paths (/root/..., /tmp/..., /sgl-workspace/..., .kernel-fusion-pipeline/...). Repo-relative only.
+   - "=== Validation Summary ===" headers, "NOTE ON CONFIG", "Code fixes required", "REMAINING BLOCKER",
+     or any "previous attempt failed / accuracy collapsed / ROOT CAUSE" debugging narrative.
+   A genuine caveat/follow-up (e.g. a graph-capture limitation) goes in ONE neutral sentence under a "Notes"
+   bullet — no log dumps.
+4. TITLE (descriptive, like the reference): "[AMD][Perf] Fuse <A> + <B> into single ${isTriton ? 'Triton kernel' : 'aiter op'} for ${model} on HIP".
+   If correctness/parity only with no measurable speedup, drop "[Perf]" → "[AMD] ...".
+${isDraft ? `
+DRAFT MODE — this fusion did NOT clear the >=1% kernel-time perf gate.
+   - Use the "[AMD]" tag (NOT "[Perf]"). Frame the PR honestly as a kernel-launch reduction / correctness
+     change that is NOT a measured speedup on this hardware. Do not imply a perf win in the title or Motivation.
+   - Add a "## Maintainer Judgement" section near the top of the body with this verbatim assessment:
+     ${JSON.stringify(perfJudgement)}
+   - Create the PR as a DRAFT: pass --draft to \`gh pr create\` (or after creating, run
+     \`${shipConfig.gh_env} gh pr ready <number> --undo --repo ${shipConfig.repo}\` to convert it to draft).
+` : `
+This fusion CLEARED the perf gate — open the PR normally (not a draft).
+`}
+5. Write the composed body VERBATIM to ${shipConfig.pr_body_file}. Then read and FOLLOW
+   /home/yichiche/agent-box/skills/commit-push-pr/SKILL.md PIPELINE_MODE with:
+   CONFIG = ${JSON.stringify(shipConfig, null, 2)}
+   Use your composed title as both commit_subject and pr_title.
+   NOTE: CONFIG.draft=${isDraft}. If true, the PR MUST end up as a draft (verify with \`gh pr view <n> --json isDraft\`).
+
+== REFERENCE PR (match this style) ==
+${REFERENCE_PR}
+
+Return: slug, commit_hash, pr_url, pr_title, status.
 `, { label: `ship:${fusion.slug}`, schema: PR_RESULT_SCHEMA })
 }))
 
@@ -461,8 +557,9 @@ const shipFailed = []
 for (let i = 0; i < validated.length; i++) {
   const r = prResults[i]
   if (r && r.status === 'pass') {
-    shipped.push({ slug: validated[i].slug, pr_url: r.pr_url, commit: r.commit_hash })
-    log(`PR created: ${validated[i].slug} → ${r.pr_url}`)
+    const mode = validated[i].shipMode === 'draft' ? 'DRAFT' : 'open'
+    shipped.push({ slug: validated[i].slug, pr_url: r.pr_url, commit: r.commit_hash, mode, judgement: validated[i].perfJudgement })
+    log(`PR created (${mode}): ${validated[i].slug} → ${r.pr_url}`)
   } else {
     shipFailed.push({ slug: validated[i].slug, error: r?.error })
     log(`Ship failed: ${validated[i].slug} — ${r?.error || 'unknown'}`)
