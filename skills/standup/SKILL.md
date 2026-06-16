@@ -118,7 +118,13 @@ Use the first token of `git config user.name` (run in any configured repo), unle
 
 ### Teams-ready format (required)
 
-Output **only** the standup block: no preamble, no wrapping markdown code fence (plain text pastes cleanly into Teams). Use lines starting with `- ` for bullets.
+Output **only** the standup block: no preamble, no wrapping markdown code fence (plain text pastes cleanly into Teams).
+
+**Grouped layout (preferred).** Under **Yesterday:**, group work under a **ticket / workstream header** line
+(e.g. a Jira ticket `GPUAI-6500 — <short title>`, or a project name like `InferenceX`), then list the work as
+**indented** `  - ` sub-bullets beneath it. Use one header per distinct ticket/workstream the day's work maps to.
+**Today:** and **Blocker:** stay as simple indented bullets (no headers needed unless the day's plan spans
+multiple tickets).
 
 **Single-day template:**
 
@@ -126,60 +132,59 @@ Output **only** the standup block: no preamble, no wrapping markdown code fence 
 Name – M/D
 
 Yesterday:
-- …
-- …
+
+GPUAI-#### — <short workstream title>
+  - (repo) <what shipped / progressed>  <full PR URL>
+  - (repo) <related work>  <full PR URL>
+
+<Project/Workstream>
+  - <what shipped / progressed>  <full PR URL>
 
 Today:
-- …
+  - <plan>
+  - <plan>
 
 Blocker:
-- None
+  - None
 ```
 
-**Multi-day template:**
-
-```
-Name – M/D–M/D
-
-Yesterday:
-- … (group by PR / theme; full PR URLs)
-
-Today:
-- …
-
-Blocker:
-- None
-```
+**Multi-day template:** same grouped layout, header `Name – M/D–M/D`; group by ticket/workstream across the
+range and merge related lines.
 
 ### Rules
 
 1. **Header**: `Name – M/D` for single day, or `Name – M/D–M/D` for multi-day (no leading zeros, e.g., `6/5` not `06/05`).
 2. **Yesterday:** bullets = completed work in `$START_DATE`…`$END_DATE` (standup naming convention).
-3. **Optional workstream tags**: prefix a bullet with `(sglang)` / `(agent-box)` when two repos appear — avoid extra subheadings unless the user asks.
-4. **Max 3 bullets** under Yesterday and under Today (merge related lines).
-5. **High-level tone** for managers / cross-team; one bullet = one outcome or theme.
-6. **Include concrete numbers** only for headline results (%, ratio, tok/s).
-7. **PR links**: use full `https://github.com/...` URLs on the same line as the bullet text.
-8. **Today:** infer from the latest conversation direction; if unknown, use `- (add plan)` and ask once in Step 5.
-9. **Blocker:** always include this section. Use `- None` when there are no blockers; otherwise one bullet with the blocker.
-10. **Length**: should fit a short Teams chat post.
+3. **Exclude internal tooling**: do **not** mention `agent-box` work — skills, workflows, the standup/profile/compare-kernels tooling itself, or any change under `$HOME/agent-box`. The audience cares about shipped product work (sglang, aiter, InferenceX), not the local automation used to produce it. Only include agent-box work if the user **explicitly** asks for it.
+4. **Group by ticket/workstream**: under Yesterday, head each group with its Jira ticket (`GPUAI-####`) or workstream/project name, then indent the work as `  - ` sub-bullets. Within a sub-bullet, prefix `(sglang)` / `(aiter)` / `(inferencex)` when the repo isn't obvious from the header.
+5. **Max ~3 sub-bullets per group** (merge related lines); aim for a short post overall.
+6. **High-level tone** for managers / cross-team; one bullet = one outcome or theme.
+7. **Include concrete numbers** only for headline results (%, ratio, tok/s).
+8. **PR links**: use full `https://github.com/...` URLs on the same line as the bullet text.
+9. **Today:** infer from the latest conversation direction; if unknown, use `- (add plan)` and ask once in Step 5.
+10. **Blocker:** always include this section. Use `- None` when there are no blockers; otherwise one bullet with the blocker.
+11. **Length**: should fit a short Teams chat post.
 
 ### Example output
 
 ```
-Jacky – 5/20
+Jacky – 6/17
 
 Yesterday:
-- (sglang) Profiled MI355 vs B200 decode: MI355 ~56% of B200 E2E; largest gaps GEMM, elementwise, attention
-- (sglang) Tested fused norm+rope in compressor — reverted pending validation
-- (agent-box) Trace analyzer: variant detection, recategorize, mhc category
+
+GPUAI-6500 — Qwen3.5-397B-A17B-mxfp4
+  - (aiter) CK-Tile interleaved post-activation: fused silu_and_mul https://github.com/ROCm/aiter/pull/3603; cherry-picked Qwen3.5 397B mxfp4 GEMM tuning https://github.com/ROCm/aiter/pull/3693; addressed review feedback
+  - (sglang) Qwen3.5 HIP fusions: aiter fused topk_gating for MoE routing https://github.com/sgl-project/sglang/pull/28399 and fused QK GemmaRMSNorm + MRoPE attn-prep https://github.com/sgl-project/sglang/pull/28398; revised earlier fusions #28361 and #28362
+
+InferenceX
+  - Added --kv-cache-dtype fp8_e4m3 on a new branch, opened a PR, kicked off the perf sweep via perf-changelog.yaml
 
 Today:
-- Re-land fused compress-norm-rope after validation
-- Profile decode attention gap; evaluate FA3 on MI355
+  - Run 5-source discovery on Qwen3.5 traces and triage candidates
+  - Configure 8 NVMe drives as RAID0 on MI355X
 
 Blocker:
-- None
+  - None
 ```
 
 ## Step 5: Present and refine
