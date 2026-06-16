@@ -7,6 +7,62 @@ description: Commit, push, and create a PR in one flow — checks state at each 
 Follow these steps precisely. This skill chains to `/commit-push` (which itself chains to `/commit`).
 Read `_shared/repo-config.md` for repo table, remote URLs, PR draft location/naming, and safety rules.
 
+## PIPELINE_MODE (from `/kernel-fusion-pipeline`)
+
+When invoked with a CONFIG object containing `"pipeline_mode": true`, run **fully autonomously** —
+NEVER use `AskUserQuestion`, never wait for human review. Skip all interactive steps (2, 4-review,
+6, 8, 11). Use CONFIG fields instead of asking. This is the SAME commit/PR contract as the
+interactive flow; only the "ask the user" gates are replaced by CONFIG values.
+
+**CONFIG fields:**
+- `worktree` — run all git/gh commands from here (`cd "$worktree"` or `git -C "$worktree"`).
+- `repo` — base repo for the PR (e.g. `sgl-project/sglang`).
+- `base` — PR base branch (e.g. `main`).
+- `commit_subject` — exact commit subject (already `[AMD] …` formatted).
+- `pr_title` — exact PR title.
+- `pr_body_file` — path to a file with the full PR body (already composed; use VERBATIM).
+- `update_pr` — optional PR number; if set, UPDATE that PR's body instead of creating a new one.
+- `gh_env` — optional env prefix for gh, e.g. `GH_CONFIG_DIR=/home/yichiche/.gh GH_TOKEN=""`.
+- `sglang_root` — repo root to return to for worktree cleanup.
+
+**Flow:**
+
+1. `cd "$worktree"`.
+
+2. **Fix lint BEFORE committing** (CI enforces pre-commit; a dirty lint state fails CI):
+   - `pip3 install -q -U pre-commit` (fine if already present)
+   - `git add -A`
+   - `pre-commit run --all-files` — let hooks auto-fix (isort, ruff F401/F821, black, codespell,
+     clang-format, nbstripout).
+   - If files changed: `git add -A && pre-commit run --all-files`; repeat up to 3×.
+   - If a hook still fails (e.g. ruff F821 it cannot auto-fix), read the error, fix the code in the
+     worktree, then retry from `git add -A`.
+   - If `--all-files` reformats files UNRELATED to this change, reset them
+     (`git checkout -- <file>`) so the commit stays focused on this change only.
+   - Do not proceed until pre-commit exits clean.
+
+3. Commit (only if there are staged changes): `git commit -m "<commit_subject>"`.
+   **Never add `Co-Authored-By` trailers** (in subject or body).
+
+4. Push the branch: `git push` (use `git push -u origin HEAD` if no upstream is set).
+
+5. PR — pick ONE path:
+   - **Create** (no `update_pr`):
+     `<gh_env> gh pr create --repo <repo> --base <base> --title "<pr_title>" --body-file <pr_body_file>`
+     Use `--body-file` (never `--body`) so markdown tables survive shell quoting.
+   - **Update existing** (`update_pr` set): `gh pr edit` currently fails on a projects-classic
+     GraphQL deprecation, so update the body via the REST API:
+     `<gh_env> gh api -X PATCH repos/<repo>/pulls/<update_pr> -f body="$(cat <pr_body_file>)"`
+   - If `gh pr create` fails on auth/permission, fall through Step 9's Attempts 2-4
+     (`--web`, `curl` REST POST, prefill URL). In pipeline_mode do NOT block on the user —
+     record the failure and return `status: fail` with the reason.
+
+6. Cleanup: `cd "$sglang_root"` then `git worktree remove <worktree>` (keep the local branch).
+
+7. Return JSON: `{ slug, commit_hash, pr_url, status }` (`status` = `pass`/`fail`, plus `error` if failed).
+
+---
+
 ## Step 0: Ensure `gh` CLI is available and authenticated
 
 Check that the GitHub CLI is the real one (v2.x+, not the pip `gh` v0.0.4):

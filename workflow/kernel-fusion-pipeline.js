@@ -44,17 +44,82 @@ const IMPL_RESULT_SCHEMA = {
   required: ['slug', 'status'],
 }
 
+const METRIC_SCHEMA = {
+  type: 'object',
+  description: 'baseline vs after for one metric (baseline null if not collected)',
+  properties: {
+    baseline: { type: ['number', 'null'] },
+    after: { type: ['number', 'null'] },
+    delta_pct: { type: ['number', 'null'], description: '(after-baseline)/baseline*100' },
+  },
+}
+
 const VALIDATE_RESULT_SCHEMA = {
   type: 'object',
   properties: {
     slug: { type: 'string' },
     status: { type: 'string', enum: ['pass', 'fail', 'skip'] },
-    accuracy: { type: 'number' },
-    itl_ms: { type: 'number' },
     error: { type: 'string' },
-    benchmark_summary: { type: 'string' },
+    model: { type: 'string', description: 'Model name used for validation' },
+
+    // Accuracy (Step 3)
+    accuracy: { type: 'number', description: 'GSM8K accuracy score' },
+    accuracy_threshold: { type: 'number' },
+
+    // After median ITL (ms) — used by the pipeline pass/fail + logging
+    itl_ms: { type: 'number' },
+
+    // E2E benchmark comparison (Step 6b table)
+    baseline_available: { type: 'boolean' },
+    benchmark: {
+      type: 'object',
+      description: 'Six metrics, each baseline/after/delta_pct',
+      properties: {
+        total_throughput: METRIC_SCHEMA,
+        output_throughput: METRIC_SCHEMA,
+        median_ttft_ms: METRIC_SCHEMA,
+        median_itl_ms: METRIC_SCHEMA,
+        median_tpot_ms: METRIC_SCHEMA,
+        median_e2e_ms: METRIC_SCHEMA,
+      },
+    },
+
+    // Kernel-to-E2E impact analysis (Step 6a)
+    kernel_to_e2e: {
+      type: 'object',
+      properties: {
+        layers: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              layer_type: { type: 'string' },
+              layer_count: { type: 'number' },
+              savings_per_layer_us: { type: 'number' },
+              total_savings_us: { type: 'number' },
+            },
+          },
+        },
+        total_savings_us: { type: 'number' },
+        expected_itl_pct: { type: 'number' },
+        observed_itl_pct: { type: 'number' },
+        assessment: { type: 'string' },
+        ttft_impact: { type: 'string' },
+      },
+    },
+
+    // Profiling confirmation (Step 4)
+    profiling_confirmed: { type: 'boolean' },
+    profiling_observations: { type: 'string' },
+    trace_analysis_path: { type: 'string' },
+
+    // Fully-composed markdown report (Step 6b), embedded verbatim in the PR body
+    validation_report: {
+      type: 'string',
+      description: 'Complete "=== Validation Summary ===" markdown per /validate SKILL Step 6b',
+    },
   },
-  required: ['slug', 'status'],
+  required: ['slug', 'status', 'validation_report'],
 }
 
 const PR_RESULT_SCHEMA = {
@@ -89,27 +154,27 @@ You are setting up a kernel fusion pipeline. Do the following steps IN ORDER:
    SGLANG_ROOT=$(python3 -c "import sglang, pathlib; print(pathlib.Path(sglang.__file__).resolve().parents[2])")
 
 2. Run GPU slot planning:
-   python3 ~/agent-box/skills/kernel-fusion-pipeline/scripts/plan_gpu_slots.py --tp 2 --port-base 8001 --json
+   python3 /home/yichiche/agent-box/skills/kernel-fusion-pipeline/scripts/plan_gpu_slots.py --tp 2 --port-base 8001 --json
    If max_parallel == 0, return an error saying which GPUs are occupied.
 
 3. Recategorize traces:
-   python3 ~/agent-box/profile/trace_module_analyzer.py --recategorize ${fileA} ${fileB}
+   python3 /home/yichiche/agent-box/profile/trace_module_analyzer.py --recategorize ${fileA} ${fileB}
 
 4. Compare kernels between the two xlsx files following the /compare-kernels skill (Steps 1-6).
    Extract ALL Tier-1 fusion opportunities. Tier-1 includes:
    - Existing aiter fused ops (Python-only dispatch change)
    - Custom Triton kernels (fuse multiple elementwise/small ops)
-   Verify aiter ops exist under ~/aiter/aiter/ops/ or /sgl-workspace/aiter/aiter/ops/.
+   Verify aiter ops exist under /home/yichiche/aiter/aiter/ops/ or /sgl-workspace/aiter/aiter/ops/.
    Drop invalid candidates.
 
 5. For each Tier-1 fusion, record: slug, block_name, target_op, kernels, savings_us, sglang_file, tier.
    Rank by estimated savings (highest first).
 
 6. Assign fusions to GPU slots:
-   python3 ~/agent-box/skills/kernel-fusion-pipeline/scripts/plan_gpu_slots.py --tp 2 --port-base 8001 --assign <slug1> <slug2> ...
+   python3 /home/yichiche/agent-box/skills/kernel-fusion-pipeline/scripts/plan_gpu_slots.py --tp 2 --port-base 8001 --assign <slug1> <slug2> ...
 
 7. Create worktree farm:
-   python3 ~/agent-box/skills/kernel-fusion-pipeline/scripts/worktree_farm.py --sglang-root "$SGLANG_ROOT" --slugs <slug1> <slug2> ...
+   python3 /home/yichiche/agent-box/skills/kernel-fusion-pipeline/scripts/worktree_farm.py --sglang-root "$SGLANG_ROOT" --slugs <slug1> <slug2> ...
 
 8. Read and return the full state from ~/.kernel-fusion-pipeline/state.json
 
@@ -143,6 +208,7 @@ const stateRaw = await agent('Read ~/.kernel-fusion-pipeline/state.json and retu
 const implResults = await parallel(tier1.map(fusion => () =>
   agent(`
 You are implementing a kernel fusion in a git worktree. PIPELINE_MODE — no EnterPlanMode, no AskUserQuestion.
+If you hit a transient API/rate-limit error, back off and retry a few times rather than aborting.
 
 Fusion: ${fusion.slug}
   Block: ${fusion.block_name}
@@ -206,29 +272,42 @@ const failedValidation = []
 
 function makeValidatePrompt(fusion, gpus, port, retryContext) {
   const retryBlock = retryContext
-    ? `\n\nPREVIOUS ATTEMPT FAILED:\n${retryContext}\nYou MUST fix the code in the worktree before re-validating. Read the error, diagnose the root cause, edit the code, then re-run validation.\n`
+    ? `\nPREVIOUS ATTEMPT FAILED: ${retryContext}\nFIRST fix the code in the worktree (find the root cause, edit), THEN re-run validation.\n`
     : ''
 
+  // SSOT: the full validate procedure, 6 metrics, kernel-to-E2E math, pass/fail rule, and the
+  // "=== Validation Summary ===" report format all live in validate/SKILL.md. The orchestrator
+  // only injects CONFIG + fusion vars and enforces the output schema.
+  const CONFIG = {
+    pipeline_mode: true,
+    worktree: `read from ~/.kernel-fusion-pipeline/state.json -> worktrees.${fusion.slug}.path`,
+    gpus, port,
+    threshold: ACCURACY_THRESHOLD,
+    // single command that BOTH launches the server and runs the benchmark — use it for the
+    // baseline AND the after runs (replaces SKILL's separate server_script/client_script; model
+    // is set inside the script):
+    server_bench_cmd: `PORT=${port} HIP_VISIBLE_DEVICES=${gpus} PYTHONPATH_OVERRIDE=<worktree>/python KEEP_SERVER=1 bash /home/yichiche/run_qwen3.5_mxfp4_perf_agent.sh`,
+    profiler: '/home/yichiche/agent-box/profile/trace_module_analyzer.py',
+    fusion: {
+      slug: fusion.slug,
+      block_name: fusion.block_name,
+      target_op: fusion.target_op,
+      kernels: fusion.kernels || [],
+      estimated_savings_us: fusion.savings_us,
+      sglang_file: fusion.sglang_file,
+    },
+  }
+
   return `
-You are validating a kernel fusion. PIPELINE_MODE — fully autonomous.
+You are validating a kernel fusion END-TO-END and producing a PR-ready report. PIPELINE_MODE — fully autonomous.
+
+Read and FOLLOW /home/yichiche/agent-box/skills/validate/SKILL.md Steps 1-6 with its PIPELINE_MODE rules
+(use the CONFIG below instead of asking; baseline via git per Step 1a; never AskUserQuestion/EnterPlanMode).
 ${retryBlock}
-Fusion: ${fusion.slug}
-  Worktree: read from ~/.kernel-fusion-pipeline/state.json -> worktrees.${fusion.slug}.path
-  GPUs: ${gpus}
-  Port: ${port}
+CONFIG = ${JSON.stringify(CONFIG, null, 2)}
 
-Steps:
-1. Read the worktree path from ~/.kernel-fusion-pipeline/state.json${retryContext ? '\n2. FIRST: Fix the code based on the failure reason above. Edit files in the worktree.' : ''}
-${retryContext ? '3' : '2'}. Run the agent script to launch server + benchmark:
-   PORT=${port} HIP_VISIBLE_DEVICES=${gpus} PYTHONPATH_OVERRIDE=<worktree>/python KEEP_SERVER=1 \\
-     bash ~/run_qwen3.5_mxfp4_perf_agent.sh
-${retryContext ? '4' : '3'}. After benchmark completes, run accuracy test against the still-running server on port ${port}.
-   Use /validate skill's accuracy test approach.
-${retryContext ? '5' : '4'}. Kill the server: pkill -f "sglang.launch_server.*--port ${port}"
-${retryContext ? '6' : '5'}. Evaluate: accuracy >= ${ACCURACY_THRESHOLD} AND ITL not regressed >2% = PASS
-
-Return: slug, status, accuracy, itl_ms, benchmark_summary, any error.
-If server fails to start (agent script will detect quickly), return status=fail with the error.
+Output: return every field of the provided result schema. In particular, validation_report MUST be the
+complete "=== Validation Summary ===" markdown EXACTLY per SKILL Step 6b — it is embedded verbatim into the PR.
 `
 }
 
@@ -304,52 +383,72 @@ phase('Ship')
 log(`Shipping ${validated.length} fusion(s): ${validated.map(f => f.slug).join(', ')}`)
 
 const prResults = await parallel(validated.map(fusion => () => {
-  const benchText = fusion.validation?.benchmark_summary || 'No benchmark data'
-  const accText = fusion.validation?.accuracy ?? 'N/A'
-  const itlText = fusion.validation?.itl_ms ?? 'N/A'
+  const v = fusion.validation || {}
+  const report = v.validation_report || '_No validation report was produced._'
+  const accText = v.accuracy ?? 'N/A'
+  const thr = v.accuracy_threshold ?? ACCURACY_THRESHOLD
+  const model = v.model || 'Qwen3.5-397B-A17B-MXFP4'
+  const tracePath = v.trace_analysis_path || 'see logs'
+  const profConfirmed = v.profiling_confirmed === false ? 'NOT CONFIRMED' : 'CONFIRMED'
+  const baselineNote = v.baseline_available === false ? ' (baseline not available — after-only)' : ''
+  const isTriton = (fusion.target_op || '').toLowerCase().includes('triton')
+  const modNote = isTriton
+    ? 'A new Triton kernel replaces the separate elementwise/normalization launches in the hot path.'
+    : 'Dispatch is switched to the existing fused aiter op.'
 
-  const prBody = `## Summary
-- ${fusion.block_name}: fuse ${(fusion.kernels || []).length} kernels, ~${fusion.savings_us || '?'} us/layer savings
-- Target op: ${fusion.target_op}
-- Files changed: ${fusion.impl?.files_changed?.join(', ') || 'see diff'}
+  const prBody = `## Motivation
 
-## Validation Results
+Fuse ${(fusion.kernels || []).length} kernel(s) in **${fusion.block_name}** to cut per-layer kernel launch/compute overhead for **${model}**. Estimated ~${fusion.savings_us || '?'} us/layer savings.
 
-**Benchmark:**
-${benchText}
+- **Target op:** ${fusion.target_op}
+- **Kernels fused:** ${(fusion.kernels || []).join(', ') || 'see diff'}
+- **File modified:** ${fusion.sglang_file}
+- **Files changed:** ${fusion.impl?.files_changed?.join(', ') || 'see diff'}
 
-**Accuracy:** ${accText}
-**Mean ITL:** ${itlText} ms
+## Modifications
 
-## Test plan
-- [x] Accuracy validation (>=${ACCURACY_THRESHOLD} threshold) — ${accText}
-- [x] Benchmark ITL regression check
-- [x] Server launch + health check via agent script`
+Tier-1 fusion implemented behind the \`_use_aiter\` guard — no top-level aiter imports, common (non-aiter) path byte-identical. ${modNote}
+
+## Accuracy Tests & Benchmarking${baselineNote}
+
+${report}
+
+## Checklist
+
+- [x] Accuracy validation (GSM8K, num-questions 200 / parallel 2000, threshold >= ${thr}) — score ${accText}
+- [x] Before/after E2E benchmark comparison (table above)
+- [x] Profiling trace confirms the kernel change (${profConfirmed}) — analysis: ${tracePath}
+- [x] Kernel-to-E2E impact analysis (expected vs observed ITL)
+- [x] Server launch + health check via agent script
+
+## Review Process
+- [ ] Maintainer review of the fused kernel correctness and \`_use_aiter\` gating`
+
+  // SSOT: the lint/commit/push/PR-create+update process lives in commit-push-pr/SKILL.md
+  // (PIPELINE_MODE). The orchestrator only composes the PR body and injects CONFIG.
+  const shipConfig = {
+    pipeline_mode: true,
+    worktree: `read from ~/.kernel-fusion-pipeline/state.json -> worktrees.${fusion.slug}.path`,
+    sglang_root: 'read sglang_root from ~/.kernel-fusion-pipeline/state.json',
+    repo: 'sgl-project/sglang',
+    base: 'main',
+    commit_subject: `[AMD] ${fusion.slug}: ${fusion.block_name} — fuse ${(fusion.kernels || []).length} kernels, ~${fusion.savings_us || '?'} us/layer`,
+    pr_title: `[AMD] ${fusion.slug}: ${fusion.block_name}`,
+    pr_body_file: `/tmp/pr_body_${fusion.slug}.md`,
+    gh_env: 'GH_CONFIG_DIR=/home/yichiche/.gh GH_TOKEN=""',
+  }
 
   return agent(`
-You are committing and creating a PR for a validated kernel fusion. PIPELINE_MODE — fully autonomous.
+You are shipping a validated kernel fusion. PIPELINE_MODE — fully autonomous.
 
-Fusion: ${fusion.slug}
-  Block: ${fusion.block_name}
-
-Steps:
-1. Read worktree path from ~/.kernel-fusion-pipeline/state.json -> worktrees.${fusion.slug}.path
-2. cd into the worktree
-3. Stage and commit:
-   git add -A
-   git commit -m "[AMD] ${fusion.slug}: ${fusion.block_name} — fuse ${(fusion.kernels || []).length} kernels, ~${fusion.savings_us || '?'} us/layer"
-   Do NOT add Co-Authored-By lines.
-4. Push the branch. Then create a PR to sgl-project/sglang with EXACTLY this body (do not modify it):
-
+1. Write the PR body below VERBATIM to ${shipConfig.pr_body_file} (preserve the markdown tables exactly,
+   do not summarize or reformat):
+----- BEGIN PR BODY -----
 ${prBody}
+----- END PR BODY -----
 
-   Use: GH_CONFIG_DIR=/home/yichiche/.gh GH_TOKEN="" gh pr create --repo sgl-project/sglang --base main --title "[AMD] ${fusion.slug}: ${fusion.block_name}" --body "<the body above>"
-   If gh pr create fails due to PAT issues, try with GH_CONFIG_DIR=/home/yichiche/.gh GH_TOKEN="" prefix.
-5. After PR is created, clean up the worktree:
-   cd to the SGLang root (read sglang_root from state.json)
-   git worktree remove <worktree_path>
-   Keep the local branch.
-6. Record the commit hash and PR URL.
+2. Then read and FOLLOW /home/yichiche/agent-box/skills/commit-push-pr/SKILL.md PIPELINE_MODE with:
+CONFIG = ${JSON.stringify(shipConfig, null, 2)}
 
 Return: slug, commit_hash, pr_url, status.
 `, { label: `ship:${fusion.slug}`, schema: PR_RESULT_SCHEMA })
