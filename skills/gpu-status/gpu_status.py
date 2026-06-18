@@ -10,9 +10,24 @@ IMPORTANT mapping facts on this box (learned the hard way):
 
 So this script does NOT trust index equality. It joins two sources on PCI bus:
   1. rocm-smi --json  -> per physical GPU: VRAM used, util, PCI bus.
-  2. torch.cuda (probed with a CLEAN env)  -> CUDA index i -> PCI bus.
+  2. CUDA index i -> PCI bus, from a CACHED map (see below); falls back to a live
+     torch probe when the cache is missing/stale.
 torch's default enumeration (no *_VISIBLE_DEVICES set) is exactly what
 CUDA_VISIBLE_DEVICES=i indexes into, so the printed CUDA index is copy-paste ready.
+
+CACHING (why this is fast):
+  The CUDA<->PCI map is a property of the host's GPU enumeration and only changes on
+  REBOOT. Re-probing torch every run is slow and often impossible here (the host and
+  freshly-started/empty containers report "No HIP GPUs"; only a GPU-healthy container
+  can probe). So the map is cached in pci_cuda_map.json next to this script, keyed by
+  the kernel boot_id (/proc/sys/kernel/random/boot_id):
+    * boot_id matches cache  -> reuse cached map, skip torch entirely. Only rocm-smi
+      runs, to refresh live VRAM/usage. This is the normal, fast path.
+    * boot_id changed (reboot) or no cache -> the map MUST be re-confirmed: try a live
+      torch probe, and if it succeeds rewrite the cache. If torch can't probe here,
+      the script says so explicitly and tells you to re-seed from a GPU-healthy
+      container (gpu_status.py --remap there, or copy its map into pci_cuda_map.json).
+  Force a re-probe + cache rewrite any time with  --remap.
 
 A GPU is FREE when used VRAM < --threshold GiB (default 5). We judge on VRAM, not
 util%: a card can sit at 0% util while still holding a model in VRAM.
@@ -25,6 +40,43 @@ import subprocess
 import sys
 
 GIB = 1024 ** 3
+CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "pci_cuda_map.json")
+
+
+def boot_id():
+    """Kernel boot id; changes on every reboot. '' if unreadable."""
+    try:
+        with open("/proc/sys/kernel/random/boot_id") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def load_cache():
+    """Return (map {bus_key: cuda_index}, cached_boot_id) or ({}, '')."""
+    try:
+        with open(CACHE_PATH) as f:
+            c = json.load(f)
+        return {k: int(v) for k, v in c.get("map", {}).items()}, c.get("boot_id", "")
+    except (OSError, ValueError):
+        return {}, ""
+
+
+def save_cache(cuda_of, bid):
+    """Persist {bus_key: cuda_index} keyed by boot_id. Best-effort."""
+    import datetime
+    try:
+        with open(CACHE_PATH, "w") as f:
+            json.dump({
+                "_comment": "Cached CUDA<->PCI map; reused until boot_id changes. "
+                            "Re-seed with gpu_status.py --remap on a GPU-healthy host.",
+                "boot_id": bid,
+                "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
+                "map": {k: cuda_of[k] for k in cuda_of},
+            }, f, indent=2)
+    except OSError as e:  # noqa: BLE001
+        print(f"WARNING: could not write cache {CACHE_PATH}: {e}", file=sys.stderr)
 
 
 def run(cmd, env=None):
@@ -102,13 +154,40 @@ def main():
     ap.add_argument("--threshold", type=float, default=5.0,
                     help="free if used VRAM < this many GiB (default 5)")
     ap.add_argument("--json", action="store_true", help="emit JSON instead of a table")
+    ap.add_argument("--remap", action="store_true",
+                    help="force a fresh torch probe of the CUDA<->PCI map and rewrite "
+                         "the cache (use after a reboot, or on a GPU-healthy container)")
     args = ap.parse_args()
 
     gpus = rocm_gpus()
-    cuda_of = torch_map()
-    if not cuda_of:
-        print("WARNING: could not probe torch for the CUDA<->PCI map; CUDA index "
-              "column will be blank. The rocm-smi index is NOT a safe substitute.",
+
+    # CUDA<->PCI map: use the cache unless it's stale (reboot) or --remap is given.
+    bid = boot_id()
+    cached_map, cached_bid = load_cache()
+    map_source = None
+    if not args.remap and cached_map and cached_bid == bid:
+        cuda_of = cached_map           # fast path: no torch probe
+        map_source = "cache"
+    else:
+        cuda_of = torch_map()          # reboot / no cache / forced: must re-confirm
+        if cuda_of:
+            save_cache(cuda_of, bid)
+            map_source = "probe (cache rewritten)"
+        elif cached_map:
+            # torch can't probe here; fall back to the stale cache but be loud about it.
+            cuda_of = cached_map
+            map_source = "STALE cache"
+
+    if map_source == "STALE cache":
+        print("WARNING: reboot detected (boot_id changed) but torch could not be "
+              "probed here to re-confirm the CUDA<->PCI map. Showing the OLD cached "
+              "map -- CUDA indices may be WRONG. Re-seed from a GPU-healthy container: "
+              "run `gpu_status.py --remap` there (or copy its map into "
+              f"{CACHE_PATH}).", file=sys.stderr)
+    elif not cuda_of:
+        print("WARNING: no cached map and torch could not be probed; CUDA index column "
+              "will be blank. The rocm-smi index is NOT a safe substitute. Seed the "
+              "cache from a GPU-healthy container with `gpu_status.py --remap`.",
               file=sys.stderr)
 
     rows = []
@@ -133,7 +212,8 @@ def main():
             if r["status"] == "FREE" and r["cuda_index"] is not None]
 
     if args.json:
-        print(json.dumps({"gpus": rows, "free_cuda_indices": free}, indent=2))
+        print(json.dumps({"gpus": rows, "free_cuda_indices": free,
+                          "map_source": map_source}, indent=2))
         return
 
     print(f"{'CUDA':>4} {'rocm-smi':>8}  {'PCI Bus':<14} {'Status':<9} "
@@ -154,6 +234,8 @@ def main():
               f"python -m sglang.launch_server --tp 2 ...")
     print("NOTE: SGLang uses CUDA_VISIBLE_DEVICES, not HIP_VISIBLE_DEVICES. "
           "Do not set both.")
+    if map_source:
+        print(f"(CUDA<->PCI map source: {map_source}; rebuild with --remap)")
 
 
 if __name__ == "__main__":
