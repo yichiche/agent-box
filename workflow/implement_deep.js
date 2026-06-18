@@ -87,8 +87,9 @@ const FINAL_SCHEMA = {
     best_latency_us: { type: ['number', 'null'] },
     improvement_pct: { type: ['number', 'null'] },
     correct: { type: 'boolean' },
-    repo_state: { type: 'string', enum: ['best_applied', 'restored_baseline'], description: 'best_applied = winning diff left in the worktree; restored_baseline = no win, reverted clean' },
-    diff: { type: ['string', 'null'], description: 'git diff of the winning change (repo-relative), or null if restored' },
+    repo_state: { type: 'string', enum: ['best_applied', 'reverted_win', 'restored_baseline'], description: 'best_applied = winning diff left applied; reverted_win = win saved as patch then reverted for isolation; restored_baseline = no win, reverted clean' },
+    diff: { type: ['string', 'null'], description: 'git diff of the winning change (repo-relative); captured even when reverted' },
+    patch_path: { type: ['string', 'null'], description: 'file the winning diff was saved to (re-appliable later), or null if no win' },
     report_path: { type: 'string' },
     summary: { type: 'string' },
     ship_ready: { type: 'boolean', description: 'true iff correct AND improvement_pct >= perf gate AND repo_state == best_applied' },
@@ -117,7 +118,9 @@ const keepBest = args?.keep_best ?? true         // leave the winning diff appli
 const minBudgetReserve = args?.min_budget_reserve ?? 60000 // stop the loop if the shared token budget runs low
 const gpus = args?.gpus || ''                    // optional HIP_VISIBLE_DEVICES to pin the sweep to specific GPU(s)
 const outDir = args?.outDir || '~/.kernel-fusion-pipeline'
-const reportPath = `${outDir}/deep_${targetOp.replace(/[^a-z0-9_]+/gi, '_')}.md`
+const slug = targetOp.replace(/[^a-z0-9_]+/gi, '_').slice(0, 60).replace(/_+$/,'')
+const reportPath = `${outDir}/deep_${slug}.md`
+const patchPath = `${outDir}/deep_${slug}.patch`   // winning change is ALWAYS saved here (even when reverted for isolation)
 
 log(`Deep-tune target=${targetOp} kernel_type=${kernelTypeHint} workload="${workload || 'n/a'}"`)
 log(`perf_gate=${perfGatePct}% max_rounds=${maxRounds} converge_after=${maxNoImprove} keep_best=${keepBest}`)
@@ -344,19 +347,24 @@ restore the baseline source + remove the half-built .so${isAuthor ? ' / delete t
     ? result.improvement_pct
     : (ok && lat !== null && baselineLatency ? (baselineLatency - lat) / baselineLatency * 100 : null)
 
-  if (ok && lat !== null && (best === null ? (impr ?? 0) > 0 : lat < best.latency_us)) {
+  // Track the FASTEST CORRECT variant — regardless of whether it already beats the original baseline.
+  // (Author mode's first version is expected to be slower than baseline; converging on "not faster than
+  //  baseline yet" would abandon the search after the first naive version. We optimize toward fastest-correct
+  //  and let Finalize apply the perf gate vs baseline at the end.)
+  if (ok && lat !== null && (best === null || lat < best.latency_us)) {
     best = { ...result, latency_us: lat, improvement_pct: impr }
     noImprove = 0
-    log(`  NEW BEST: ${result.id} → ${lat}us (${impr !== null ? impr.toFixed(1) + '%' : 'n/a'})`)
+    const vsBase = impr !== null ? `${impr.toFixed(1)}% vs baseline` : 'n/a'
+    log(`  fastest correct so far: ${result.id} → ${lat}us (${vsBase})`)
   } else {
     noImprove++
-    const why = !ok ? `incorrect (${result.error || 'op_test failed'})` : (lat === null ? 'no latency parsed' : `${lat}us (no improvement)`)
-    log(`  no win: ${result.id} — ${why}`)
+    const why = !ok ? `incorrect (${result.error || 'op_test failed'})` : (lat === null ? 'no latency parsed' : `${lat}us (not faster than current best ${best?.latency_us ?? '?'}us)`)
+    log(`  no progress: ${result.id} — ${why}`)
   }
 }
 
 if (!best) {
-  log('No correct, faster variant found. Restoring baseline.')
+  log('No CORRECT variant produced at all. Restoring baseline.')
   await agent(`
 Restore the aiter install to a clean baseline after a deep-tune sweep that found no winning variant.
 ${REBUILD_GUIDE}
@@ -391,7 +399,8 @@ ${reconContext()}
 
 BASELINE latency (us): ${baselineLatency ?? 'unparsed'}
 PERF GATE: a variant is ship-ready only if correct AND improvement_pct >= ${perfGatePct}%.
-keep_best=${keepBest} (if false, always restore baseline even on a win — report-only).
+keep_best=${keepBest}. If false (isolation/sweep mode): SAVE the winning diff as a patch, then REVERT to a
+clean baseline so the next operation is measured without pollution — the patch is the deliverable, not a left-applied diff.
 
 WINNING VARIANT to reproduce:
 ${JSON.stringify({ id: best.id, change_summary: best.change_summary, diff_files: best.diff_files, latency_us: best.latency_us, improvement_pct: best.improvement_pct }, null, 2)}
@@ -404,15 +413,19 @@ DO:
 2. Rebuild per the contract (tune: delete only the relevant .so / re-run the tuner; author: compile the new kernel). Confirm it built.
 3. Run the op_test (correctness${isAuthor ? ' = allclose vs unfused reference' : ''}) AND the bench (latency) AGAIN, same workload shape.
    Recompute improvement_pct from these fresh numbers — do not trust the loop's number.
-4. Decide repo_state:
-   - If correct AND improvement_pct >= ${perfGatePct}% AND keep_best=${keepBest}: LEAVE the winning diff applied
-     (repo_state="best_applied"); capture the diff into "diff" (repo-relative paths)${isAuthor ? ' — for new untracked files run `git -C <AITER_ROOT> add -N <files>` first so `git diff` shows them' : " via 'git -C <AITER_ROOT> diff'"} and set
-     ship_ready=true.
-   - Otherwise: restore the baseline (clean 'git status' for these files), repo_state="restored_baseline",
-     diff=null, ship_ready=false.
-5. Write a markdown report to ${reportPath}: target op, kernel_type, baseline vs best (named knob old→new),
-   the op_test + bench commands, improvement %, perf-gate verdict, repo_state, and a short table of all tried
-   experiments (id | change | correct | latency | Δ%). Repo-relative paths only; no /root or /tmp paths in prose.
+4. ALWAYS capture the winning change as a patch FIRST (before any revert):
+   ${isAuthor ? 'run `git -C <AITER_ROOT> add -N <new files>` so untracked files show, then ' : ''}\`git -C <AITER_ROOT> diff\` > ${patchPath}
+   and put that same diff text (repo-relative paths) into the returned "diff"; set patch_path=${patchPath}.
+   THEN decide repo_state:
+   - correct AND improvement_pct >= ${perfGatePct}% AND keep_best=${keepBest}==true → LEAVE applied, repo_state="best_applied", ship_ready=true.
+   - correct AND improvement_pct >= ${perfGatePct}% AND keep_best==false → it IS a win, but isolation is requested:
+     REVERT to a clean baseline now (so the next operation starts unpolluted), repo_state="reverted_win", ship_ready=true
+     (the saved patch at ${patchPath} is the deliverable).
+   - no win (incorrect or below gate) → REVERT to clean, repo_state="restored_baseline", patch_path=null, ship_ready=false.
+   REVERT means: ${isAuthor ? 'delete the new untracked files + ' : ''}git checkout -- the edited sources, remove any rebuilt .so so the committed source recompiles, revert any edited CSV; confirm 'git status' is clean.
+5. Write a markdown report to ${reportPath}: target op, mode, kernel_type, baseline vs best (named knob old→new),
+   the op_test + bench commands, improvement %, perf-gate verdict, repo_state, patch path, and a short table of all
+   tried experiments (id | change | correct | latency | Δ%). Repo-relative paths only; no /root or /tmp paths in prose.
 6. Return the full schema (set baseline_latency_us=${baselineLatency ?? 'null'}).
 
 ALL EXPERIMENTS (for the report table):
@@ -439,6 +452,7 @@ return {
   repo_state: fb.repo_state,
   ship_ready: fb.ship_ready ?? false,
   diff: fb.diff || null,
+  patch_path: fb.patch_path || null,
   report_path: fb.report_path || reportPath,
   summary: fb.summary,
   sources: recon.sources,
