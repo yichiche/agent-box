@@ -17,7 +17,9 @@
       "mcp__ide__executeCode"
     ]
   },
-  "model": "opus",
+  "model": "claude-opus-4-8[1m]",
+  "effortLevel": "xhigh",
   "skipWorkflowUsageWarning": true,
-  "theme": "dark"
+  "theme": "dark",
+  "agentPushNotifEnabled": true
 }
