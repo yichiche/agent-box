@@ -122,7 +122,7 @@ If the server doesn't start within ~20 minutes, **restore changes immediately** 
 
 ### 1d: Run baseline e2e benchmark
 
-Run the client benchmark script as-is:
+Run the client benchmark script with `num_prompts=$((max_concurrency * 10))` — the benchmark needs a long enough run for stable throughput/latency numbers:
 
 ```bash
 bash <client_script>
@@ -218,7 +218,7 @@ The purpose of this step is to confirm the code change actually has the intended
 Take the client benchmark script and modify it for profiling:
 
 1. **Add `--profile`** flag to the `sglang.bench_serving` command
-2. **Change `num_prompts`** to `num_prompts=$((max_concurrency * 2))` — profiling only needs a short run
+2. **Change `num_prompts`** to `num_prompts=$((max_concurrency * 2))` — profiling only needs a short run (the benchmark in Steps 1d/5 uses `num_prompts=$((max_concurrency * 10))`)
 
 Show the modified profiling command to the user and confirm before running. (**PIPELINE_MODE**: skip confirmation, run immediately.)
 
@@ -256,7 +256,7 @@ Ask the user to confirm the profiling results look correct before proceeding. (*
 
 ## Step 5: E2E Benchmark (after)
 
-Run the client benchmark script as-is — the **same command** used for baseline in Step 1d:
+Run the client benchmark script with `num_prompts=$((max_concurrency * 10))` — the **same command** used for baseline in Step 1d:
 
 ```bash
 bash <client_script>
