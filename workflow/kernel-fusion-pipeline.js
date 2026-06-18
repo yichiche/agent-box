@@ -152,10 +152,14 @@ if (!fileA || !fileB) {
   return { error: 'Missing xlsx paths. Pass as args: { fileA: "...", fileB: "..." }' }
 }
 
-log(`Analyzing: ${fileA} vs ${fileB}`)
+const focus = args?.focus || ''
+log(`Analyzing: ${fileA} vs ${fileB}${focus ? ` | FOCUS: ${focus}` : ''}`)
 
 const setup = await agent(`
 You are setting up a kernel fusion pipeline. Do the following steps IN ORDER:
+${focus ? `\nFOCUS: Restrict this run to "${focus}". In steps 4-5, only extract and keep fusion candidates whose
+functional block is part of "${focus}"; drop unrelated blocks (MoE/MLP/router/etc. if the focus is attention).
+Rank the in-focus candidates by savings.\n` : ''}
 
 1. Detect SGLang root:
    SGLANG_ROOT=$(python3 -c "import sglang, pathlib; print(pathlib.Path(sglang.__file__).resolve().parents[2])")
@@ -173,11 +177,11 @@ You are setting up a kernel fusion pipeline. Do the following steps IN ORDER:
    Produce its full comparison (Step 3c functional-block boxes with named kernels + us, Step 4 time
    totals) and SAVE that markdown to ~/.kernel-fusion-pipeline/comparison.md. The distilled fusion
    list below is for routing; comparison.md preserves the kernel-level Before/After tables the PR needs.
-   Extract ALL Tier-1 fusion opportunities. Tier-1 includes:
+   Extract ALL Tier-1 fusion opportunities${focus ? ` THAT ARE WITHIN THE FOCUS "${focus}"` : ''}. Tier-1 includes:
    - Existing aiter fused ops (Python-only dispatch change)
    - Custom Triton kernels (fuse multiple elementwise/small ops)
    Verify aiter ops exist under /home/yichiche/aiter/aiter/ops/ or /sgl-workspace/aiter/aiter/ops/.
-   Drop invalid candidates.
+   Drop invalid candidates${focus ? ` and drop anything outside the focus` : ''}.
 
 5. For each Tier-1 fusion, record: slug, block_name, target_op, kernels, savings_us, sglang_file, tier.
    Rank by estimated savings (highest first).
