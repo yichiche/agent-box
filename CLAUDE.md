@@ -84,12 +84,23 @@ Versions are managed via `setuptools-scm` from git tags. Generated gRPC files (`
 ## agent-box Layout
 
 ```
+memory/      — Obsidian-style long-term vault (models, workflows, gotchas, script catalog)
+skills/      — Slash-command procedures (/validate, /perf-sweep, /memory-capture, …)
 benchmark/   — Performance benchmarking (run, compare, analyze CSVs)
 profile/     — Profiler trace analysis & model structure inspection (git submodule → torch-profiler-parser)
 debug/       — Regression detection (perf-regression subsystem)
 configs/     — Shared model configuration files
 env.sh       — Central environment config (HOST_HOME, AGENT_BOX_DIR)
 ```
+
+## Long-Term Memory
+
+- **Index:** `memory/MEMORY.md` — route to model cards, workflows, gotchas
+- **Model registry:** `memory/models/INDEX.md` — which `~/run_*.sh` + accuracy threshold per model
+- **Capture:** `/memory-capture` — promote session learnings into vault
+- **Consolidate:** `/memory-consolidate` — sync `~/.claude/projects/*/memory/`, refresh this file + AGENTS.md
+- **Source of truth:** `agent-box/memory/` (not per-project Claude memory shards)
+- **Cross-container bridge:** `memory/remote/` — STATUS / INBOX / OUTBOX; skill `/remote-bridge`
 
 ## Profiling & Trace Analysis
 
@@ -99,6 +110,15 @@ env.sh       — Central environment config (HOST_HOME, AGENT_BOX_DIR)
 
 ## Skills (Slash Commands)
 
+- **`/memory-capture`** — Save a gotcha, model config, or workflow into `memory/`
+- **`/remote-bridge`** — Host ↔ container STATUS + INBOX/OUTBOX; optional native `/remote-control`
+- **`/memory-consolidate`** — Import Claude memory shards, refresh AGENTS.md + this file
+- **`/validate`** — Baseline + accuracy + profile + after benchmark for PRs
+- **`/perf-sweep`** — Accuracy-gated concurrency sweep (model-agnostic via env)
+- **`/benchmark`** — Before/after e2e benchmark comparison
+- **`/generate-profile`** — Capture Chrome-compatible trace
+- **`/parse-trace`** — Run trace_module_analyzer (prefill/decode modes)
+- **`/gpu-status`** — Free MI355 GPUs + correct HIP_VISIBLE_DEVICES
 - **`/commit`** — Stage changes, ensure you're on a feature branch (creates one if on main), and commit with an `[AMD]` prefixed message. Usage: `/commit` or `/commit <description>`.
 - **`/pr`** — Push the branch and create a GitHub PR with the full SGLang template (Motivation, Modifications, Accuracy Tests, Benchmarking, Checklist, Review Process). Usage: `/pr` or `/pr <title>`.
 - **`/profile`** — Analyze profiling outputs (trace Excel, evaluation CSV, raw traces) for kernel performance, layer breakdown, and model behavior. Usage: `/profile` or `/profile <question or path>`. Full guide at `profile/profile.md`.

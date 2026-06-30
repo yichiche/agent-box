@@ -1,5 +1,22 @@
 # Repository Guidelines
 
+## Long-Term Memory (`memory/`)
+
+Cross-model knowledge vault (Cursor, Claude Code, Codex). Start at [`memory/MEMORY.md`](memory/MEMORY.md).
+
+**Top gotchas (read before benchmarking):**
+- Launch server/client from `/tmp`, not `$HOME` — stale `aiter/`/`sglang/` shadows ([`memory/gotchas/bench-cwd-shadow.md`](memory/gotchas/bench-cwd-shadow.md))
+- Never commit SGLang changes on `main` — feature branch only ([`memory/gotchas/sglang-branch-hygiene.md`](memory/gotchas/sglang-branch-hygiene.md))
+- GPU index: use `/gpu-status`; never empty `HIP_VISIBLE_DEVICES` ([`memory/gotchas/gpu-pinning.md`](memory/gotchas/gpu-pinning.md))
+
+**Model → scripts:** see [`memory/models/INDEX.md`](memory/models/INDEX.md) (e.g. Qwen3.5 MXFP4 → `~/run_qwen3.5_mxfp4_perf.sh` + `~/run_qwen3.5_mxfp4_inferencemax_client.sh`, GSM8K ≥ 0.92).
+
+**Workflows:** benchmark [`memory/workflows/benchmark.md`](memory/workflows/benchmark.md) · validate [`memory/workflows/validate.md`](memory/workflows/validate.md) · profile [`memory/workflows/profiling.md`](memory/workflows/profiling.md)
+
+**Maintenance:** `/memory-capture` after sessions · `/memory-consolidate` weekly to refresh this file
+
+**Cross-container:** Host ↔ GPU container Claude Code via [`memory/remote/`](memory/remote/README.md) — `/remote-bridge` · shared `$HOME/.claude` mount
+
 ## Scope of This Workspace
 This workspace is a multi-repo collection. Each top-level folder (`sglang/`, `Mooncake/`, `aiter/`, `triton-custom/`, `fast-hadamard-transform/`) is its own Git repo; run commands from the relevant subdirectory.
 
