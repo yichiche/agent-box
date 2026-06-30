@@ -1,11 +1,13 @@
+
 export const meta = {
   name: 'implement-deep',
-  description: 'Deeper single-target kernel sweep with TWO modes. tune: optimize an EXISTING aiter kernel (ck / triton / flydsl / gemm_tune / moe_tune) via official tuner or knob param-search. author: WRITE A NEW fused kernel that does not exist yet (e.g. fuse softmax+topk+sort), checked for numerical equivalence vs the unfused reference and benchmarked against the summed time of the kernels it replaces. recon auto-detects the mode. Adaptive apply/iterate→rebuild→correctness→microbench loop finds the fastest correct variant. Report-only — leaves the best diff applied for the shared ship backend; does NOT open a PR.',
-  whenToUse: 'Run when a specific optimization target is chosen — either an existing aiter kernel to tune, or a new fused kernel to author. Pass args.target_op and optionally args.mode (auto|tune|author) / kernel_type / workload. Callable standalone or via workflow() from the orchestrator for Tier-2/3 candidates.',
+  description: 'Deeper kernel sweep (tune or author) per target. Single: args.target_op. Multi: args.tasks = [{ target_op, workload?, gpus?, priority?, ... }]. Tasks run SEQUENTIALLY (shared editable aiter). Optional args.schedule=auto (default when len(tasks)>1): assigns HIP_VISIBLE_DEVICES from plan_gpu_slots.py free slots (--tp args.schedule_tp, default 1). Report-only; does NOT open a PR.',
+  whenToUse: 'Pass args.target_op OR args.tasks[].target_op. schedule:"auto"|"off" (off when single target unless forced). continue_on_fail (default true) runs remaining tasks after recon/baseline failures.',
   phases: [
-    { title: 'Recon', detail: 'Detect mode; locate sources/test/bench/.so (tune) or replaced-kernels/reference/new-file (author); set baseline; plan experiments' },
-    { title: 'Tune', detail: 'Sequential adaptive loop: tune=apply variant; author=implement/refine new kernel → rebuild → correctness → microbench' },
-    { title: 'Finalize', detail: 'Re-apply + re-measure the best variant, restore baseline if no win, write report' },
+    { title: 'Schedule', detail: 'Optional GPU slot probe for per-task gpus assignment' },
+    { title: 'Recon', detail: 'Per task: mode, sources, bench, baseline' },
+    { title: 'Tune', detail: 'Per task: adaptive loop' },
+    { title: 'Finalize', detail: 'Per task: verify, report, patch' },
   ],
 }
 
@@ -97,37 +99,31 @@ const FINAL_SCHEMA = {
   required: ['correct', 'repo_state', 'report_path', 'ship_ready'],
 }
 
-// ── Args / config ────────────────────────────────────────────────────────────
-
-const targetOp = args?.target_op
-if (!targetOp) {
-  log('ERROR: args.target_op is required (the aiter kernel/op to deep-tune, e.g. "gemm_a8w8", "fused_moe", "mla_decode")')
-  return { error: 'Missing target_op. Pass args: { target_op: "<aiter op>", kernel_type?: "ck|triton|flydsl|gemm_tune|moe_tune", workload?: "<shapes>" }' }
+const GPU_SCHEDULER_SCHEMA = {
+  type: 'object',
+  properties: {
+    max_parallel: { type: ['number', 'null'], description: 'From JSON.max_parallel or slots.length' },
+    slots: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          slot_id: { type: 'number' },
+          gpus: { type: 'string', description: 'HIP_VISIBLE_DEVICES value e.g. 4 or 4,5' },
+        },
+        required: ['gpus'],
+      },
+    },
+    error_note: { type: 'string' },
+  },
+  required: ['slots'],
 }
-// mode: 'tune' (optimize existing kernel) | 'author' (write a new fused kernel) | 'auto' (recon decides).
-const modeHint = args?.mode || 'auto'
-// kernel_type may be omitted → recon auto-detects it.
-const kernelTypeHint = args?.kernel_type || 'auto'
-const workload = args?.workload || ''            // free-text shape/model description for the microbench
-const benchCmdHint = args?.bench_cmd || ''       // optional explicit microbench command
-const aiterRootArg = args?.aiter_root || ''      // optional; recon detects the installed editable repo otherwise
-const perfGatePct = args?.perf_gate_pct ?? 1.0   // min % speedup to call a variant a win
-const maxRounds = args?.max_rounds ?? 6          // hard cap on experiment rounds
-const maxNoImprove = args?.max_no_improve ?? 2   // converge after this many rounds with no new best
-const keepBest = args?.keep_best ?? true         // leave the winning diff applied for the ship backend
-const minBudgetReserve = args?.min_budget_reserve ?? 60000 // stop the loop if the shared token budget runs low
-const gpus = args?.gpus || ''                    // optional HIP_VISIBLE_DEVICES to pin the sweep to specific GPU(s)
-const outDir = args?.outDir || '~/.kernel-fusion-pipeline'
-const slug = targetOp.replace(/[^a-z0-9_]+/gi, '_').slice(0, 60).replace(/_+$/,'')
-const reportPath = `${outDir}/deep_${slug}.md`
-const patchPath = `${outDir}/deep_${slug}.patch`   // winning change is ALWAYS saved here (even when reverted for isolation)
 
-log(`Deep-tune target=${targetOp} kernel_type=${kernelTypeHint} workload="${workload || 'n/a'}"`)
-log(`perf_gate=${perfGatePct}% max_rounds=${maxRounds} converge_after=${maxNoImprove} keep_best=${keepBest}`)
+const GPU_PLAN_CMD = (tp, portBase) =>
+  `python3 /home/yichiche/agent-box/skills/kernel-fusion-pipeline/scripts/plan_gpu_slots.py --tp ${tp} --port-base ${portBase} --json`
 
-// Official aiter rebuild contract — injected into every build-touching agent so the loop never
-// guesses how to recompile. SSOT: aiter/jit/core.py (rm_module / clear_build / AITER_REBUILD).
-const REBUILD_GUIDE = `
+function makeRebuildGuide(gpus, aiterRootArg) {
+  return `
 === aiter rebuild contract (follow exactly; reference aiter/jit/core.py) ===
 - aiter is an EDITABLE 'python3 setup.py develop' install: the imported package IS the source tree at
   AITER_ROOT/aiter. Detect AITER_ROOT once:
@@ -150,14 +146,81 @@ const REBUILD_GUIDE = `
   AITER_ROOT/aiter/configs/<op>_tuned_*.csv. The op reads that CSV at runtime — usually no .so deletion
   needed (delete the op .so only if the kernel instance set changed). See docs/autotuning_pipeline.md.
 ${gpus ? `- GPU PINNING: prefix EVERY op_test / bench / tuner command with HIP_VISIBLE_DEVICES=${gpus} so this
-  sweep stays on its assigned GPU(s) and does not disturb other work on the box.` : `- GPU: no pin set (args.gpus empty); tuners may use multiple GPUs. Pass args.gpus to restrict.`}
+  sweep stays on its assigned GPU(s) and does not disturb other work on the box.` : `- GPU: no pin set (gpus empty); tuners may use multiple GPUs. Pass per-task gpus or global args.gpus to restrict.`}
 `
+}
 
-// ── Phase 1: Recon ───────────────────────────────────────────────────────────
+async function fetchGpuSlots(scheduleTp, portBase) {
+  const cmd = GPU_PLAN_CMD(scheduleTp, portBase)
+  return agent(
+    `You are scheduling GPU slots for sequential implement-deep tasks. PIPELINE_MODE — no questions.
 
-phase('Recon')
+Run this EXACT command in bash and parse stdout as JSON (ignore stderr unless the command failed):
+${cmd}
 
-const recon = await agent(`
+Return:
+- slots: array of { slot_id: number from JSON.slots[i].slot_id if present, else i, gpus: JSON.slots[i].gpus string }
+- max_parallel: JSON.max_parallel if present, else slots.length
+- error_note: empty string if OK; if command failed or JSON invalid, slots=[] and explain briefly
+
+The script may write ~/.kernel-fusion-pipeline/state.json — that is expected.`,
+    { label: 'gpu-schedule', phase: 'Schedule', schema: GPU_SCHEDULER_SCHEMA, effort: 'low' },
+  )
+}
+
+function normalizeTaskList(args) {
+  const out = []
+  if (Array.isArray(args?.tasks) && args.tasks.length) {
+    for (const t of args.tasks) {
+      if (t && typeof t.target_op === 'string' && t.target_op.trim())
+        out.push(t)
+      else log('WARN: skip task without target_op')
+    }
+  }
+  if (!out.length && args?.target_op && String(args.target_op).trim())
+    out.push({ target_op: String(args.target_op).trim() })
+  return out
+}
+
+function mergeTaskGlobals(raw, g, taskIdx, totalTasks, slotGpus) {
+  const pin = (raw.gpus && String(raw.gpus).trim()) || (slotGpus && String(slotGpus).trim()) || (g.gpus && String(g.gpus).trim()) || ''
+  const slug = raw.target_op.replace(/[^a-z0-9_]+/gi, '_').slice(0, 45).replace(/_+$/, '')
+  const fileTag = totalTasks <= 1 ? slug : `${taskIdx}_${slug}`
+  return {
+    targetOp: raw.target_op.trim(),
+    taskId: raw.id || `t${taskIdx}`,
+    taskIndex: taskIdx,
+    modeHint: raw.mode ?? g.mode,
+    kernelTypeHint: raw.kernel_type ?? g.kernelType,
+    workload: raw.workload ?? g.workload,
+    benchCmdHint: raw.bench_cmd ?? g.benchCmd,
+    aiterRootArg: raw.aiter_root ?? g.aiterRoot,
+    perfGatePct: raw.perf_gate_pct ?? g.perfGatePct,
+    maxRounds: raw.max_rounds ?? g.maxRounds,
+    maxNoImprove: raw.max_no_improve ?? g.maxNoImprove,
+    keepBest: raw.keep_best ?? g.keepBest,
+    minBudgetReserve: raw.min_budget_reserve ?? g.minBudgetReserve,
+    gpus: pin,
+    reportPath: `${g.outDir}/deep_${fileTag}.md`,
+    patchPath: `${g.outDir}/deep_${fileTag}.patch`,
+  }
+}
+
+async function runSingleImplementDeep(spec) {
+  const {
+    targetOp, modeHint, kernelTypeHint, workload, benchCmdHint, aiterRootArg,
+    perfGatePct, maxRounds, maxNoImprove, keepBest, minBudgetReserve, gpus,
+    reportPath, patchPath,
+  } = spec
+
+  const REBUILD_GUIDE = makeRebuildGuide(gpus, aiterRootArg)
+
+  log(`Deep-tune target=${targetOp} kernel_type=${kernelTypeHint} workload="${workload || 'n/a'}" gpus="${gpus || 'unset'}"`)
+  log(`perf_gate=${perfGatePct}% max_rounds=${maxRounds} converge_after=${maxNoImprove} keep_best=${keepBest}`)
+
+  phase('Recon')
+
+  const recon = await agent(`
 You are the RECON step of a single-kernel deep-tuning sweep for aiter on ROCm/MI355. PIPELINE_MODE — no
 EnterPlanMode, no AskUserQuestion. Be exact and run commands to verify everything you report.
 
@@ -222,87 +285,82 @@ DO THE FOLLOWING:
    the untuned CSV and run the official tuner".
 
 Do NOT edit any source or rebuild anything in this step. Return the full schema.
-`, { label: 'recon', phase: 'Recon', schema: RECON_SCHEMA, effort: 'high' })
+`, { label: `recon:${spec.taskId}`, phase: 'Recon', schema: RECON_SCHEMA, effort: 'high' })
 
-if (!recon || !recon.bench || !recon.op_test) {
-  log('Recon failed — could not locate the op / test / bench.')
-  return { status: 'recon_failed', recon }
-}
+  if (!recon || !recon.bench || !recon.op_test) {
+    log('Recon failed — could not locate the op / test / bench.')
+    return { status: 'recon_failed', target_op: targetOp, recon }
+  }
 
-const baselineLatency = (recon.baseline && typeof recon.baseline.latency_us === 'number')
-  ? recon.baseline.latency_us : null
-log(`Recon: kernel_type=${recon.kernel_type} strategy=${recon.strategy} baseline=${baselineLatency ?? 'unparsed'}us correct=${recon.baseline?.correct}`)
-log(`Sources: ${(recon.sources || []).join(', ') || 'n/a'} | .so: ${(recon.so_modules || []).join(', ') || 'none'} | csv: ${recon.config_csv || 'none'}`)
-log(`Initial plan: ${(recon.experiments || []).map(e => e.id).join(', ')}`)
+  const baselineLatency = (recon.baseline && typeof recon.baseline.latency_us === 'number')
+    ? recon.baseline.latency_us : null
+  log(`Recon: kernel_type=${recon.kernel_type} strategy=${recon.strategy} baseline=${baselineLatency ?? 'unparsed'}us correct=${recon.baseline?.correct}`)
+  log(`Sources: ${(recon.sources || []).join(', ') || 'n/a'} | .so: ${(recon.so_modules || []).join(', ') || 'none'} | csv: ${recon.config_csv || 'none'}`)
+  log(`Initial plan: ${(recon.experiments || []).map(e => e.id).join(', ')}`)
 
-if (recon.baseline && recon.baseline.correct === false) {
-  log('Baseline op_test is already failing — aborting before tuning a broken kernel.')
-  return { status: 'baseline_incorrect', recon }
-}
+  if (recon.baseline && recon.baseline.correct === false) {
+    log('Baseline op_test is already failing — aborting before tuning a broken kernel.')
+    return { status: 'baseline_incorrect', target_op: targetOp, recon }
+  }
 
-// ── Phase 2: Tune (sequential adaptive loop) ─────────────────────────────────
-// Sequential by necessity: experiments mutate the SAME editable aiter install + rebuild the same .so and
-// contend for the GPU, so parallel/worktree isolation buys nothing here. Each round starts from a clean
-// baseline, applies one variant, rebuilds by deleting only the relevant .so, gates on op_test, then microbenches.
+  phase('Tune')
 
-phase('Tune')
+  const plan = (recon.experiments || []).slice()
+  const history = []
+  let best = null
+  let noImprove = 0
 
-const plan = (recon.experiments || []).slice()
-const history = []          // every measured experiment result
-let best = null             // best correct + faster-than-baseline result so far
-let noImprove = 0
+  function reconContext() {
+    return JSON.stringify({
+      target_op: recon.target_op, mode: recon.mode, kernel_type: recon.kernel_type, strategy: recon.strategy,
+      replaced_kernels: recon.replaced_kernels, reference_impl: recon.reference_impl,
+      sources: recon.sources, so_modules: recon.so_modules, config_csv: recon.config_csv,
+      op_test: recon.op_test, bench: recon.bench, rebuild: recon.rebuild,
+      knobs: recon.knobs, baseline: recon.baseline,
+    }, null, 2)
+  }
 
-function reconContext() {
-  return JSON.stringify({
-    target_op: recon.target_op, mode: recon.mode, kernel_type: recon.kernel_type, strategy: recon.strategy,
-    replaced_kernels: recon.replaced_kernels, reference_impl: recon.reference_impl,
-    sources: recon.sources, so_modules: recon.so_modules, config_csv: recon.config_csv,
-    op_test: recon.op_test, bench: recon.bench, rebuild: recon.rebuild,
-    knobs: recon.knobs, baseline: recon.baseline,
-  }, null, 2)
-}
-
-const isAuthor = recon.mode === 'author'
-const roundIntro = isAuthor
-  ? `You are ONE iteration of an AUTHORING loop for a NEW fused aiter kernel on ROCm/MI355. You build or refine
+  const isAuthor = recon.mode === 'author'
+  const roundIntro = isAuthor
+    ? `You are ONE iteration of an AUTHORING loop for a NEW fused aiter kernel on ROCm/MI355. You build or refine
 the work-in-progress new kernel toward CORRECT-then-FASTER. Report MEASURED numbers only (never estimate).`
-  : `You are ONE round of a single-kernel TUNING loop for aiter on ROCm/MI355. You apply EXACTLY ONE variant to
+    : `You are ONE round of a single-kernel TUNING loop for aiter on ROCm/MI355. You apply EXACTLY ONE variant to
 an existing kernel, rebuild, gate on correctness, then microbench. Report MEASURED numbers only (never estimate).`
-const roundStep1 = isAuthor
-  ? `1. DO NOT restore baseline — KEEP the current work-in-progress new kernel and build on it. (Round 1: create
+  const roundStep1 = isAuthor
+    ? `1. DO NOT restore baseline — KEEP the current work-in-progress new kernel and build on it. (Round 1: create
    the first version of the new kernel + its equivalence harness per the plan / reference_impl.) If a previous
    round left the build or harness broken, FIX that first before optimizing.`
-  : `1. RESTORE BASELINE first so this experiment is measured cleanly and independently:
+    : `1. RESTORE BASELINE first so this experiment is measured cleanly and independently:
      git -C <AITER_ROOT> checkout -- ${(recon.sources || []).join(' ') || '<source files>'}
      git -C <AITER_ROOT> stash --include-untracked 2>/dev/null || true   # only if other edits linger
    and delete any .so you will rebuild (so_modules above) so the next build is baseline+your edit only.`
-const roundStep2 = isAuthor
-  ? `2. IMPLEMENT/REFINE exactly one coherent improvement to the new kernel (round 1: a first correct version;
+  const roundStep2 = isAuthor
+    ? `2. IMPLEMENT/REFINE exactly one coherent improvement to the new kernel (round 1: a first correct version;
    later rounds: one optimization — better tiling, vectorization, fewer memory passes, occupancy). Describe it precisely.`
-  : `2. APPLY exactly one concrete change (param_search: edit the source knob; tuning_script: edit the untuned CSV
+    : `2. APPLY exactly one concrete change (param_search: edit the source knob; tuning_script: edit the untuned CSV
    shape row / run the official tuner with the right args). Keep it minimal and described precisely.`
-const correctnessLine = isAuthor
-  ? `4. CORRECTNESS GATE: run the equivalence harness (op_test) — it must assert the new fused path matches the
+  const correctnessLine = isAuthor
+    ? `4. CORRECTNESS GATE: run the equivalence harness (op_test) — it must assert the new fused path matches the
    UNFUSED reference (torch.allclose). If it fails or does not compile, set correct=false, DO NOT benchmark, and
    report what broke so the next round can fix it.`
-  : `4. CORRECTNESS GATE: run the op_test command. If it fails, set correct=false, DO NOT benchmark, explain, and
+    : `4. CORRECTNESS GATE: run the op_test command. If it fails, set correct=false, DO NOT benchmark, explain, and
    stop — a faster-but-wrong kernel is not a result.`
 
-for (let round = 0; round < maxRounds; round++) {
-  if (noImprove >= maxNoImprove) { log(`Converged: ${noImprove} rounds with no new best.`); break }
-  if (budget.total && budget.remaining() < minBudgetReserve) {
-    log(`Stopping: token budget low (${Math.round(budget.remaining() / 1000)}k < ${Math.round(minBudgetReserve / 1000)}k reserve).`)
-    break
-  }
+  for (let round = 0; round < maxRounds; round++) {
+    if (noImprove >= maxNoImprove) { log(`Converged: ${noImprove} rounds with no new best.`); break }
+    if (budget.total && budget.remaining() < minBudgetReserve) {
+      log(`Stopping: token budget low (${Math.round(budget.remaining() / 1000)}k < ${Math.round(minBudgetReserve / 1000)}k reserve).`)
+      break
+    }
 
-  const nextPlanned = plan[round]   // may be undefined once the initial plan is exhausted → agent invents one
-  const bestLine = best
-    ? `Current BEST: id=${best.id} latency=${best.latency_us}us (${best.improvement_pct?.toFixed(1)}% faster than baseline).`
-    : 'No winning variant yet.'
+    const nextPlanned = plan[round]
+    const bestLine = best
+      ? `Current BEST: id=${best.id} latency=${best.latency_us}us (${best.improvement_pct?.toFixed(1)}% faster than baseline).`
+      : 'No winning variant yet.'
 
-  log(`Round ${round + 1}/${maxRounds}${nextPlanned ? ` — ${nextPlanned.id}` : ' — adaptive'}`)
+    log(`Round ${round + 1}/${maxRounds}${nextPlanned ? ` — ${nextPlanned.id}` : ' — adaptive'}`)
 
-  const result = await agent(`
+    const result = await agent(`
 ${roundIntro} PIPELINE_MODE — fully autonomous, no EnterPlanMode/AskUserQuestion.
 
 ${REBUILD_GUIDE}
@@ -336,59 +394,51 @@ ${correctnessLine}
 
 Be honest: report regressions and failures as-is. Do not leave the repo in a half-built state — if you abort,
 restore the baseline source + remove the half-built .so${isAuthor ? ' / delete the broken new source file' : ''}.
-`, { label: `tune:${nextPlanned?.id || `round${round + 1}`}`, phase: 'Tune', schema: EXP_RESULT_SCHEMA })
+`, { label: `tune:${spec.taskId}:${nextPlanned?.id || `round${round + 1}`}`, phase: 'Tune', schema: EXP_RESULT_SCHEMA })
 
-  if (!result) { log(`Round ${round + 1}: agent returned null — skipping.`); noImprove++; continue }
-  history.push(result)
+    if (!result) { log(`Round ${round + 1}: agent returned null — skipping.`); noImprove++; continue }
+    history.push(result)
 
-  const ok = result.correct === true
-  const lat = typeof result.latency_us === 'number' ? result.latency_us : null
-  const impr = typeof result.improvement_pct === 'number'
-    ? result.improvement_pct
-    : (ok && lat !== null && baselineLatency ? (baselineLatency - lat) / baselineLatency * 100 : null)
+    const ok = result.correct === true
+    const lat = typeof result.latency_us === 'number' ? result.latency_us : null
+    const impr = typeof result.improvement_pct === 'number'
+      ? result.improvement_pct
+      : (ok && lat !== null && baselineLatency ? (baselineLatency - lat) / baselineLatency * 100 : null)
 
-  // Track the FASTEST CORRECT variant — regardless of whether it already beats the original baseline.
-  // (Author mode's first version is expected to be slower than baseline; converging on "not faster than
-  //  baseline yet" would abandon the search after the first naive version. We optimize toward fastest-correct
-  //  and let Finalize apply the perf gate vs baseline at the end.)
-  if (ok && lat !== null && (best === null || lat < best.latency_us)) {
-    best = { ...result, latency_us: lat, improvement_pct: impr }
-    noImprove = 0
-    const vsBase = impr !== null ? `${impr.toFixed(1)}% vs baseline` : 'n/a'
-    log(`  fastest correct so far: ${result.id} → ${lat}us (${vsBase})`)
-  } else {
-    noImprove++
-    const why = !ok ? `incorrect (${result.error || 'op_test failed'})` : (lat === null ? 'no latency parsed' : `${lat}us (not faster than current best ${best?.latency_us ?? '?'}us)`)
-    log(`  no progress: ${result.id} — ${why}`)
+    if (ok && lat !== null && (best === null || lat < best.latency_us)) {
+      best = { ...result, latency_us: lat, improvement_pct: impr }
+      noImprove = 0
+      const vsBase = impr !== null ? `${impr.toFixed(1)}% vs baseline` : 'n/a'
+      log(`  fastest correct so far: ${result.id} → ${lat}us (${vsBase})`)
+    } else {
+      noImprove++
+      const why = !ok ? `incorrect (${result.error || 'op_test failed'})` : (lat === null ? 'no latency parsed' : `${lat}us (not faster than current best ${best?.latency_us ?? '?'}us)`)
+      log(`  no progress: ${result.id} — ${why}`)
+    }
   }
-}
 
-if (!best) {
-  log('No CORRECT variant produced at all. Restoring baseline.')
-  await agent(`
+  if (!best) {
+    log('No CORRECT variant produced at all. Restoring baseline.')
+    await agent(`
 Restore the aiter install to a clean baseline after a deep-tune sweep that found no winning variant.
 ${REBUILD_GUIDE}
 Run: git -C <AITER_ROOT> checkout -- ${(recon.sources || []).join(' ') || '.'} ; remove any rebuilt .so for
 modules ${JSON.stringify(recon.so_modules || [])} so the next use recompiles the committed source; revert any
 edited untuned CSV (${recon.config_csv || 'n/a'}) if you changed it.${isAuthor ? ` AUTHOR mode: also DELETE the new
 (untracked) kernel/harness files you created: ${JSON.stringify(recon.sources || [])} (rm -f / git clean -f).` : ''}
-Confirm 'git -C <AITER_ROOT> status' is clean for these files. Return a one-line confirmation.`, { label: 'restore-baseline', phase: 'Tune' })
+Confirm 'git -C <AITER_ROOT> status' is clean for these files. Return a one-line confirmation.`, { label: `restore-baseline:${spec.taskId}`, phase: 'Tune' })
 
-  return {
-    status: 'no_win', target_op: targetOp, kernel_type: recon.kernel_type,
-    baseline_latency_us: baselineLatency, rounds: history.length,
-    history: history.map(h => ({ id: h.id, correct: h.correct, latency_us: h.latency_us, improvement_pct: h.improvement_pct, note: h.observations })),
-    recon,
+    return {
+      status: 'no_win', target_op: targetOp, kernel_type: recon.kernel_type,
+      baseline_latency_us: baselineLatency, rounds: history.length,
+      history: history.map(h => ({ id: h.id, correct: h.correct, latency_us: h.latency_us, improvement_pct: h.improvement_pct, note: h.observations })),
+      recon,
+    }
   }
-}
 
-// ── Phase 3: Finalize ────────────────────────────────────────────────────────
-// Re-apply the winning variant from clean baseline and INDEPENDENTLY re-measure (the loop's best could be
-// noise) before declaring it ship-ready. Restore baseline if the win doesn't reproduce or misses the gate.
+  phase('Finalize')
 
-phase('Finalize')
-
-const final = await agent(`
+  const final = await agent(`
 You are the FINALIZE step of a single-kernel deep-tuning sweep. PIPELINE_MODE — autonomous. Independently
 re-verify the best variant and either leave it applied for shipping or restore the baseline.
 
@@ -430,34 +480,106 @@ DO:
 
 ALL EXPERIMENTS (for the report table):
 ${JSON.stringify(history.map(h => ({ id: h.id, change: h.change_summary, correct: h.correct, latency_us: h.latency_us, improvement_pct: h.improvement_pct })), null, 2)}
-`, { label: 'finalize', phase: 'Finalize', schema: FINAL_SCHEMA, effort: 'high' })
+`, { label: `finalize:${spec.taskId}`, phase: 'Finalize', schema: FINAL_SCHEMA, effort: 'high' })
 
-const fb = final || {}
-log('=== Deep-tune complete ===')
-log(`Best: ${best.id} | baseline=${baselineLatency ?? '?'}us → ${fb.best_latency_us ?? best.latency_us}us `
-  + `(${(fb.improvement_pct ?? best.improvement_pct ?? 0).toFixed?.(1) ?? '?'}%) | gate ${perfGatePct}% | `
-  + `repo=${fb.repo_state || '?'} | ship_ready=${fb.ship_ready}`)
-log(`Report: ${fb.report_path || reportPath}`)
+  const fb = final || {}
+  log('=== Deep-tune complete (single task) ===')
+  log(`Best: ${best.id} | baseline=${baselineLatency ?? '?'}us → ${fb.best_latency_us ?? best.latency_us}us `
+    + `(${(fb.improvement_pct ?? best.improvement_pct ?? 0).toFixed?.(1) ?? '?'}%) | gate ${perfGatePct}% | `
+    + `repo=${fb.repo_state || '?'} | ship_ready=${fb.ship_ready}`)
+  log(`Report: ${fb.report_path || reportPath}`)
+
+  return {
+    status: 'done',
+    target_op: targetOp,
+    kernel_type: recon.kernel_type,
+    strategy: recon.strategy,
+    baseline_latency_us: baselineLatency,
+    best_id: fb.best_id || best.id,
+    best_latency_us: fb.best_latency_us ?? best.latency_us,
+    improvement_pct: fb.improvement_pct ?? best.improvement_pct,
+    correct: fb.correct ?? true,
+    repo_state: fb.repo_state,
+    ship_ready: fb.ship_ready ?? false,
+    diff: fb.diff || null,
+    patch_path: fb.patch_path || null,
+    report_path: fb.report_path || reportPath,
+    summary: fb.summary,
+    sources: recon.sources,
+    so_modules: recon.so_modules,
+    config_csv: recon.config_csv,
+    rounds: history.length,
+    experiments: history.map(h => ({ id: h.id, change: h.change_summary, correct: h.correct, latency_us: h.latency_us, improvement_pct: h.improvement_pct })),
+  }
+}
+
+// ── Orchestrator: multi-task + optional GPU schedule ─────────────────────────
+
+const g = {
+  mode: args?.mode || 'auto',
+  kernelType: args?.kernel_type || 'auto',
+  workload: args?.workload || '',
+  benchCmd: args?.bench_cmd || '',
+  aiterRoot: args?.aiter_root || '',
+  perfGatePct: args?.perf_gate_pct ?? 1.0,
+  maxRounds: args?.max_rounds ?? 6,
+  maxNoImprove: args?.max_no_improve ?? 2,
+  keepBest: args?.keep_best ?? true,
+  minBudgetReserve: args?.min_budget_reserve ?? 60000,
+  gpus: args?.gpus || '',
+  outDir: args?.outDir || '~/.kernel-fusion-pipeline',
+  scheduleTp: args?.schedule_tp ?? 1,
+  schedulePortBase: args?.schedule_port_base ?? 9100,
+  continueOnFail: args?.continue_on_fail !== false,
+}
+
+let taskList = normalizeTaskList(args)
+if (!taskList.length) {
+  log('ERROR: pass args.target_op (string) or args.tasks: [{ target_op, workload?, gpus?, priority?, ... }]')
+  return {
+    error: 'Missing targets. Example: { tasks: [{ target_op: "fused_moe", workload: "decode M=4" }, ...], schedule: "auto" }',
+  }
+}
+
+taskList.sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999))
+
+const scheduleMode = args?.schedule ?? (taskList.length > 1 ? 'auto' : 'off')
+let slotPlan = null
+if (scheduleMode === 'auto') {
+  phase('Schedule')
+  slotPlan = await fetchGpuSlots(g.scheduleTp, g.schedulePortBase)
+  const n = slotPlan?.slots?.length ?? 0
+  log(`GPU schedule (${GPU_PLAN_CMD(g.scheduleTp, g.schedulePortBase)}): slots=${n} ${(slotPlan?.slots || []).map(s => s.gpus).join(' | ') || '(none)'} ${slotPlan?.error_note || ''}`)
+  if (!n && taskList.some(t => !(t.gpus && String(t.gpus).trim())) && !g.gpus)
+    log('WARN: no free GPU slots and no per-task/global gpus — recon may use any GPU')
+}
+
+const results = []
+for (let taskIdx = 0; taskIdx < taskList.length; taskIdx++) {
+  const raw = taskList[taskIdx]
+  const slotGpus = slotPlan?.slots?.length ? slotPlan.slots[taskIdx % slotPlan.slots.length].gpus : ''
+  const merged = mergeTaskGlobals(raw, g, taskIdx, taskList.length, slotGpus)
+  log(`=== implement-deep task ${taskIdx + 1}/${taskList.length} (${merged.taskId}) target=${merged.targetOp} gpus=${merged.gpus || 'unset'} ===`)
+
+  const one = await runSingleImplementDeep(merged)
+  results.push({ task_id: merged.taskId, task_index: taskIdx, assigned_gpus: merged.gpus || null, ...one })
+
+  const fatal = one?.status === 'recon_failed' || one?.status === 'baseline_incorrect'
+  if (fatal && !g.continueOnFail) {
+    log(`Stopping multi-task run: ${one.status} and continue_on_fail=false`)
+    break
+  }
+}
+
+if (taskList.length === 1)
+  return results[0]
 
 return {
-  status: 'done',
-  target_op: targetOp,
-  kernel_type: recon.kernel_type,
-  strategy: recon.strategy,
-  baseline_latency_us: baselineLatency,
-  best_id: fb.best_id || best.id,
-  best_latency_us: fb.best_latency_us ?? best.latency_us,
-  improvement_pct: fb.improvement_pct ?? best.improvement_pct,
-  correct: fb.correct ?? true,
-  repo_state: fb.repo_state,
-  ship_ready: fb.ship_ready ?? false,
-  diff: fb.diff || null,
-  patch_path: fb.patch_path || null,
-  report_path: fb.report_path || reportPath,
-  summary: fb.summary,
-  sources: recon.sources,
-  so_modules: recon.so_modules,
-  config_csv: recon.config_csv,
-  rounds: history.length,
-  experiments: history.map(h => ({ id: h.id, change: h.change_summary, correct: h.correct, latency_us: h.latency_us, improvement_pct: h.improvement_pct })),
+  status: 'done_all',
+  task_count: results.length,
+  schedule: scheduleMode,
+  schedule_tp: g.scheduleTp,
+  gpu_slots: slotPlan?.slots ?? null,
+  gpu_scheduler_error: slotPlan?.error_note || null,
+  results,
 }
