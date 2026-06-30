@@ -172,6 +172,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tp", type=int, default=2)
     parser.add_argument("--port-base", type=int, default=8000)
+    parser.add_argument(
+        "--max-gpus",
+        type=int,
+        default=None,
+        help="Cap the number of free GPUs used (truncates the free list). "
+        "E.g. --max-gpus 4 with --tp 2 yields at most 2 parallel slots.",
+    )
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     parser.add_argument(
         "--assign",
@@ -186,6 +193,8 @@ def main() -> int:
     busy = parse_gpu_busy()
     sglang = sglang_occupied_gpus()
     free = free_gpus(vram, busy, sglang)
+    if args.max_gpus is not None and args.max_gpus >= 0:
+        free = free[: args.max_gpus]
     slots, leftover = build_slots(free, args.tp, args.port_base)
 
     gpu_plan = {
