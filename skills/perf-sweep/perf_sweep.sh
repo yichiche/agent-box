@@ -101,11 +101,13 @@ has_arg() { grep -q -- "$1" <<<"$BENCH_HELP"; }
 # ── Server ───────────────────────────────────────────────────────────────────
 launch_server() {
   [ "$LAUNCH_SERVER" = "1" ] || { log "LAUNCH_SERVER=0 — using existing server on $PORT"; return; }
-  log "Launching server: model=$(basename "$MODEL") port=$PORT tp=$TP HIP_VISIBLE_DEVICES=$GPUS"
+  log "Launching server: model=$(basename "$MODEL") port=$PORT tp=$TP CUDA_VISIBLE_DEVICES=$GPUS"
   local prof_env=""
   [ -n "$PROFILE_CONCS" ] && { mkdir -p "$PROFILE_DIR"; prof_env="SGLANG_TORCH_PROFILER_DIR=$PROFILE_DIR"; }
+  # GPU pinning: SGLang reads CUDA_VISIBLE_DEVICES (NOT HIP_VISIBLE_DEVICES) and rocm-smi index != CUDA index.
+  # GPUS must be CUDA/torch indices (from gpu-status). Do NOT also set HIP_VISIBLE_DEVICES (double-remap).
   # shellcheck disable=SC2086
-  setsid env HIP_VISIBLE_DEVICES="$GPUS" $SERVER_ENV $prof_env \
+  setsid env CUDA_VISIBLE_DEVICES="$GPUS" $SERVER_ENV $prof_env \
     python3 -m sglang.launch_server --model-path "$MODEL" --tp "$TP" \
       --host 0.0.0.0 --port "$PORT" $SERVER_ARGS \
     > "$SERVER_LOG" 2>&1 &
