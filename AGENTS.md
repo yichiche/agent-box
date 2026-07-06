@@ -13,9 +13,9 @@ Cross-model knowledge vault (Cursor, Claude Code, Codex). Start at [`memory/MEMO
 
 **Workflows:** benchmark [`memory/workflows/benchmark.md`](memory/workflows/benchmark.md) · validate [`memory/workflows/validate.md`](memory/workflows/validate.md) · profile [`memory/workflows/profiling.md`](memory/workflows/profiling.md)
 
-**Maintenance:** `/memory-capture` after sessions · `/memory-consolidate` weekly to refresh this file
+**Maintenance:** session shards auto-converge into `memory/journal/YYYY-MM/` (a Stop hook runs `memory/bin/memory-sync.sh`; provenance in `memory/meta/provenance.tsv`). `/memory-capture` after sessions · `/memory-consolidate` weekly promotes journal facts and refreshes this file · `/skill-suggest` drafts workflow improvements.
 
-**Cross-container:** Host ↔ GPU container Claude Code via [`memory/remote/`](memory/remote/README.md) — `/remote-bridge` · shared `$HOME/.claude` mount
+**Cross-container:** Host ↔ GPU container agents via [`memory/bridge/`](memory/bridge/README.md) — `/remote-bridge`: file bus (STATUS/INBOX/OUTBOX) + `bridge.sh exec` (allowlisted `docker exec` into your own containers). Memory sharing rides the `$HOME/.claude` + `$HOME/.codex` mounts, so it's host-local — the bridge is only for live coordination.
 
 ## Scope of This Workspace
 This workspace is a multi-repo collection. Each top-level folder (`sglang/`, `Mooncake/`, `aiter/`, `triton-custom/`, `fast-hadamard-transform/`) is its own Git repo; run commands from the relevant subdirectory.

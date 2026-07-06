@@ -15,13 +15,18 @@ Three-tier knowledge model:
 
 This skill moves stable facts **up** the tiers (1→3). Never bloat tier 3.
 
-## Step 1: Import Claude memory
+## Step 1: Converge session shards
+
+Normally automatic (a Claude Code **Stop hook** runs it after every session). To
+force a catch-up:
 
 ```bash
-bash "$AGENT_BOX_DIR/memory/scripts/sync_from_claude_memory.sh"
+bash "$AGENT_BOX_DIR/memory/bin/memory-sync.sh"          # or --dry-run to preview
 ```
 
-Review `memory/imported/` — merge unique facts into vault notes; delete duplicates.
+New Claude/Codex shards land verbatim in `memory/journal/YYYY-MM/` with a row in
+`memory/meta/provenance.tsv` (source + time + sha). Review recent journal notes and
+promote stable facts **up** into `gotchas/`, `models/`, or `workflows/`.
 
 ## Step 2: Refresh script catalog
 
@@ -33,12 +38,20 @@ Diff against `memory/scripts/INDEX.md`; add missing scripts with one-line purpos
 
 ## Step 3: Audit model registry
 
-For each active model the user benchmarks (last 30 days journal + imported notes):
+For each active model the user benchmarks (last 30 days of `memory/journal/` notes):
 - Server script still exists?
 - TP / env flags match script?
 - Accuracy threshold still valid?
 
 Update `memory/models/INDEX.md` and detail cards.
+
+## Step 3.5: Draft workflow suggestions
+
+```bash
+bash "$AGENT_BOX_DIR/memory/bin/skill-suggest.sh"   # writes review stubs to meta/suggestions/
+```
+
+Review `memory/meta/suggestions/*.md`: promote good clusters into a workflow/skill, mark the rest `status: rejected`. See `/skill-suggest`.
 
 ## Step 4: Distill into AGENTS.md
 

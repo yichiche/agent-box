@@ -84,7 +84,7 @@ Versions are managed via `setuptools-scm` from git tags. Generated gRPC files (`
 ## agent-box Layout
 
 ```
-memory/      — Obsidian-style long-term vault (models, workflows, gotchas, script catalog)
+memory/      — Long-term vault: journal/ (auto-imported shards), gotchas/models/workflows (curated), bin/ (memory-sync, skill-suggest), bridge/ (host↔container), meta/ (provenance, log)
 skills/      — Slash-command procedures (/validate, /perf-sweep, /memory-capture, …)
 benchmark/   — Performance benchmarking (run, compare, analyze CSVs)
 profile/     — Profiler trace analysis & model structure inspection (git submodule → torch-profiler-parser)
@@ -95,12 +95,14 @@ env.sh       — Central environment config (HOST_HOME, AGENT_BOX_DIR)
 
 ## Long-Term Memory
 
-- **Index:** `memory/MEMORY.md` — route to model cards, workflows, gotchas
+- **Index:** `memory/MEMORY.md` — route to model cards, workflows, gotchas; has the dataflow diagram
 - **Model registry:** `memory/models/INDEX.md` — which `~/run_*.sh` + accuracy threshold per model
-- **Capture:** `/memory-capture` — promote session learnings into vault
-- **Consolidate:** `/memory-consolidate` — sync `~/.claude/projects/*/memory/`, refresh this file + AGENTS.md
-- **Source of truth:** `agent-box/memory/` (not per-project Claude memory shards)
-- **Cross-container bridge:** `memory/remote/` — STATUS / INBOX / OUTBOX; skill `/remote-bridge`
+- **Auto-converge:** `memory/bin/memory-sync.sh` copies Claude/Codex session shards into `memory/journal/YYYY-MM/` (verbatim, sha-deduped, provenance in `meta/provenance.tsv`). Runs via a Claude Code **Stop hook**; disable with `--uninstall-hook`.
+- **Capture:** `/memory-capture` — promote session learnings into the curated vault
+- **Consolidate:** `/memory-consolidate` — promote journal facts, refresh this file + AGENTS.md
+- **Suggest:** `/skill-suggest` — draft workflow/skill stubs from recurring journal themes (review in `meta/suggestions/`)
+- **Source of truth:** `agent-box/memory/` (git-tracked); journal is raw history, curated dirs are canonical
+- **Cross-container bridge:** `memory/bridge/` — `/remote-bridge`: file bus + `bridge.sh exec` (allowlisted `docker exec` into your own containers)
 
 ## Profiling & Trace Analysis
 
@@ -111,8 +113,9 @@ env.sh       — Central environment config (HOST_HOME, AGENT_BOX_DIR)
 ## Skills (Slash Commands)
 
 - **`/memory-capture`** — Save a gotcha, model config, or workflow into `memory/`
-- **`/remote-bridge`** — Host ↔ container STATUS + INBOX/OUTBOX; optional native `/remote-control`
-- **`/memory-consolidate`** — Import Claude memory shards, refresh AGENTS.md + this file
+- **`/remote-bridge`** — Host ↔ container: file bus + `bridge.sh exec` (allowlisted `docker exec`, claude/codex headless); optional native `/remote-control`
+- **`/skill-suggest`** — Draft workflow/skill stubs from recurring memory themes (detect → draft → approve)
+- **`/memory-consolidate`** — Promote journal facts, refresh AGENTS.md + this file
 - **`/validate`** — Baseline + accuracy + profile + after benchmark for PRs
 - **`/perf-sweep`** — Accuracy-gated concurrency sweep (model-agnostic via env)
 - **`/benchmark`** — Before/after e2e benchmark comparison

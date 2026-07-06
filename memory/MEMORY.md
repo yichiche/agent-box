@@ -24,7 +24,7 @@ See [[models/INDEX]] for server script, client script, TP, accuracy gate, and en
 - [[workflows/validate]] — before/after benchmark + accuracy + profile for PRs
 - [[workflows/profiling]] — trace capture, `trace_module_analyzer.py`, kernel diff
 - [[workflows/accuracy]] — GSM8K, thinking models, thresholds
-- [[workflows/remote-bridge]] — Host ↔ container Claude Code (STATUS / INBOX / OUTBOX)
+- [[workflows/remote-bridge]] — Host ↔ container agents (file bus + `bridge.sh exec`)
 
 ## Gotchas (read before benchmarking)
 
@@ -38,11 +38,32 @@ See [[models/INDEX]] for server script, client script, TP, accuracy gate, and en
 
 ## Journal (raw session captures)
 
-- `journal/` — dated notes; promote stable facts into gotchas/models/workflows
+- `journal/YYYY-MM/` — verbatim session shards, auto-imported. Append-only history; **not** hand-edited. Provenance (source + time + sha) in `meta/provenance.tsv`.
+- Promote stable facts **up** into `gotchas/` / `models/` / `workflows/`.
+
+## How memory flows (architecture)
+
+`~/.claude` and `~/.codex` are bind-mounted into every yichiche container, so all
+session shards already converge on the host. Convergence is therefore host-local —
+no message bus, no `docker exec` needed for memory.
+
+```
+session shards                     curated vault              always-on
+~/.claude/projects/*/memory/  ─┐   gotchas/ models/           AGENTS.md
+~/.codex/memories/            ─┼─▶ journal/YYYY-MM/  ─promote▶ workflows/ ─distill▶ CLAUDE.md
+                               │      (raw, provenance)        (curated)
+                          memory-sync.sh                    /memory-consolidate
+                        (Stop hook, auto)                   /skill-suggest (drafts)
+```
+
+- **`bin/memory-sync.sh`** — converge shards → `journal/`, dedup by sha, log to `meta/sync.log`. Runs automatically (Claude Code **Stop hook**). Disable: `bin/memory-sync.sh --uninstall-hook`. Preview: `--dry-run`.
+- **`bin/skill-suggest.sh`** (`/skill-suggest`) — detect recurring themes → draft review stubs in `meta/suggestions/`. Detect → draft → you approve.
+- **`bridge/bridge.sh`** (`/remote-bridge`) — host↔container coordination: file bus (`STATUS`/`INBOX`/`OUTBOX`) + `exec` (allowlisted `docker exec` running `claude`/`codex` headless in your own containers).
 
 ## Maintenance
 
-- **Capture:** end of session → `/memory-capture` (or ask agent to "remember this")
-- **Consolidate:** weekly or after major workflow change → `/memory-consolidate` updates `AGENTS.md` + `CLAUDE.md`
-- **Import:** `scripts/sync_from_claude_memory.sh` merges `~/.claude/projects/*/memory/` into this vault
-- **Cross-container:** [`remote/README.md`](remote/README.md) — STATUS / INBOX / OUTBOX for host ↔ container Claude Code (`/remote-bridge`)
+- **Capture:** end of session → `/memory-capture` (or "remember this").
+- **Converge:** automatic via Stop hook; manual catch-up `bin/memory-sync.sh`.
+- **Consolidate:** weekly → `/memory-consolidate` promotes journal facts and refreshes `AGENTS.md` + `CLAUDE.md`.
+- **Suggest:** `/skill-suggest` drafts workflow improvements from the journal.
+- **Cross-container:** [`bridge/README.md`](bridge/README.md) — `/remote-bridge`.
