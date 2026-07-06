@@ -17,9 +17,22 @@
       "mcp__ide__executeCode"
     ]
   },
-  "model": "claude-opus-4-8[1m]",
+  "model": "claude-fable-5[1m]",
   "effortLevel": "xhigh",
+  "tui": "fullscreen",
   "skipWorkflowUsageWarning": true,
   "theme": "dark",
-  "agentPushNotifEnabled": true
+  "agentPushNotifEnabled": true,
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/yichiche/agent-box/memory/bin/memory-sync.sh >/dev/null 2>&1 || true"
+          }
+        ]
+      }
+    ]
+  }
 }

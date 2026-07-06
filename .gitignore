@@ -1,3 +1,4 @@
 __pycache__/
 .bench_config
 .cursor/
+memory/journal/

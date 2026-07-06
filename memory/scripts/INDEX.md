@@ -43,7 +43,10 @@ All paths relative to `$HOME` unless noted. **Run from neutral cwd** (`/tmp`) �
 |---|---|
 | `agent-box/skills/perf-sweep/perf_sweep.sh` | Accuracy-gated conc sweep |
 | `agent-box/debug/perf-regression/run_daily.sh` | Daily regression |
-| `agent-box/memory/scripts/sync_from_claude_memory.sh` | Import Claude memory |
+| `agent-box/memory/bin/memory-sync.sh` | Converge Claude/Codex session shards → `journal/` (auto via Stop hook) |
+| `agent-box/memory/bin/skill-suggest.sh` | Draft workflow/skill suggestion stubs from recurring themes |
+| `agent-box/memory/bridge/bridge.sh` | Host↔container coordination (file bus + allowlisted docker exec) |
+| `agent-box/memory/scripts/sync_from_claude_memory.sh` | Deprecated shim → `memory-sync.sh` |
 
 ## Auto-refresh
 
