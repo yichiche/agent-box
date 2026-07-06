@@ -1,75 +1,62 @@
 ---
-description: Cross-container Claude Code bridge — read/update STATUS, send INBOX/OUTBOX messages between host and container. Use when coordinating host Cursor with container Claude Code, or before /remote-control.
+description: Cross-container agent bridge — file bus (STATUS/INBOX/OUTBOX) plus direct `docker exec` into your own containers to run claude/codex headless and get a reply. Use when coordinating host with container agents, or to send a live one-shot command into a container.
 ---
 
-# Remote Bridge (Host ↔ Container)
+# Bridge (Host ↔ Container)
 
-File bus at `memory/remote/`. Full protocol: `memory/remote/README.md`.
+One entry point: `memory/bridge/bridge.sh`. Two layers:
 
-## When to use
+- **File bus** (durable, async, git-tracked): `STATUS.md` / `INBOX.md` / `OUTBOX.md`
+- **Direct exec** (near-real-time, one-shot): `docker exec` into a container, run `claude`/`codex` headless, reply is printed and mirrored to `OUTBOX.md`.
 
-- Host wants to know what container Claude Code is doing
-- Container needs architecture guidance from host
-- Before/after enabling native `/remote-control`
-- User says "跟 container 說…" or "外面 Claude 想知道進度"
+Full protocol + mounts: `memory/bridge/README.md`.
 
-## Session start (both sides)
-
-1. Read `memory/remote/STATUS.md`
-2. Read `memory/remote/INBOX.md` if you are **container**; `OUTBOX.md` if you are **host**
-3. Update snapshot:
-   ```bash
-   bash ~/agent-box/memory/remote/scripts/remote_snapshot.sh \
-     --role container \
-     --task "<current task>" \
-     --note "<one line>"
-   ```
-   Use `--role host` on the host.
-
-## Send a message
+## List your containers (exec-eligible)
 
 ```bash
-# Host → Container
-bash ~/agent-box/memory/remote/scripts/remote_msg.sh to-container "請分析 pr28666 decode xlsx"
-
-# Container → Host
-bash ~/agent-box/memory/remote/scripts/remote_msg.sh to-host "瓶頸在 fused_moe，不是 gemm"
+bash ~/agent-box/memory/bridge/bridge.sh list
 ```
 
-Or edit `INBOX.md` / `OUTBOX.md` directly (prepend, set `status: pending`).
+Only containers that bind-mount `/home/yichiche` are listed — `exec` **refuses** any other user's container (shared host).
 
-## Native Remote Control (optional layer)
-
-Requires **claude.ai `/login`** — does **not** work with AMD API gateway alone.
-
-Inside container:
-```bash
-cd /sgl-workspace/sglang
-claude --remote-control "MI355 $(hostname -s)"
-# or in session: /remote-control
-```
-
-After RC starts, record URL in snapshot:
-```bash
-bash ~/agent-box/memory/remote/scripts/remote_snapshot.sh \
-  --role container --rc-url "https://claude.ai/code/..."
-```
-
-Host opens that URL in claude.ai/code for **live** chat; file bus stays for **persistent** context.
-
-## Find active Claude session
+## Send a live command into a container (host → container agent → reply)
 
 ```bash
-ls -lt ~/.claude/sessions/*.json | head -3
-# or read STATUS.md claude_session_id
+bash ~/agent-box/memory/bridge/bridge.sh exec <container> "your prompt" \
+  [--agent claude|codex] [--cwd /sgl-workspace/sglang] [--timeout 300] [--dangerous]
 ```
 
-Shared via `-v $HOME/.claude:/root/.claude` in `run_docker.sh`.
+- Default `--agent claude`, prints the reply and appends it to `OUTBOX.md`.
+- `--dangerous` passes `--dangerously-skip-permissions` so the container agent can actually run tools (edits/commands). Omit it for read-only Q&A.
+- Everything is logged to `memory/bridge/bridge.log`.
 
-## Mark message done
+## Async file-bus messages
 
-Edit the message block: `status: pending` → `status: done`
+```bash
+# Host → Container INBOX
+bash ~/agent-box/memory/bridge/bridge.sh msg to-container "分析 pr28666 decode xlsx"
+# Container → Host OUTBOX
+bash ~/agent-box/memory/bridge/bridge.sh msg to-host "瓶頸在 fused_moe，不是 gemm"
+```
+
+## Refresh STATUS snapshot
+
+```bash
+bash ~/agent-box/memory/bridge/bridge.sh status --role container --task "<task>" --note "<one line>"
+```
+
+Use `--role host` on the host. Container agents read `INBOX.md` at session start; host reads `OUTBOX.md`.
+
+## Container-side auto-read (optional)
+
+```bash
+bash ~/agent-box/memory/bridge/bridge.sh watch --interval 15   # poll INBOX for @container pending
+```
+
+## Native Remote Control (optional third layer)
+
+Requires claude.ai `/login` (not the AMD gateway). Inside container: `claude --remote-control "MI355 $(hostname -s)"`, then record the URL via `bridge.sh status --rc-url ...` for live claude.ai/code chat.
 
 ## Integrate with memory vault
 
-Important cross-container findings → `/memory-capture` into `memory/gotchas/`
+Stable cross-container findings → `/memory-capture`. The bridge is coordination; the vault (`memory/journal`, `gotchas/`) is durable knowledge.

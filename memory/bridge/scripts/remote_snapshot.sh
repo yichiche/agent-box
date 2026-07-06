@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Capture Claude Code + GPU + git state into memory/remote/STATUS.md
+# Capture Claude Code + GPU + git state into memory/bridge/STATUS.md
 # Usage:
 #   remote_snapshot.sh --role container|host [--task "..."] [--note "..."] [--session-id UUID]
 set -euo pipefail
 
 AGENT_BOX_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
-REMOTE_DIR="$AGENT_BOX_DIR/memory/remote"
+REMOTE_DIR="$AGENT_BOX_DIR/memory/bridge"
 SESSIONS_DIR="$REMOTE_DIR/sessions"
 mkdir -p "$SESSIONS_DIR"
 

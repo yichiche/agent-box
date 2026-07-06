@@ -6,7 +6,7 @@
 set -euo pipefail
 
 AGENT_BOX_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
-REMOTE_DIR="$AGENT_BOX_DIR/memory/remote"
+REMOTE_DIR="$AGENT_BOX_DIR/memory/bridge"
 TS="$(date -u +"%Y-%m-%d %H:%M")"
 
 DIR="${1:-}"

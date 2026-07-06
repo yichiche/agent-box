@@ -32,15 +32,15 @@ remote/
 -v "$HOME:/home/yichiche/"           # agent-box/memory 共用
 ```
 
-Container 內路徑：`/home/yichiche/agent-box/memory/remote/`
-Host 路徑：     `$HOME/agent-box/memory/remote/`
+Container 內路徑：`/home/yichiche/agent-box/memory/bridge/`
+Host 路徑：     `$HOME/agent-box/memory/bridge/`
 
 ## 協議
 
 ### 1. 更新狀態（Container 端，任務開始/結束）
 
 ```bash
-bash ~/agent-box/memory/remote/scripts/remote_snapshot.sh \
+bash ~/agent-box/memory/bridge/scripts/remote_snapshot.sh \
   --role container \
   --task "PR26858 fused MoE decode profiling" \
   --note "conc4 decode xlsx ready for compare"
@@ -86,12 +86,12 @@ claude --remote-control "MI355 PR26858 $(hostname)"
 ## Agent 開場檢查清單
 
 **Container Claude Code 每次啟動：**
-1. Read `memory/remote/INBOX.md` — 有無 `@container` pending
-2. Read `memory/remote/STATUS.md` — 自己是否最新 owner
+1. Read `memory/bridge/INBOX.md` — 有無 `@container` pending
+2. Read `memory/bridge/STATUS.md` — 自己是否最新 owner
 3. Run `remote_snapshot.sh --role container` 更新狀態
 
 **Host Cursor / Claude Code：**
-1. Read `memory/remote/STATUS.md` + `OUTBOX.md`
+1. Read `memory/bridge/STATUS.md` + `OUTBOX.md`
 2. Read `~/.claude/sessions/*.json` — 找 `status: busy` 的 container session
 3. 若要即時對話且 RC 可用 → 開 `remote_control_url`
 
