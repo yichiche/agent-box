@@ -93,6 +93,13 @@ configs/     — Shared model configuration files
 env.sh       — Central environment config (HOST_HOME, AGENT_BOX_DIR)
 ```
 
+## Container Task Execution
+
+**Any task executed inside a container must run Claude Code with the API key, never the personal claude.ai subscription.**
+- Source `agent-box/claude-code-key.sh` in the container — it wires `ANTHROPIC_BASE_URL`/`ANTHROPIC_CUSTOM_HEADERS` to the AMD gateway API key (from `~/.claude_api_key`), so the session bills against the API key instead of the host's subscription.
+- Do **not** run `claude /login` inside a container for normal task execution — that authenticates against the personal claude.ai subscription and burns subscription tokens instead.
+- Exception: `claude /login` + `claude --remote-control` inside a container is fine when the explicit goal is Native Remote Control (phone / claude.ai/code live session) — see `memory/bridge/README.md`. That's a deliberate opt-in, not the default for running tasks.
+
 ## Long-Term Memory
 
 - **Index:** `memory/MEMORY.md` — route to model cards, workflows, gotchas; has the dataflow diagram

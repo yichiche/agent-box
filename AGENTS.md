@@ -8,6 +8,7 @@ Cross-model knowledge vault (Cursor, Claude Code, Codex). Start at [`memory/MEMO
 - Launch server/client from `/tmp`, not `$HOME` — stale `aiter/`/`sglang/` shadows ([`memory/gotchas/bench-cwd-shadow.md`](memory/gotchas/bench-cwd-shadow.md))
 - Never commit SGLang changes on `main` — feature branch only ([`memory/gotchas/sglang-branch-hygiene.md`](memory/gotchas/sglang-branch-hygiene.md))
 - GPU index: use `/gpu-status`; never empty `HIP_VISIBLE_DEVICES` ([`memory/gotchas/gpu-pinning.md`](memory/gotchas/gpu-pinning.md))
+- Container tasks run Claude Code via API key (`agent-box/claude-code-key.sh`), never `claude /login` subscription — see CLAUDE.md § Container Task Execution
 
 **Model → scripts:** see [`memory/models/INDEX.md`](memory/models/INDEX.md) (e.g. Qwen3.5 MXFP4 → `~/run_qwen3.5_mxfp4_perf.sh` + `~/run_qwen3.5_mxfp4_inferencemax_client.sh`, GSM8K ≥ 0.92).
 
