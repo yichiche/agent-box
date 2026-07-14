@@ -29,3 +29,6 @@ if ! command -v codex >/dev/null 2>&1; then
 else
   echo "[codex] already installed ($(codex --version 2>/dev/null))"
 fi
+
+# Configure Codex for the AMD Gateway and default GPT-5.6 Sol model.
+"${SCRIPT_DIR}/codex-key.sh"

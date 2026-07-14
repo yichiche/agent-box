@@ -187,7 +187,7 @@ chmod 600 /root/.codex/auth.json
 # Write Codex config (preserve existing project trust levels)
 if [ ! -f /root/.codex/config.toml ] || ! grep -q "openai_base_url" /root/.codex/config.toml 2>/dev/null; then
   cat > /root/.codex/config.toml <<'EOF'
-model = "gpt-5.5"
+model = "gpt-5.6-sol"
 openai_base_url = "http://127.0.0.1:18742/v1"
 
 [projects."/sgl-workspace"]
@@ -202,6 +202,14 @@ trust_level = "trusted"
 [projects."/sgl-workspace/aiter"]
 trust_level = "trusted"
 EOF
+fi
+
+# Keep existing installs on the intended default model without rewriting
+# project trust settings or other user-managed config.
+if grep -q '^model = ' /root/.codex/config.toml 2>/dev/null; then
+  sed -i 's/^model = .*/model = "gpt-5.6-sol"/' /root/.codex/config.toml
+else
+  sed -i '1imodel = "gpt-5.6-sol"' /root/.codex/config.toml
 fi
 
 # Append env vars and proxy auto-start to .bashrc (idempotent)
@@ -223,4 +231,4 @@ if ! pgrep -f "amd-gateway-proxy" >/dev/null 2>&1; then
 fi
 export OPENAI_API_KEY="${CODEX_KEY}"
 
-echo "[codex] Setup complete (proxy on :18742, model: gpt-5.5)"
+echo "[codex] Setup complete (proxy on :18742, model: gpt-5.6-sol)"
