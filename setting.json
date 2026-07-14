@@ -18,11 +18,6 @@
     ]
   },
   "model": "claude-fable-5[1m]",
-  "effortLevel": "xhigh",
-  "tui": "fullscreen",
-  "skipWorkflowUsageWarning": true,
-  "theme": "dark",
-  "agentPushNotifEnabled": true,
   "hooks": {
     "Stop": [
       {
@@ -34,5 +29,10 @@
         ]
       }
     ]
-  }
+  },
+  "effortLevel": "xhigh",
+  "tui": "default",
+  "skipWorkflowUsageWarning": true,
+  "theme": "dark",
+  "agentPushNotifEnabled": true
 }
