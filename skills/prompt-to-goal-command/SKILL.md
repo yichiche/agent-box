@@ -1,10 +1,11 @@
 ---
 name: prompt-to-goal-command
 description: >-
-  Rewrites informal prompts into goal-style agent commands: clear done-state,
-  verifiable checks, scope, and stop/reporting rules. Use when the user
-  references this skill, /goal-style workflows, long-horizon agents, or asks to
-  turn a vague request into a command aligned with a stated goal.
+  Rewrites informal prompts into goal-style agent commands (max 4000 chars):
+  clear done-state, verifiable checks, scope, and stop/reporting rules. Use
+  when the user references this skill, /goal-style workflows, long-horizon
+  agents, or asks to turn a vague request into a command aligned with a stated
+  goal.
 disable-model-invocation: true
 ---
 
@@ -21,6 +22,28 @@ disable-model-invocation: true
 | **Scope** | 路徑/模組/不做的事（non-goals），避免長時程代理擴散到全庫。 |
 | **Budget** | 迭代上限、時間、允許的風險操作（例如：可改哪些目錄、是否禁止 force push）。 |
 | **Evidence** | 要求代理在階段結束簡短回報：做了什麼、如何驗證、若未完成下一步是什麼。 |
+| **Length** | 整份 Goal Command **≤ 4000 字元**（含 markdown、程式碼 fence、換行）。多數 `/goal` 外掛會硬性拒絕超長輸入。 |
+
+## 字元上限（/goal 硬性限制）
+
+Cursor `/goal` 的 **Goal condition 欄位上限為 4000 字元**。超過會被拒（例如 `Goal condition is limited to 4000 characters (got NNNN)`）。
+
+套用本 skill 時：
+
+1. **最終可貼上的 Goal Command 區塊必須 ≤ 4000 字元**（含標題、清單、程式碼 fence 內文字）。
+2. **輸出前自行計數**；若超過，先壓縮再給使用者，不要先給超長版再讓使用者手動刪。
+3. **詳細表格、長篇診斷、範例對照** 放在 Goal Command **之外**（聊天說明），Goal 內只留可判定完成的精簡條款。
+4. 撰寫時以 **≤ 3500 字元** 為目標，預留 buffer 給路徑、數字、環境變數等個案加長。
+
+**壓縮手法（優先順序）**
+
+- 合併 Acceptance 為較少條目（保留可勾選、可測）
+- Verify 用短標題 + 一行指令；細節指向既有腳本（`run_*_perf.sh`、`perf_sweep.sh`）
+- 刪重複 baseline 表、冗長 RCA、第二份 verify 區塊、裝飾用表格線
+- Scope 用 `In:` / `Out:` 各一行；路徑過長用 `...` 省略中間段
+- 數值門檻寫在 Acceptance，Verify 只寫怎麼跑
+
+**不可為了縮短而拿掉**：Goal 一句話、Acceptance、Scope In/Out、至少一條 Verify、Budget/stop。
 
 ## 改寫流程（對著使用者原始 prompt 做）
 
@@ -30,10 +53,11 @@ disable-model-invocation: true
 4. **選 Verify**：至少一個會在 goal 達成時應該**通過**的命令或檢查清單。
 5. **定 Stop**：何時停止（達成 / 驗證失敗需人類介入 / 達到迭代上限），避免無限繞圈。
 6. **輸出一條 Goal Command**：給代理「複製即用」的一塊文字（見下方模板）。
+7. **檢查長度**：確認 ≤ 4000 字元；超標則依上一節壓縮後再輸出。
 
 ## 輸出模板（產給使用者的 command）
 
-代理在套用本 skill 時，應輸出類似下列結構（可依專案改寫標題與指令）：
+代理在套用本 skill 時，應輸出**單一、≤ 4000 字元**的區塊（可依專案改寫標題與指令）：
 
 `````markdown
 ## Goal
@@ -61,7 +85,7 @@ disable-model-invocation: true
 每個主要階段結束簡述：變更摘要、如何驗證、尚餘項目。
 `````
 
-若使用者環境使用明確的 `/goal` 外掛或自訂 slash，可把首行改為其慣用觸發（例如 `/goal …`）但**內文仍須包含** Done、Verify、Scope、Stop。
+若使用者環境使用明確的 `/goal` 外掛或自訂 slash，可把首行改為其慣用觸發（例如 `/goal …`）但**內文仍須包含** Done、Verify、Scope、Stop，且**總長仍 ≤ 4000**。
 
 ## 範例：弱 prompt → Goal command
 
@@ -94,5 +118,6 @@ npm run build
 
 ## 注意
 
-- 本 skill **無法替代觀看原影片**的細節；若使用者要完全對齊影片中的工具設定，請其補充截圖或關鍵步驟，再把那些約束併入 **Scope / Verify**。
+- **4000 字元是交付硬性約束**；過長會導致 `/goal` 無法貼上。必要時拆成「可貼上 /goal 的精簡版」+「聊天中的展開說明」兩部分。
+- 本 skill **無法替代觀看原影片**的細節；若使用者要完全對齊影片中的工具設定，請其補充截圖或關鍵步驟，再把那些約束併入 **Scope / Verify**（仍須遵守字元上限）。
 - 若專案有既有規範（commit、PR、lint），把對應指令寫進 **Verify**，goal command 會更穩。

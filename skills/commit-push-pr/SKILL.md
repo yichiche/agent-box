@@ -207,6 +207,8 @@ Ensure the `pr-drafts` directory exists: `mkdir -p $HOME/pr-drafts`
 
 The draft file is **pure HackMD markdown** — no YAML frontmatter. It contains only the PR body content.
 
+**Line formatting — do NOT hard-wrap paragraphs.** GitHub renders a single newline inside a PR body as a hard `<br>` line break, so manually wrapping prose at ~80 chars shows up as broken mid-sentence lines (and indented list continuations render as nested breaks). Write each paragraph and each list item as **one unwrapped line**, however long; separate blocks with a blank line. Only use a newline where you actually want a break (between list items, table rows, headings). Do not indent continuation text under a list item. (Editors may soft-wrap the long lines visually — that's fine; the file must contain no mid-sentence `\n`.)
+
 Fill in all template sections with concrete content. Insert the user-confirmed accuracy and benchmark tables from Step 6b and 6c into the appropriate sections.
 
 If the user provided `$ARGUMENTS`, use that as the PR title. Otherwise, craft a concise title (under 70 chars) starting with `[AMD]`.
