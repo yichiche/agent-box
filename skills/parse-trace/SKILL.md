@@ -43,9 +43,32 @@ Infer the trace type from the filename:
 - Contains `-EXTEND` → prefill/extend trace
 - Neither → unknown (will ask user)
 
-## Step 1: Ask the user for configuration
+### 0c: Resolve model → detail-module/instance from the model card (card-driven)
 
-Use `AskUserQuestion` with these questions:
+**Do this before asking anything.** The `--detail-module` / `--detail-instance`
+values are model-specific and live in the model card — do NOT default to DSv4.
+
+1. Infer the model from the trace path (e.g. `qwen3.5-mxfp4/…` → qwen35-mxfp4) or
+   from `$ARGUMENTS`. If ambiguous, this is the one thing worth asking.
+2. Read the matching card under `memory/models/` (see [[../../memory/models/INDEX.md]]).
+   Each card's **Profiling** section gives the correct `--detail-module` and
+   `--detail-instance`. Known values:
+
+   | Model | `--detail-module` (decode & prefill) | `--detail-instance` |
+   |---|---|---|
+   | DSv4 / R1 | decode `Layer` / prefill `DeepseekV4DecoderLayer` | 59 60 61 62 / 31 32 |
+   | qwen35-mxfp4 | `Qwen3_5LinearDecoderLayer` | 0 1 |
+
+3. If the card resolves the module + instances, **skip the questions in Step 1 and
+   go straight to Step 2** with those values. Only fall through to Step 1 when the
+   model is unknown or the card has no profiling entry.
+4. On first run for a model, confirm the chosen instances against the **Module
+   Tree** sheet after the analyzer completes (Step 4), and update the card if they differ.
+
+## Step 1: Ask the user for configuration (only if Step 0c couldn't resolve)
+
+Skip this step entirely when the model card already provided the module/instances.
+Otherwise use `AskUserQuestion` with these questions:
 
 ### Question 1: Analysis mode
 

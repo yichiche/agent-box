@@ -20,10 +20,19 @@
 
 ## perf-sweep env (model-agnostic)
 
+The workload is set by named preset — see [[workloads]]. The variable names are
+`INPUT_LEN` / `OUTPUT_LEN` (NOT `IL` / `OL` — those are ignored, and omitting
+`INPUT_LEN`/`OUTPUT_LEN` silently defaults to **8192 / 1024**, i.e. `canonical-8k`).
+
 ```bash
-SERVER_SCRIPT=~/run_qwen3.5_mxfp4_perf.sh \
-CLIENT_SCRIPT=~/run_qwen3.5_mxfp4_inferencemax_client.sh \
-GPUS="0,1" IL=8192 OL=1024 \
+# canonical-8k (8192/1024) — the only workload valid for perf claims
+MODEL=/data/amd/Qwen3.5-397B-A17B-MoE-MXFP4 \
+GPUS="0,1" INPUT_LEN=8192 OUTPUT_LEN=1024 \
+  bash ~/.claude/skills/perf-sweep/perf_sweep.sh
+
+# diag-1k (1024/1024) — correctness / crash / scaling / profiler capture only
+MODEL=/data/amd/Qwen3.5-397B-A17B-MoE-MXFP4 \
+GPUS="0,1" INPUT_LEN=1024 OUTPUT_LEN=1024 \
   bash ~/.claude/skills/perf-sweep/perf_sweep.sh
 ```
 

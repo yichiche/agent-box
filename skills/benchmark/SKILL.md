@@ -32,7 +32,17 @@ If the user provides a different path, use that instead of the detected one for 
 
 ### 0b: Collect benchmark parameters
 
-Ask the user using `AskUserQuestion` for each of the following. If the user provided `$ARGUMENTS`, parse them first and only ask for missing items.
+**Resolve from the model card first (card-driven).** From `$ARGUMENTS` (or a
+provided script) infer the model, then read [[../../memory/models/INDEX.md]] and
+the matching card under `memory/models/` to get **server script, client script,
+port, accuracy threshold, and output directory**. Resolve the **workload** via
+[[../../memory/workflows/workloads.md]] — default `canonical-8k` (IL8192/OL1024),
+`diag-1k` (1024/1024) for correctness/scaling only.
+
+Then use `AskUserQuestion` **only for what the card did not resolve**. If the card
+fully resolves server+client+port+threshold and the workload is the default
+`canonical-8k`, skip straight to Step 1 (still show the resolved parameters once so
+the user can catch a wrong model). Ask the questions below only for missing items.
 
 #### Question 1: Server launch script
 
@@ -80,10 +90,15 @@ After parsing both scripts, show the extracted parameters and confirm:
 Are these correct?"
 ```
 
+Name the workload against a preset from [[../../memory/workflows/workloads.md]]:
+if ISL/OSL is 8192/1024 it's `canonical-8k` (valid for perf claims); if 1024/1024
+it's `diag-1k` (diagnostic only — a delta here is NOT an 8K speedup). Baseline and
+after MUST use the same preset.
+
 Options:
 - **Yes, proceed** (Recommended)
 - **Change concurrencies** — ask for new values
-- **Change ISL/OSL** — ask for new values
+- **Change ISL/OSL** — ask for new values (name the resulting preset)
 - **Change num_prompts** — ask for new formula
 
 If the user changes parameters, note that you will need to modify the client script before running. Prepare the modified command but do NOT overwrite the user's script file — construct the command inline.
@@ -265,7 +280,7 @@ Take the client benchmark script and modify it:
 1. **Add `--profile`** flag to the `sglang.bench_serving` command
 2. **Add `--profile-by-stage`** for separate prefill/decode traces
 3. **Change `num_prompts`** to `num_prompts=$((max_concurrency * 2))` — profiling only needs a short run
-4. **Add `--profile-output-dir $HOME/dsv4/<label>`** to save traces to the labeled directory
+4. **Add `--profile-output-dir <OUTPUT_DIR>/<label>`** to save traces to the labeled directory, where `<OUTPUT_DIR>` is the card-resolved per-model dir (Step 0b) — e.g. `$HOME/qwen3.5-mxfp4` for qwen35-mxfp4. Do NOT hardcode `$HOME/dsv4` for non-DSv4 models.
 
 Show the modified command to the user and confirm before running.
 
@@ -276,7 +291,7 @@ Execute the modified client command. Wait for completion (typically 2-5 minutes)
 ### 3c: Locate trace files
 
 ```bash
-ls -la $HOME/dsv4/<label>/*.trace.json.gz 2>/dev/null
+ls -la <OUTPUT_DIR>/<label>/*.trace.json.gz 2>/dev/null
 ```
 
 If traces landed in `/tmp/` instead:
@@ -294,10 +309,13 @@ For each GPU 0 trace file:
 ```bash
 python3 $HOME/agent-box/profile/trace_module_analyzer.py \
   <trace_file> \
-  -o analysis_<phase>
+  -o analysis_<phase>.xlsx \
+  --detail-module <MODULE> --detail-instance <INSTANCES>
 ```
 
-Where `<phase>` is `decode`, `extend`, or `combined`.
+Where `<phase>` is `decode`, `extend`, or `combined`, and `<MODULE>`/`<INSTANCES>`
+come from the model card (Step 0b) — e.g. qwen35-mxfp4 → `Qwen3_5LinearDecoderLayer 0 1`.
+Do not rely on the analyzer's DSv4 defaults for non-DSv4 models.
 
 Report key findings from the analysis.
 

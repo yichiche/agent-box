@@ -19,14 +19,22 @@ echo "Active SGLang root: $SGLANG_ROOT"
 
 Use `$SGLANG_ROOT` for all subsequent paths (benchmarks, scripts, git operations, etc.) instead of hardcoded paths like `$HOME/sglang` or `/sgl-workspace/sglang`.
 
-### 0b: Ask the user
+### 0b: Resolve from the model card first (card-driven)
 
-Ask the user using `AskUserQuestion`:
+**Resolve everything you can from the registry before asking.** From `$ARGUMENTS`
+(or a provided script) infer the model, then read [[../../memory/models/INDEX.md]]
+and the matching card under `memory/models/` for **server script, client script,
+port, accuracy threshold, output directory, and profiling detail-module/instance**.
+Resolve the **workload** via [[../../memory/workflows/workloads.md]] — validate uses
+`canonical-8k` (IL8192/OL1024) for the before/after perf comparison.
 
-1. **Server launch script** — the script that sets env vars and launches `sglang.launch_server`
-2. **Client benchmark script** — the script that runs `sglang.bench_serving` against the server
-3. **Model name** — for labeling (default: DSv4)
-4. **Accuracy threshold** — default 0.88 for DSv4
+Then `AskUserQuestion` **only for what the card did not resolve**. If the card fully
+resolves the model, run without asking (show the resolved config once). Fields:
+
+1. **Server launch script** — from card, or ask
+2. **Client benchmark script** — from card, or ask
+3. **Model name** — from card resolution (do NOT default to DSv4)
+4. **Accuracy threshold** — from card (0.88 DSv4, 0.92 qwen35-mxfp4); ask only if unknown
 
 Parse the server script to extract the **port** (look for `--port <N>` in the launch command).
 
@@ -231,19 +239,27 @@ Execute the modified client command. The trace files will be generated under `/t
 After the profiling run completes:
 
 1. Find the latest trace directory under `/tmp/` (timestamped folders containing `.trace.json.gz` files)
-2. Copy the trace folder to a stable location:
+2. Copy the trace folder to the **card-resolved** per-model dir (Step 0b) — NOT
+   `$HOME/dsv4/` for non-DSv4 models (e.g. `$HOME/qwen3.5-mxfp4/` for qwen35-mxfp4):
    ```bash
-   cp -r /tmp/<trace-folder> $HOME/dsv4/
+   cp -r /tmp/<trace-folder> <OUTPUT_DIR>/
    ```
 3. Identify the GPU 0 trace file: `*TP-0.trace.json.gz`
 
 ### 4d: Analyze the trace
 
+Pass the **card-resolved** `--detail-module` / `--detail-instance` (Step 0b) — do
+not rely on the analyzer's DSv4 defaults:
+
 ```bash
 python3 $HOME/agent-box/profile/trace_module_analyzer.py \
-  $HOME/dsv4/<trace-folder>/<timestamp>-TP-0.trace.json.gz \
-  -o analysis_<change_description>
+  <OUTPUT_DIR>/<trace-folder>/<timestamp>-TP-0.trace.json.gz \
+  -o analysis_<change_description>.xlsx \
+  --detail-module <MODULE> --detail-instance <INSTANCES>
 ```
+
+Where `<MODULE>`/`<INSTANCES>` come from the model card (e.g. qwen35-mxfp4 →
+`Qwen3_5LinearDecoderLayer 0 1`; DSv4 decode → `Layer 59 60 61 62`).
 
 ### 4e: Interpret profiling results
 

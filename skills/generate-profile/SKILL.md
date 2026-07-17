@@ -24,16 +24,32 @@ Verify it looks correct:
 ls "$SGLANG_ROOT/benchmark/gsm8k/bench_sglang.py"
 ```
 
-### 0b: Ask the user
+### 0b: Resolve from the model card first (card-driven)
 
-Ask the user using `AskUserQuestion`:
+**Resolve everything you can from the registry before asking the user.** From
+`$ARGUMENTS` (or the server script path) infer the model, then read
+[[../../memory/models/INDEX.md]] and the matching card under `memory/models/`.
+The card provides: **server script, client script, port, accuracy threshold,
+output directory convention, and profiling detail-module/instance.**
 
-1. **Server launch script** — the script that sets env vars and launches `sglang.launch_server`
-2. **Client benchmark script** — the script that runs `sglang.bench_serving` against the server
-3. **Profile label** — short name for this profiling run (e.g., `baseline`, `fused_norm_rope`, `after_fix`). Used for output directory naming.
-4. **Model name** — for labeling (default: DSv4)
-5. **Accuracy threshold** — default 0.88 for DSv4
-6. **Profile by stage?** — whether to generate separate prefill/decode traces (default: yes)
+- Resolve the **workload** via [[../../memory/workflows/workloads.md]] — default
+  `canonical-8k` (IL8192/OL1024); use `diag-1k` (1024/1024) for a cheap capture.
+- Resolve the **output directory** from the card, NOT the DSv4 default. e.g.
+  qwen35-mxfp4 → `$HOME/qwen3.5-mxfp4/<label>/`; DSv4 → `$HOME/dsv4/<label>/`.
+  Never save Qwen artifacts under `~/dsv4/`.
+
+Only `AskUserQuestion` for what the card does **not** resolve — typically just the
+**profile label** (short name like `baseline`, `after_fix`). If everything else is
+resolved and a label is derivable (e.g. git branch), proceed without asking at all.
+Ask for server/client/threshold/model only when the model is unknown or unresolvable.
+
+Fields to end up with:
+1. **Server launch script** — from card, or ask
+2. **Client benchmark script** — from card, or ask
+3. **Profile label** — ask if not derivable
+4. **Model name** — from card resolution (do NOT default to DSv4)
+5. **Accuracy threshold** — from card (0.88 DSv4, 0.92 qwen35-mxfp4); ask only if unknown
+6. **Profile by stage?** — default yes (separate prefill/decode traces). **Exception:** if the goal is *module-level* trace analysis on a model whose decode is CUDA-graph-replayed (e.g. qwen35-mxfp4, whose `*-DECODE` trace collapses to `CudaGraphReplay` with no per-module detail — see its card), capture a **combined** trace instead (no `--profile-by-stage`).
 
 Parse the server script to extract the **port** (look for `--port <N>` in the launch command).
 
@@ -102,7 +118,7 @@ Take the client benchmark script and modify it for profiling:
 1. **Add `--profile`** flag to the `sglang.bench_serving` command
 2. **Change `num_prompts`** to `num_prompts=$((max_concurrency * 2))` — profiling only needs a short run
 3. **Add `--profile-by-stage`** if the user opted for stage-separated traces (default: yes)
-4. **Add `--profile-output-dir $HOME/dsv4/<profile_label>`** to save traces to the labeled directory
+4. **Add `--profile-output-dir <OUTPUT_DIR>/<profile_label>`** to save traces to the labeled directory, where `<OUTPUT_DIR>` is the card-resolved per-model dir (Step 0b) — e.g. `$HOME/qwen3.5-mxfp4` for qwen35-mxfp4, `$HOME/dsv4` for DSv4. Do NOT hardcode `$HOME/dsv4` for non-DSv4 models.
 
 Show the modified profiling command to the user and confirm before running.
 
@@ -120,7 +136,7 @@ After the profiling run completes:
 
 2. List the generated trace files:
    ```bash
-   ls -la $HOME/dsv4/<profile_label>/*.trace.json.gz
+   ls -la <OUTPUT_DIR>/<profile_label>/*.trace.json.gz
    ```
 
 3. Identify the GPU 0 trace file(s) for analysis:
@@ -135,29 +151,34 @@ ls -ltd /tmp/[0-9]* 2>/dev/null | head -5
 
 If traces landed in `/tmp/`, copy them to the labeled directory:
 ```bash
-cp /tmp/<trace-files> $HOME/dsv4/<profile_label>/
+cp /tmp/<trace-files> <OUTPUT_DIR>/<profile_label>/
 ```
 
 ## Step 4: Analyze the Traces
 
 ### 4a: Run the trace module analyzer
 
-For each GPU 0 trace file (decode and/or extend):
+For each GPU 0 trace file (decode and/or extend), pass the **card-resolved**
+`--detail-module` / `--detail-instance` (Step 0b) — do not rely on the analyzer's
+DSv4 defaults:
 
 ```bash
 python3 $HOME/agent-box/profile/trace_module_analyzer.py \
-  $HOME/dsv4/<profile_label>/<trace-file> \
-  -o analysis_<phase>.xlsx
+  <OUTPUT_DIR>/<profile_label>/<trace-file> \
+  -o analysis_<phase>.xlsx \
+  --detail-module <MODULE> --detail-instance <INSTANCES>
 ```
 
-Where `<phase>` is `decode`, `extend`, or `combined` depending on what trace is being analyzed.
+Where `<phase>` is `decode`, `extend`, or `combined`, and `<MODULE>`/`<INSTANCES>`
+come from the model card (e.g. qwen35-mxfp4 → `Qwen3_5LinearDecoderLayer 0 1`;
+DSv4 decode → `Layer 59 60 61 62`, prefill → `DeepseekV4DecoderLayer 31 32`).
 
 ### 4b: Verify analysis output
 
 Check that the Excel report was generated:
 
 ```bash
-ls -la $HOME/dsv4/<profile_label>/analysis_*.xlsx
+ls -la <OUTPUT_DIR>/<profile_label>/analysis_*.xlsx
 ```
 
 ### 4c: Report key findings
@@ -182,12 +203,12 @@ SGLang Root: <SGLANG_ROOT>
 Accuracy: PASS (<score>, threshold: <threshold>)
 
 Trace Files:
-  - Decode: $HOME/dsv4/<profile_label>/<decode_trace>
-  - Extend: $HOME/dsv4/<profile_label>/<extend_trace>
+  - Decode: <OUTPUT_DIR>/<profile_label>/<decode_trace>
+  - Extend: <OUTPUT_DIR>/<profile_label>/<extend_trace>
 
 Analysis Reports:
-  - Decode: $HOME/dsv4/<profile_label>/analysis_decode.xlsx
-  - Extend: $HOME/dsv4/<profile_label>/analysis_extend.xlsx
+  - Decode: <OUTPUT_DIR>/<profile_label>/analysis_decode.xlsx
+  - Extend: <OUTPUT_DIR>/<profile_label>/analysis_extend.xlsx
 
 Key Metrics:
   - Median decode iteration: <X> ms

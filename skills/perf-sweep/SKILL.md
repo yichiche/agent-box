@@ -66,6 +66,47 @@ For a single before/after change benchmark use `/benchmark`; for just a profile 
 | `LAUNCH_SERVER`/`KEEP_SERVER` | 1/0 | reuse an existing server / leave it running |
 | `BENCH_SERVING_DIR` | autodetect | dir holding `benchmark_serving.py` |
 | `RESULT_DIR` | `/tmp/perf_sweep_<ts>` | outputs (use a mounted path to read from host) |
+| `BASELINE_CSV` | "" | a **previous run's `summary.csv`** → auto-verdict (WIN/REGRESSION/INCONCLUSIVE) |
+| `SHIP_THRESHOLD_PCT` | 5 | primary metric (`total_throughput`) must gain ≥ this to WIN |
+| `REGRESSION_THRESHOLD_PCT` | 2 | any monitored metric worse beyond this = REGRESSION (mirrors `debug/perf-regression/config.py`) |
+| `ACC_REGRESSION_THRESHOLD_PP` | 2 | accuracy drop (abs pp) beyond this = REGRESSION |
+| `VERDICT_EXIT` | 0 | `1` = exit non-zero (rc 2) on REGRESSION, for CI/pipeline |
+
+## Gate K keep-decision (`keep_decision.py`)
+
+For per-op KEEP decisions (bank a real kernel win even when its Amdahl share makes
+e2e move little), use `skills/perf-sweep/keep_decision.py` — it encodes Gate K from
+[[../../memory/workflows/gates]]: served-trace per-op time, run ×2 for consistency,
+`≥30%` faster + e2e **not regressed** → KEEP into a cumulative ledger. Get the per-op
+µs from `/compare-kernels --budget` on the served baseline/after traces.
+
+```bash
+python3 skills/perf-sweep/keep_decision.py --target "moe stage-1" \
+  --baseline 76.6 77.1 --after 52.0 51.4 \
+  --e2e-verdict RESULT_DIR/verdict.json --ledger ~/qwen3.5-mxfp4/keep_ledger.json --e2e-share 0.21
+python3 skills/perf-sweep/keep_decision.py --ledger ~/qwen3.5-mxfp4/keep_ledger.json --summary
+```
+
+The stacked ship claim (Gate S) is a separate `/perf-sweep` on the all-kept build,
+judged against the cumulative goal — the ledger's summed estimate is only a guide.
+
+## Auto-verdict (A/B vs a baseline)
+
+Set `BASELINE_CSV` to a prior run's `summary.csv` and the sweep finishes with a
+**verdict computed from the raw csv** (never recalled numbers), written to
+`verdict.json` + printed. It mirrors the `debug/perf-regression` logic
+([[../../memory/workflows/gates]] Gate 4):
+
+- **Config exact-match gate:** compares this run's `run_meta.env` (MODEL/TP/IL/OL +
+  a `SERVER_SIG` hash of server args) against the baseline's. A shape/config mismatch
+  is **refused → INCONCLUSIVE**, never reported as a win.
+- **REGRESSION** if any monitored metric (`total_throughput` higher-better,
+  `median_e2e_latency_ms` lower-better) worsens beyond `REGRESSION_THRESHOLD_PCT`,
+  OR accuracy drops beyond `ACC_REGRESSION_THRESHOLD_PP` — even if throughput improved
+  (accuracy-correct-but-net-loss still counts as a regression).
+- **WIN** if `total_throughput` improves ≥ `SHIP_THRESHOLD_PCT` at ≥ half the shared
+  concurrencies and nothing regressed.
+- **INCONCLUSIVE** otherwise (within the noise band, or no/again mismatched baseline).
 
 ## Gotchas this skill already handles (learned on this box)
 

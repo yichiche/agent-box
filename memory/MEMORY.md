@@ -9,7 +9,11 @@
 |---|---|
 | Launch a model server | [[models/INDEX]] → pick model card |
 | Run benchmark / perf sweep | [[workflows/benchmark]] |
+| Pick a workload (IL/OL) & what a delta may claim | [[workflows/workloads]] |
 | Validate a code change | [[workflows/validate]] + skill `/validate` |
+| Know if an optimization is ship-worthy | [[workflows/gates]] (funnel + verdict rules) |
+| Pick what to optimize next | [[candidates/README]] (ranked queue + Amdahl priority) |
+| Land a HIP/aiter change in SGLang | [[workflows/sglang-integration]] |
 | Profile & parse trace | [[workflows/profiling]] + skill `/parse-trace` |
 | Pick GPUs | skill `/gpu-status` + [[gotchas/gpu-pinning]] |
 | Commit / PR | skill `/commit-push-pr` + `skills/_shared/repo-config.md` |
@@ -21,16 +25,32 @@ See [[models/INDEX]] for server script, client script, TP, accuracy gate, and en
 ## Workflows
 
 - [[workflows/benchmark]] — concurrency sweep, InferenceX, perf tables
+- [[workflows/workloads]] — named IL/OL presets (`canonical-8k`, `diag-1k`) + claim rules
 - [[workflows/validate]] — before/after benchmark + accuracy + profile for PRs
 - [[workflows/profiling]] — trace capture, `trace_module_analyzer.py`, kernel diff
-- [[workflows/accuracy]] — GSM8K, thinking models, thresholds
+- [[workflows/accuracy]] — GSM8K, thinking models, two-tier thresholds, invalid-rate triage
+- [[workflows/gates]] — ship funnel: microbench=filter, Gate 2.5 wiring, e2e verdict from raw csv
+- [[workflows/sglang-integration]] — HIP/aiter gating (`_is_hip` vs `_use_aiter`), dispatch-wiring checklist, common-path byte-identical
 - [[workflows/remote-bridge]] — Host ↔ container agents (file bus + `bridge.sh exec`)
+
+## Candidate queue (what to optimize next)
+
+- [[candidates/README]] — ranked optimization queue + Amdahl priority (`headroom ×
+  confidence`). Gate 0 of the [[workflows/gates]] funnel. Seeded from the B200-vs-MI355
+  decode gap; current #1 = GDN decode (ILP4 + bf16 state).
 
 ## Gotchas (read before benchmarking)
 
 - [[gotchas/bench-cwd-shadow]] — never launch from `$HOME`; stale `aiter/` + `sglang/` shadows
 - [[gotchas/container-bench-flags]] — newer `bench_serving` CLI on rocm images
 - [[gotchas/no-edit-running-script]] — don't edit a `.sh` while it's executing
+
+## Ops gotchas (server hung / crashed / OOM — check these first)
+
+- [[gotchas/aiter-jit-baton-vram]] — "hung server" = stale JIT baton lock; fresh-launch OOM = 60–90s VRAM reclaim after kill -9
+- [[gotchas/aiter-version-skew]] — tuned-CSV kernel-id skew (PR 4017 opus/6401) hard-aborts prefill at M≈2048; conc-4 smoke test hides it
+- [[gotchas/flydsl-tuned-csv-head-mismatch]] — FlyDSL "speedup" that's really a tuned-CSV head-config mismatch (num_v=8 vs real 32); re-microbench at deployed config÷TP before it sets priority
+- [[gotchas/tp2-profiling-gloo-crash]] — live TP2 `/start_profile` crashes intermittently via gloo; use offline `bench_one_batch --profile`
 
 ## Script catalog
 

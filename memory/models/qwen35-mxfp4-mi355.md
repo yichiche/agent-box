@@ -39,15 +39,88 @@ python3 -m sglang.launch_server \
 
 ## Accuracy
 
-- Dataset: GSM8K (via `/perf-sweep` or `/validate`)
-- Threshold: **0.92** on this box
-- Verified: 0.945 @ TP2 IL8k/OL1k conc sweep (2026-06)
+- Dataset: GSM8K. **Thinking model — eval protocol is mandatory** (see [[../workflows/accuracy]]):
+  ```bash
+  python3 benchmark/gsm8k/bench_sglang.py --num-questions 200 --parallel 100 --num-shots 5 \
+    --enable-thinking --tokenizer-path /data/amd/Qwen3.5-397B-A17B-MoE-MXFP4 \
+    --max-new-tokens 8192 --port <PORT>
+  ```
+- **Ship threshold: 0.92 — but only for an accuracy-VALID config.** Read a low
+  score by invalid rate first:
+  - **invalid high (>~0.05)** → eval artifact (token budget / thinking off / bare
+    prompt). Fix the eval, re-run. NOT a weights problem.
+  - **invalid low but acc low** → real degradation. Don't ship; don't relax the bar.
+- **Tier 1 (valid, target ≥0.92):** proper eval 0.985; shared expert unfused BF16
+  0.904; a16w4+instruction prompt 0.970; GOOD ckpt (`Qwen3.5-397B-A17B-MXFP4`) 0.968.
+- **Tier 2 (KNOWN-BAD, NEVER SHIP):** this MoE-MXFP4 ckpt's **fp4 shared expert**
+  caps accuracy — fused fp4 shared ~0.61–0.67, a16w4 bare ~0.46, a4w4 ~0.62. Fix =
+  give the shared expert BF16 precision (unfused). Confirmed 2026-07-16: the live
+  `run_qwen3.5_mxfp4_perf.sh` interleave path (`AITER_FP4BF16_USE_ITLV=1` +
+  `SGLANG_USE_AITER_MOE_GU_ITLV=true`) measured **0.625 / invalid 0.010** = Tier 2.
+- **a16w4 INTERLEAVE is a *second, independent* degrader (2026-07-12/13,
+  [[a16w4-gsm8k-accuracy-regression]]).** The a16w4 routed-expert path (bf16 act +
+  gui_fp4 FlyDSL kernel) **~doubles GSM8K invalid rate**: a4w4 0.617/inv 0.211 →
+  a16w4 0.456/inv 0.525 (correct-when-valid stays ~0.9+). It is weight-value-dependent
+  and NOT the shared-expert fusion: `--disable-shared-experts-fusion` (E=512) did not
+  help (0.417/0.519), overturning the earlier shared-fusion hypothesis. **Dead ends —
+  do NOT re-chase:** (1) NOT the fp8-activation branch (forcing bf16 via
+  `AITER_BF16_FP8_MOE_BOUND=1000000` gave identical 0.456/0.525; the fp8 branch only
+  *crashes* at cudagraph capture for M≥256); (2) NOT truncation (max_new_tokens
+  512→2048 didn't lower invalid); (3) NOT shared fusion (above). **Practical:** serve
+  with **a4w4** (`SGLANG_USE_AITER_MOE_GU_ITLV=0`) — a16w4 is a net accuracy loss here,
+  its tuning is perf-only. Root fix = tighten the op-level test vs fp32 ref (current
+  `op_tests/test_flydsl_moe_a16w4.py` atol=1.0 is too loose: passes 100% while a small
+  systematic error derails long generation).
+- The old "verified 0.945 @ 2026-06" number predates this checkpoint drift; treat
+  0.92 as the bar under the protocol above, not as a standing measurement.
 
 ## Profiling
 
 - Use `/generate-profile` or `python profile/trace_module_analyzer.py`
-- Decode-heavy @ IL8192/OL1024: prefill optimizations have low Amdahl leverage (~2–3.5%)
+- Decode-heavy @ `canonical-8k` (IL8192/OL1024): prefill optimizations have low
+  Amdahl leverage (~2–3.5%)
 - High-concurrency profiling can OOM host — profile at conc 4 for decode deep-dives
+
+### `trace_module_analyzer.py` params for Qwen3.5 (NOT DSv4 defaults)
+
+Qwen3.5 MoE is a **hybrid** decoder: `Qwen3_5LinearDecoderLayer` and
+`Qwen3_5AttentionDecoderLayer` appear in the module tree. The parser's default
+detail modules (`DeepseekV4DecoderLayer` / `Layer` at instances 31/32 or 59-62)
+are **wrong** for this model and produce empty detail sheets.
+
+**Critical: module-level detail needs a COMBINED trace, not a stage-separated one.**
+Verified 2026-07-16 on real traces:
+
+- A stage-separated **`*-DECODE.trace.json.gz`** (what `--profile-by-stage`
+  produces) is CUDA-graph-replayed → its module tree collapses to a single
+  `CudaGraphReplay` node (~92% of time, only ~16 nn.Module events).
+  `Qwen3_5LinearDecoderLayer` is **not found** → you get only the kernel-category
+  breakdown, no per-module detail. So for Qwen module analysis, capture a
+  **combined** trace (omit `--profile-by-stage`).
+- On a **combined** trace, this reproduces the reference prefill detail sheets:
+
+  ```bash
+  python3 $AGENT_BOX_DIR/profile/trace_module_analyzer.py \
+    <combined-TP-0.trace.json.gz> -o analysis.xlsx \
+    --detail-module Qwen3_5LinearDecoderLayer --detail-instance 0 1
+  # → sheets: Qwen3_5LinearDecoderLayer_0 (pre), _1 (pre)  [VERIFIED]
+  ```
+
+- **OPEN / unverified:** the exact recipe for the *decode* per-layer detail sheets
+  seen in `~/qwen3.5-mxfp4/agent_round1/analysis_decode_pristine.xlsx` (the `(dec)`
+  tabs) is NOT reproduced by plain `--detail-instance 0 1` nor `--phase-index Decode`
+  on the combined trace. Confirm the correct instances/phase against the **Module
+  Tree** sheet on a fresh combined capture before trusting decode detail, and update
+  this card once nailed down.
+- `--detail-instance` IDs can shift with server config — always sanity-check against
+  the Module Tree sheet. To also detail attention layers, add
+  `Qwen3_5AttentionDecoderLayer` as a second `--detail-module`.
+
+### Output directory convention
+
+**Do NOT save Qwen3.5 artifacts under `~/dsv4/`** (the DSv4 default some skills
+still hardcode). Use `~/qwen3.5-mxfp4/<label>/`. Mixing models in `~/dsv4/`
+already happened (`~/dsv4/qwen35_mxfp4_validation/`) and makes traces hard to find.
 
 ## Related memory
 

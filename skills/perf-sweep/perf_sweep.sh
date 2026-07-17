@@ -58,6 +58,18 @@ KEEP_SERVER="${KEEP_SERVER:-0}"               # 1 = leave server running at the 
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-1200}"
 HOST="${HOST:-127.0.0.1}"
 
+# Auto-verdict (A/B vs a baseline summary.csv; mirrors debug/perf-regression logic)
+# Point BASELINE_CSV at a PREVIOUS run's summary.csv to get a WIN/REGRESSION/INCONCLUSIVE
+# verdict computed from the raw csv (never from recalled numbers). Empty = no verdict,
+# absolute numbers only. The baseline's run_meta.env (written next to its summary.csv)
+# is used for an exact config-match check — a shape/config mismatch is refused, never
+# reported as a win.
+BASELINE_CSV="${BASELINE_CSV:-}"
+SHIP_THRESHOLD_PCT="${SHIP_THRESHOLD_PCT:-5}"          # primary metric must gain >= this to WIN
+REGRESSION_THRESHOLD_PCT="${REGRESSION_THRESHOLD_PCT:-2}"   # any monitored metric worse beyond this = REGRESSION (config.py default 2.0)
+ACC_REGRESSION_THRESHOLD_PP="${ACC_REGRESSION_THRESHOLD_PP:-2}"  # accuracy drop (abs pp) beyond this = REGRESSION
+VERDICT_EXIT="${VERDICT_EXIT:-0}"             # 1 = exit non-zero when verdict is REGRESSION (for CI/pipeline)
+
 # Paths
 BENCH_SERVING_DIR="${BENCH_SERVING_DIR:-}"    # autodetected if empty
 RESULT_DIR="${RESULT_DIR:-/tmp/perf_sweep_$(date +%Y%m%d_%H%M%S)}"
@@ -236,6 +248,152 @@ for d in rows:
 PY
 }
 
+# ── Run metadata (for the verdict's exact config-match check) ─────────────────
+write_meta() {
+  local sig acc
+  sig="$(printf '%s' "$SERVER_ARGS $SERVER_ENV" | md5sum | cut -d' ' -f1)"
+  acc="$( [ -f "$RESULT_DIR/accuracy.txt" ] && cat "$RESULT_DIR/accuracy.txt" || echo NA )"
+  {
+    echo "MODEL=$(basename "$MODEL")"
+    echo "TP=$TP"
+    echo "INPUT_LEN=$INPUT_LEN"
+    echo "OUTPUT_LEN=$OUTPUT_LEN"
+    echo "CONCURRENCIES=$CONCURRENCIES"
+    echo "SERVER_SIG=$sig"
+    echo "ACCURACY=$acc"
+  } > "$RESULT_DIR/run_meta.env"
+}
+
+# ── Auto-verdict (WIN / REGRESSION / INCONCLUSIVE from raw csv vs baseline) ────
+verdict() {
+  [ -n "$BASELINE_CSV" ] || { log "No BASELINE_CSV — skipping verdict (absolute numbers only)."; return 0; }
+  [ -f "$BASELINE_CSV" ] || { warn "BASELINE_CSV not found: $BASELINE_CSV — skipping verdict."; return 0; }
+  local base_meta="$(dirname "$BASELINE_CSV")/run_meta.env"
+  python3 - "$SUMMARY_CSV" "$BASELINE_CSV" "$RESULT_DIR/run_meta.env" "$base_meta" \
+             "$SHIP_THRESHOLD_PCT" "$REGRESSION_THRESHOLD_PCT" "$ACC_REGRESSION_THRESHOLD_PP" \
+             "$RESULT_DIR/verdict.json" <<'PY'
+import csv, json, os, sys
+cur_csv, base_csv, cur_meta_p, base_meta_p, ship, regr, acc_regr, out_json = sys.argv[1:9]
+ship, regr, acc_regr = float(ship), float(regr), float(acc_regr)
+
+# Mirrors debug/perf-regression/config.py MONITORED_METRICS (name, direction).
+MONITORED = [("total_throughput", "higher"), ("median_e2e_latency_ms", "lower")]
+PRIMARY   = "total_throughput"                       # the metric a WIN is judged on
+REPORT    = ["output_throughput", "median_ttft_ms", "median_tpot_ms", "median_itl_ms"]
+
+def load_csv(p):
+    d = {}
+    with open(p) as f:
+        for row in csv.DictReader(f):
+            try: c = int(float(row["max_concurrency"]))
+            except Exception: continue
+            d[c] = row
+    return d
+
+def load_meta(p):
+    m = {}
+    if p and os.path.isfile(p):
+        for line in open(p):
+            if "=" in line:
+                k, _, v = line.strip().partition("="); m[k] = v
+    return m
+
+def fnum(row, key):
+    try: return float(row.get(key, "") or "")
+    except Exception: return None
+
+cur, base = load_csv(cur_csv), load_csv(base_csv)
+cur_meta, base_meta = load_meta(cur_meta_p), load_meta(base_meta_p)
+
+result = {"verdict": None, "reason": None, "per_conc": [], "flags": []}
+
+# ── Config exact-match gate: a shape/config mismatch is NEVER a win ────────────
+match_keys = ["MODEL", "TP", "INPUT_LEN", "OUTPUT_LEN", "SERVER_SIG"]
+mism = [k for k in match_keys if base_meta.get(k) is not None
+        and cur_meta.get(k) is not None and base_meta.get(k) != cur_meta.get(k)]
+if base_meta and mism:
+    result["verdict"] = "INCONCLUSIVE"
+    result["reason"] = "config mismatch vs baseline: " + ", ".join(
+        f"{k} {base_meta.get(k)}→{cur_meta.get(k)}" for k in mism)
+
+shared = sorted(set(cur) & set(base))
+if result["verdict"] is None and not shared:
+    result["verdict"] = "INCONCLUSIVE"
+    result["reason"] = "no overlapping concurrency between baseline and current"
+
+any_regression = False
+primary_wins = 0
+primary_seen = 0
+if result["verdict"] is None:
+    for c in shared:
+        entry = {"concurrency": c, "metrics": {}}
+        for metric, direction in MONITORED:
+            b, cu = fnum(base[c], metric), fnum(cur[c], metric)
+            if b is None or cu is None or b == 0:
+                continue
+            # direction-aware pct change (same math as _check_metric_regression)
+            if direction == "higher":
+                improve_pct = (cu - b) / b * 100.0        # +ve = better
+            else:
+                improve_pct = (b - cu) / b * 100.0        # +ve = better (latency down)
+            flag = "ok"
+            if improve_pct <= -regr:
+                flag = "REGRESSION"; any_regression = True
+            elif improve_pct >= ship:
+                flag = "win"
+            entry["metrics"][metric] = {"baseline": b, "current": cu,
+                                        "improve_pct": round(improve_pct, 2), "flag": flag}
+            if metric == PRIMARY:
+                primary_seen += 1
+                if improve_pct >= ship: primary_wins += 1
+        result["per_conc"].append(entry)
+
+    # ── Accuracy regression (mirrors _check_accuracy_regression, abs pp) ──────
+    # accuracy.txt stores a fraction (0.905); normalize both sides to percentage
+    # points before comparing against acc_regr (which is in pp, per config.py).
+    def _to_pp(x): return x * 100.0 if x <= 1.0 else x
+    try:
+        ba = _to_pp(float(base_meta.get("ACCURACY", "")))
+        ca = _to_pp(float(cur_meta.get("ACCURACY", "")))
+        if ca < ba - acc_regr:
+            any_regression = True
+            result["flags"].append(f"accuracy regressed {ba:.1f}pp→{ca:.1f}pp (>{acc_regr}pp)")
+    except (TypeError, ValueError):
+        pass
+
+    # ── Decide. Regression dominates (accuracy-correct but net loss = REGRESSION) ─
+    if any_regression:
+        result["verdict"] = "REGRESSION"
+        result["reason"] = "a monitored metric or accuracy worsened beyond threshold"
+    elif primary_seen and primary_wins >= (primary_seen + 1) // 2:
+        result["verdict"] = "WIN"
+        result["reason"] = f"{PRIMARY} improved ≥{ship}% at {primary_wins}/{primary_seen} concurrencies, no regression"
+    else:
+        result["verdict"] = "INCONCLUSIVE"
+        result["reason"] = f"within noise band (|Δ| between {regr}% and {ship}%); not shippable, not a regression"
+
+json.dump(result, open(out_json, "w"), indent=2)
+
+# ── Print ─────────────────────────────────────────────────────────────────────
+print("\n=== AUTO-VERDICT (vs %s) ===" % base_csv)
+for e in result["per_conc"]:
+    for m, d in e["metrics"].items():
+        tag = {"win": "✅", "REGRESSION": "🔴", "ok": "  "}[d["flag"]]
+        print(f"  conc {e['concurrency']:>4}  {m:<24} {d['baseline']:>10.1f} → {d['current']:>10.1f}  {d['improve_pct']:+6.2f}%  {tag}")
+for f in result["flags"]:
+    print("  ! " + f)
+print("VERDICT: %s — %s" % (result["verdict"], result["reason"]))
+# exit code: 2 = REGRESSION (caller may key on it)
+sys.exit(2 if result["verdict"] == "REGRESSION" else 0)
+PY
+  local rc=$?
+  if [ "$rc" = "2" ] && [ "$VERDICT_EXIT" = "1" ]; then
+    warn "verdict = REGRESSION and VERDICT_EXIT=1 → exiting non-zero"
+    return 2
+  fi
+  return 0
+}
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 log "RESULT_DIR=$RESULT_DIR"
 launch_server
@@ -244,4 +402,6 @@ run_accuracy
 for c in $CONCURRENCIES; do bench_one "$c"; done
 profile_pass
 summarize
-log "DONE. Results in $RESULT_DIR (summary.csv, per-conc JSON/logs, gsm8k_accuracy.log)"
+write_meta
+verdict
+log "DONE. Results in $RESULT_DIR (summary.csv, run_meta.env, verdict.json, per-conc JSON/logs, gsm8k_accuracy.log)"

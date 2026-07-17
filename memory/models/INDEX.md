@@ -6,7 +6,7 @@ Agents: when the user names a model vaguely ("qwen mxfp4", "dsv4", "跑 perf"), 
 
 | Alias | Model path | HW | TP | Server script | Client script | Accuracy | Threshold | Notes |
 |---|---|---|---|---|---|---|---|---|
-| qwen35-mxfp4 | `/data/amd/Qwen3.5-397B-A17B-MoE-MXFP4` | MI355 | 2 | `~/run_qwen3.5_mxfp4_perf.sh` | `~/run_qwen3.5_mxfp4_inferencemax_client.sh` | GSM8K | 0.92 | aiter unified attn, page-size 16 |
+| qwen35-mxfp4 | `/data/amd/Qwen3.5-397B-A17B-MoE-MXFP4` | MI355 | 2 | `~/run_qwen3.5_mxfp4_perf.sh` | `~/run_qwen3.5_mxfp4_inferencemax_client.sh` | GSM8K | 0.92¹ | aiter unified attn, page-size 16; **thinking model — see card** |
 | qwen35-bf16 | `/data/amd/Qwen3.5-397B-A17B-*` (non-MXFP4) | MI355 | 2–8 | `~/run_qwen3.5_perf.sh` | `~/run_qwen3.5_inferencemax_client.sh` | GSM8K | 0.92 | see script for kv-cache dtype |
 | dsv4 | (see script) | MI355 | varies | `~/run_dsv4.sh` | `~/run_dsv4_inferencemax_client.sh` | GSM8K | 0.88 | multiple dated variants: `run_dsv4_0512.sh` etc. |
 | dsr1-mxfp4-spec | (see script) | MI355 | varies | `~/run_deepseekR1_mxfp4_spec.sh` | `~/run_deepseekR1_mxfp4_spec_client.sh` | GSM8K | 0.88 | speculative decode |
@@ -15,6 +15,13 @@ Agents: when the user names a model vaguely ("qwen mxfp4", "dsv4", "跑 perf"), 
 ## Per-model detail cards
 
 - [[qwen35-mxfp4-mi355]] — full env flags, profiling notes, known ceilings
+
+¹ **0.92 is the bar for an accuracy-VALID config under the mandatory thinking-model
+eval protocol** (`--enable-thinking --max-new-tokens 8192`), NOT a number to relax.
+Qwen3.5 is a thinking model; a naive bench gives misleadingly low scores. Diagnose a
+low score by invalid rate — high invalid = eval artifact, low invalid + low acc =
+known-bad config (fp4 shared expert, NEVER SHIP). Full two-tier rule: [[qwen35-mxfp4-mi355]]
++ [[../workflows/accuracy]].
 
 ## Resolution rules
 

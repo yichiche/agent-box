@@ -10,9 +10,15 @@ Side-by-side kernel comparison between two trace analysis Excel files, grouped b
 
 ```
 /compare-kernels <file_A.xlsx> <file_B.xlsx>
+/compare-kernels --budget <file_A.xlsx> <file_B.xlsx>   # phase-level logical-op budget diff (works on decode)
 ```
 
 If the user doesn't provide two paths, ask for them using `AskUserQuestion`.
+
+**Two views:** the default module-grouped comparison (Steps 1–4) needs a module tree
+→ **prefill/extend only**. The `--budget` view (Step 4.5) is a category-based
+phase-level budget that **also works on decode** traces (which collapse to
+`CudaGraphReplay`). When comparing decode traces, use `--budget`.
 
 ## Step 0: Recategorize both files
 
@@ -177,6 +183,72 @@ MoE Compute (FusedMoE)     585.0   45.0%       593.4   35.6%      +8.4   1.0x
 O Proj (RowParallel)       1277.9   98.3%       327.6   19.7%    -950.3   0.3x  ← B200 comm
 ...
 ```
+
+## Step 4.5: Logical-op budget diff (phase-level attribution — works on decode too)
+
+The module-grouped view (Step 3/4) needs a module tree, so it only works on
+**prefill/extend** traces. **Decode** traces are CUDA-graph-replayed and collapse to a
+single `CudaGraphReplay` node (no per-module data — confirmed on Qwen3.5). This step
+gives a phase-level **time budget** that works for BOTH by using the **kernel category**
+(from `kernel_categories.csv`) as the logical op. It is the robust, always-available
+attribution: where does each side spend its per-iteration budget, and where's the gap.
+
+Invoke via `/compare-kernels --budget <A.xlsx> <B.xlsx>` (or always emit it — it's cheap).
+
+### 4.5a. Build the budget from the GPU Kernels sheet
+
+Read the flat **GPU Kernels** sheet (present in every report, prefill or decode),
+classify each kernel via `kernel_categories.csv` (the `classify()` from Step 2), and
+sum durations per category → a budget that sums to the phase total.
+
+```python
+def logical_op_budget(xlsx_path):
+    """category -> total_us, from the flat GPU Kernels sheet (works for decode)."""
+    import openpyxl
+    wb = openpyxl.load_workbook(xlsx_path, data_only=True)
+    ws = wb["GPU Kernels"]
+    # find header row + Kernel Name / Duration columns (same shape as detail sheets)
+    hdr = None
+    for r in range(1, 30):
+        vals = [ws.cell(r, c).value for c in range(1, ws.max_column + 1)]
+        if "Kernel Name" in vals:
+            hdr = r; col = {v: i + 1 for i, v in enumerate(vals) if v}; break
+    budget = {}
+    for r in range(hdr + 1, ws.max_row + 1):
+        kn = ws.cell(r, col["Kernel Name"]).value
+        if not kn or "truncated" in str(kn): continue
+        dur = float(ws.cell(r, col.get("Duration (us)", col.get("Total (us)"))).value or 0)
+        budget[classify(str(kn))] = budget.get(classify(str(kn)), 0.0) + dur
+    return budget
+```
+
+### 4.5b. Diff and rank by absolute gap
+
+```python
+A, B = logical_op_budget(file_A), logical_op_budget(file_B)
+tot_A, tot_B = sum(A.values()) or 1, sum(B.values()) or 1
+ops = sorted(set(A) | set(B), key=lambda k: abs(A.get(k,0) - B.get(k,0)), reverse=True)
+print(f"{'logical op':<16}{'A us':>10}{'A%':>7}{'B us':>10}{'B%':>7}{'gap us':>10}{'ratio':>7}")
+for k in ops:
+    a, b = A.get(k,0), B.get(k,0)
+    ratio = (a/b) if b else float('inf')
+    print(f"{k:<16}{a:>10.1f}{100*a/tot_A:>6.1f}%{b:>10.1f}{100*b/tot_B:>6.1f}%{a-b:>+10.1f}{ratio:>6.1f}x")
+print(f"{'TOTAL':<16}{tot_A:>10.1f}{'100%':>7}{tot_B:>10.1f}{'100%':>7}{tot_A-tot_B:>+10.1f}")
+```
+
+### 4.5c. Read it
+
+- The budget **sums to 100%** per side — it's a complete phase attribution, not a
+  cherry-picked kernel list.
+- Rank by **absolute gap (µs)**, not ratio — a 14× gap on a 4µs op matters less than a
+  1.3× gap on a 4000µs op. (This is the same logic the Candidate queue uses to pick
+  what to work on: [[../../memory/candidates/README]].)
+- For decode, expect `moe` + `gemm` to dominate (Qwen3.5 conc4 decode ≈ 74% moe+gemm,
+  measured 2026-07-16). A large `other`/`communication` slice on one side is often a
+  profiling artifact (e.g. symmetric-memory allreduce), not a real compute gap — sanity
+  check before filing a candidate.
+- Feed the top absolute-gap ops into the Candidate queue with an `s`/`speedup`
+  estimate ([[../../memory/candidates/README]]).
 
 ## Step 5: Actionable optimization recommendations
 
