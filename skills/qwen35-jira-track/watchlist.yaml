@@ -1,0 +1,161 @@
+# Qwen3.5-397B-A17B-MXFP4 optimization — Jira watchlist + analysis rubric
+# AMD Atlassian Cloud: https://amd.atlassian.net
+cloud_id: "3ade9f4f-3a5e-4909-bc67-8816482a10f4"
+
+# Only consider tickets updated in the last N days. Stale tickets are excluded.
+recency_days: 90
+
+# Hard exclude — known stale / unrelated (do not fetch, analyze, or report)
+excluded_tickets:
+  SWDEV-537308:
+    reason: "Stale abandoned ticket — Llama3.1 FP4 OOM on MI355x; no Qwen3.5 mxfp4 angle"
+  SWDEV-516036:
+    reason: "Stale abandoned ticket — blockscale MoE DeepSeek MI308; no gfx95/Qwen3.5 path"
+
+model:
+  name: "Qwen3.5-397B-A17B-MXFP4"
+  aliases:
+    - Qwen3.5-397B-A17B-mxfp4
+    - Qwen3.5-397B-A17B-MXFP4
+    - Qwen3.5-397B-A17B-MoE-MXFP4
+    - amd/Qwen3.5-397B-A17B-MXFP4
+    - Qwen3.5 397B A17B
+
+# SGLang serve flags commonly used for this model (for matching ticket repro configs)
+serve_signals:
+  - SGLANG_USE_AITER
+  - SGLANG_USE_AITER_UNIFIED_ATTN
+  - attention-backend aiter
+  - enable-aiter-allreduce-fusion
+  - AITER_FLYDSL_FORCE
+  - flydsl
+
+anchor_tickets:
+  - GPUAI-6500
+  - GPUAI-6382
+  - QUARK-744
+  - QUARK-774
+  - QUARK-743
+  - QUARK-716
+  - QUARK-760
+  - QUARK-677
+  - QUARK-763
+
+domains:
+  moe:
+    label: "MoE / dispatch / shared-expert / aiter fused MoE"
+    people:
+      - display_name: "Jin, Lingpeng"
+      - display_name: "Wen, Jiaxing"
+      - display_name: "Li, Felix"
+    topic_keywords:
+      - MoE
+      - shared expert
+      - FSE
+      - routing
+      - dispatch
+      - combine
+      - GEMM
+      - mxfp4
+      - aiter
+      - fusion
+      - blockscale
+
+  quark:
+    label: "Quark quantization / checkpoint / file2file"
+    people:
+      - display_name: "Lin, Zhao"
+      - display_name: "Ren, Jiangyong"
+    topic_keywords:
+      - quark
+      - mxfp4
+      - quantization
+      - file2file
+      - rotation
+      - AttnFP8
+      - shared expert
+      - conv_1d
+
+  a16w4:
+    label: "A16W4 / mixed-precision attention weights"
+    people:
+      - display_name: "Picciau, Andrea"
+    topic_keywords:
+      - a16w4
+      - A16W4
+      - w4a16
+      - attention
+      - MHA
+      - FP8
+      - mxfp4
+
+# Optimization areas for Qwen3.5-397B-A17B-MXFP4 (map tickets → bottleneck)
+optimization_areas:
+  moe_gemm:
+    label: "MoE MXFP4 GEMM / expert matmul"
+    keywords: [mxfp4, MXFP4, MoE, GEMM, blockscale, w4a16, expert, gate_proj, w13]
+  moe_dispatch:
+    label: "MoE routing / dispatch / combine"
+    keywords: [dispatch, combine, routing, topk, token dispatch, alltoall, allgather]
+  shared_expert_fusion:
+    label: "Shared-expert fusion (FSE)"
+    keywords: [shared expert, FSE, FUSION_SHARED_EXPERTS, expert slot]
+  attention:
+    label: "MHA / unified attn / aiter attention"
+    keywords: [MHA, attention, unified attn, aiter_backend, AttnFP8, conv_1d, linear attn, self.attn]
+  quantization_checkpoint:
+    label: "Quark checkpoint / accuracy / requant"
+    keywords: [quark, file2file, rotation, dequant, requantize, GSM8K, accuracy]
+  comm_fusion:
+    label: "AllReduce / AG+MM / comm fusion"
+    keywords: [allreduce, all-reduce, allgather, reduce-scatter, AG+MM, comm fusion]
+  flydsl_kernels:
+    label: "FlyDSL / JIT / triton gfx95 kernels"
+    keywords: [flydsl, triton, gfx95, JIT, assembly]
+
+# Ticket text → relevance tier (keyword match)
+relevance:
+  high:
+    - Qwen3.5-397B
+    - 397B-A17B
+    - amd/Qwen3.5-397B-A17B-MXFP4
+    - GPUAI-6500
+    - GPUAI-6382
+  medium:
+    - mxfp4
+    - MXFP4
+    - Qwen3.5
+    - MoE-MXFP4
+    - AttnFP8
+    - shared expert
+    - DSV4
+    - DeepSeek-V4
+    - Kimi
+    - GLM-5
+  low:
+    - aiter
+    - kernel
+    - GEMM
+    - MoE
+    - quark
+    - MHA
+    - flydsl
+    - MI355
+
+# Helpfulness verdict (agent assigns after reading full description)
+helpfulness_verdicts:
+  direct:
+    description: "Explicitly targets Qwen3.5-397B mxfp4 or GPUAI-6500/6382/QUARK-744"
+    action: "Prioritize — align with assignee, cherry-pick PR/commit if done"
+  transferable:
+    description: "Different model (DSV4/Kimi/GLM) or generic mxfp4/aiter kernel — same code path on MI355"
+    action: "Evaluate port — check if SGLang path already shared; benchmark before/after"
+  enabler:
+    description: "Checkpoint/quant fix that unblocks perf (accuracy, shared expert, AttnFP8)"
+    action: "Track merge — may need new HF revision or Quark export"
+  watch:
+    description: "Related domain work in progress; outcome unclear"
+    action: "Subscribe — re-check when status → Done"
+  low:
+    description: "Wrong stack, closed unrelated, or no MI355/SGLang/aiter angle"
+    action: "Skip unless profiling shows same kernel name"

@@ -1,6 +1,6 @@
 export const meta = {
   name: 'discover',
-  description: 'Wider multi-source kernel-optimization discovery: fan out across trace-diff (HIP vs CUDA), ATOM commits, InferenceX gaps, and CUDA-only ops; synthesize into one ranked, evidence-backed candidate list. Report-only — does NOT implement or ship.',
+  description: 'Wider multi-source kernel-optimization discovery: fan out across trace-diff (HIP vs CUDA), local aiter coverage, ATOM commits, InferenceX gaps, CUDA-only ops, and AMD Jira in-flight work; synthesize into one ranked, evidence-backed candidate list. Report-only — does NOT implement or ship.',
   whenToUse: 'Run before kernel-fusion-pipeline to widen the candidate pool beyond a single trace diff. Pass args.fileA/fileB (xlsx traces) and optionally args.model/sources/isl/osl.',
   phases: [
     { title: 'Discover', detail: 'Parallel candidate generation per source' },
@@ -19,7 +19,7 @@ const CANDIDATE_SCHEMA_ITEM = {
     savings_us: { type: ['number', 'null'], description: 'Estimated per-layer savings (us), null if unknown' },
     sglang_file: { type: 'string', description: 'SGLang (or aiter) file to modify' },
     tier: { type: 'string', enum: ['1', '2', '3'], description: '1=Python dispatch, 2=Triton, 3=aiter C++/HIP' },
-    source: { type: 'string', enum: ['trace', 'atom', 'inferencex', 'cuda_gap'] },
+    source: { type: 'string', enum: ['trace', 'aiter', 'atom', 'inferencex', 'cuda_gap', 'jira'] },
     evidence: { type: 'string', description: 'Concrete proof: kernel us / commit hash / benchmark gap / CUDA op name' },
     confidence: { type: 'string', enum: ['high', 'med', 'low'] },
     rationale: { type: 'string', description: 'Why this is worth doing and how' },
@@ -60,7 +60,7 @@ const osl = args?.osl || 1024
 const tp = args?.tp || 2
 const sources = Array.isArray(args?.sources) && args.sources.length
   ? args.sources
-  : ['trace', 'aiter', 'atom', 'inferencex', 'cuda_gap']
+  : ['trace', 'aiter', 'atom', 'inferencex', 'cuda_gap', 'jira']
 const outDir = args?.outDir || '~/.kernel-fusion-pipeline'
 const reportPath = `${outDir}/discovery.md`
 // Provenance: local container repos are the ACTIONABLE ground truth (the trace was produced by, and
@@ -157,6 +157,33 @@ SECONDARY overlay (NETWORK — run ONLY if check_upstream=${checkUpstream}):
   confidence "low", tier per change type. Do NOT claim these are dispatchable now.
 
 If check_upstream is false, do the PRIMARY local scan only. Return source="aiter" candidates.`,
+
+  // In-flight AMD Jira work (MoE / Quark / a16w4 watchlist) transferable to this model on MI355.
+  jira: `
+You are the JIRA source of a kernel-optimization discovery sweep. PIPELINE_MODE — no questions.
+READ AND FOLLOW /home/yichiche/agent-box/skills/qwen35-jira-track/SKILL.md (watchlist, verdicts, optimization areas).
+Fetch tickets, trying in order — stop at the first path that works:
+1. ATLASSIAN MCP (preferred; host/container OAuth via the "atlassian" MCP server): if mcp__atlassian
+   tools (e.g. searchJiraIssuesUsingJql) are available in your session, get the JQL via
+     python3 /home/yichiche/agent-box/skills/qwen35-jira-track/scripts/track_jira.py --full --jql-only
+   then run the MCP searches exactly as SKILL.md Step 1 specifies (cloudId, fields incl. description,
+   maxResults 100, paginate). Pipe the flattened rows through the scorer:
+     ... | python3 .../track_jira.py --analyze --json   (stdin JSON mode)
+2. REST fallback (only if no MCP tools): source /home/yichiche/agent-box/env.sh 2>/dev/null, then
+     python3 /home/yichiche/agent-box/skills/qwen35-jira-track/scripts/track_jira.py --full --fetch --analyze --json
+   (creds from JIRA_EMAIL + JIRA_API_TOKEN or ~/.jira_credentials).
+3. If both are unavailable, do NOT fabricate tickets — return empty candidates with a note
+   ("jira unavailable: no atlassian MCP in session and no REST creds" / the actual error).
+Read each fetched ticket's summary + description (override script scores after reading). Keep only verdicts
+direct / transferable / enabler; skip watch / low. For each kept ticket that maps to a concrete optimization
+for ${model} on MI355 (moe_gemm, moe_dispatch, shared_expert_fusion, attention, quantization_checkpoint,
+comm_fusion, flydsl_kernels), produce a candidate: source="jira", target_op = the aiter/Triton/flydsl op or
+technique the ticket delivers, sglang_file = best-guess dispatch/integration point, tier per change type,
+confidence high for "direct", med for "transferable", low for "enabler". Evidence = ticket key + status +
+updated date + any perf numbers/linked PRs from the ticket. Rationale must say what to port and from where
+(e.g. "cherry-pick aiter PR from GPUAI-xxxx, A/B on ${model}"). Cross-check any named aiter op exists under
+${aiterOps} — if the ticket's op is not in the local aiter, keep the candidate but note "requires aiter bump"
+in rationale. Provenance = NETWORK (amd.atlassian.net).`,
 }
 
 const enabled = sources.filter(s => SOURCE_PROMPTS[s])
@@ -182,7 +209,7 @@ phase('Synthesize')
 const synth = await agent(`
 You are the SYNTHESIS step of a kernel-optimization discovery sweep. PIPELINE_MODE — no questions.
 
-You are given raw candidates from up to 4 sources (trace / atom / inferencex / cuda_gap) for ${model}
+You are given raw candidates from up to 6 sources (trace / aiter / atom / inferencex / cuda_gap / jira) for ${model}
 (ISL=${isl}, OSL=${osl}, TP=${tp}). Do the following:
 
 1. DEDUP: merge candidates that target the same block/op even if surfaced by different sources. When merged,
@@ -190,6 +217,7 @@ You are given raw candidates from up to 4 sources (trace / atom / inferencex / c
    agreement RAISES confidence.
 2. RANK: order by expected impact = estimated savings x confidence, then by tier (prefer lower tier / cheaper).
    Directional inferencex-only candidates with no concrete op rank below proven trace/cuda_gap ones.
+   jira candidates with a linked PR / concrete perf number rank like trace ones; verdict-only ones rank like inferencex.
 3. VALIDATE: drop any candidate whose named aiter op does not exist under ${aiterOps}. Keep write-new (Tier 2/3)
    candidates that legitimately have no existing op.
 4. WRITE a markdown report to ${reportPath} with: a ranked table (Rank | Slug | Block | Tier | Source(s) |

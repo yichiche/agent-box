@@ -10,3 +10,10 @@ HOST_HOME="${AGENT_BOX_HOST_HOME:-$(dirname "$AGENT_BOX_DIR")}"
 AGENT_SCRATCH_DIR="${AGENT_SCRATCH_DIR:-$HOST_HOME/agent-scratch}"
 AGENT_RUNS_DIR="${AGENT_RUNS_DIR:-$HOST_HOME/agent-runs}"
 export AGENT_SCRATCH_DIR AGENT_RUNS_DIR
+
+# Jira REST creds (amd.atlassian.net) for track_jira.py --fetch / discover.js jira source.
+# File holds `export JIRA_EMAIL=... JIRA_API_TOKEN=...`; keep it chmod 600.
+if [ -z "${JIRA_API_TOKEN:-}" ] && [ -f "$HOST_HOME/.jira_credentials" ] \
+   && ! grep -q "REPLACE_WITH" "$HOST_HOME/.jira_credentials"; then
+  . "$HOST_HOME/.jira_credentials"
+fi

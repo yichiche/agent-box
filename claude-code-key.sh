@@ -38,6 +38,27 @@ EOF
   echo "[claude] First-time initialization"
 fi
 
+# Share the host's MCP OAuth tokens (e.g. Atlassian/Jira remote MCP) with the container,
+# but STRIP the claude.ai subscription login — containers must bill the API key, never the
+# subscription (see CLAUDE.md). The server list itself arrives via the ~/.claude.json symlink;
+# this copies only the matching OAuth tokens so /mcp connects without a browser flow.
+mkdir -p /root/.claude
+if [ -f "${HOST_HOME}/.claude/.credentials.json" ]; then
+  python3 - "${HOST_HOME}/.claude/.credentials.json" /root/.claude/.credentials.json <<'PY'
+import json, sys
+src, dst = sys.argv[1], sys.argv[2]
+creds = json.load(open(src))
+creds.pop("claudeAiOauth", None)  # never carry the subscription login into a container
+if creds:
+    with open(dst, "w") as f:
+        json.dump(creds, f)
+    print(f"[claude] MCP OAuth tokens shared into container ({', '.join(sorted(creds))})")
+else:
+    print("[claude] no MCP OAuth tokens on host yet (authenticate via /mcp on the host first)")
+PY
+  chmod 600 /root/.claude/.credentials.json 2>/dev/null
+fi
+
 # Write env vars to .bashrc (EOF must be at column 0, double-quotes expand CLAUDE_KEY)
 cat >> ~/.bashrc <<EOF
 # Claude Code environment
