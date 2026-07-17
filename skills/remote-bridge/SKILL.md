@@ -1,5 +1,6 @@
 ---
 description: Cross-container agent bridge — file bus (STATUS/INBOX/OUTBOX) plus direct `docker exec` into your own containers to run claude/codex headless and get a reply. Use when coordinating host with container agents, or to send a live one-shot command into a container.
+category: infra
 ---
 
 # Bridge (Host ↔ Container)

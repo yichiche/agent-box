@@ -1,6 +1,8 @@
 ---
 name: atom-progress
 description: "Track ATOM inference engine benchmark progress from https://rocm.github.io/ATOM/benchmark-dashboard/. Reports latest numbers, detects >5% perf changes, identifies contributing commits, and flags changes potentially useful to SGLang. Default config: DSV4 ISL=8192 / OSL=1024."
+category: research
+data_sources: [atom-upstream]
 ---
 
 # atom-progress

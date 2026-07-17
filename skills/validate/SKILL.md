@@ -1,5 +1,6 @@
 ---
 description: Validate SGLang code changes — baseline benchmark, accuracy test, profiling, and after benchmark with before/after comparison. Use when the user says "validate the result" or "/validate" after making SGLang changes.
+category: measure
 ---
 
 # Validate SGLang Changes

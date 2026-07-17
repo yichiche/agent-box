@@ -1,5 +1,6 @@
 ---
 description: Capture session learnings into agent-box/memory vault. Use at end of session, when user says "remember this", or after discovering a gotcha/workflow/model config.
+category: meta
 ---
 
 # Memory Capture

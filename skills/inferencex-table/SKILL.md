@@ -1,6 +1,8 @@
 ---
 name: inferencex-table
 description: "Fetch and search InferenceX benchmark results. Two modes: (1) paste a GitHub Actions run URL to get a benchmark table from that specific run, or (2) search by model/hardware/framework (e.g. 'deepseekv4-pro on B200 sglang, MI355 vllm') to find the latest numbers across runs, including Docker image and benchmark script for reproducibility."
+category: research
+data_sources: [inferencex]
 ---
 
 # inferencex-table

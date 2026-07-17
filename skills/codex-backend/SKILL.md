@@ -1,6 +1,7 @@
 ---
 name: codex-backend
 description: "Point the Codex CLI at a LOCAL SGLang server as its LLM backend. Launches a model server from one of the ~/run_*.sh scripts (Qwen3.5, DeepSeek-R1/V4, etc.), ensures the server emits structured tool calls + reasoning, wires ~/.codex/config.toml to it, and verifies Codex agentic tool-use end to end. Use when the user says '/codex-backend', asks to make codex use a local server, switch the codex backend model, or serve dsr1/dsv4/qwen for codex."
+category: infra
 ---
 
 # Codex local backend setup

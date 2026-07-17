@@ -5,6 +5,7 @@ description: >-
   cgroups. Use when the user asks which container uses which GPU, who is on
   GPU 0/1, GPU occupancy vs containers, or after rocm-smi/nvidia-smi shows busy
   cards and they need the owning workload name.
+category: infra
 ---
 
 # GPU → container mapping

@@ -1,5 +1,6 @@
 ---
 description: Scan the memory vault for recurring themes that no skill/workflow/gotcha covers yet, and draft review stubs proposing a workflow/skill/gotcha. Detect → draft → you approve; never auto-creates a skill. Use weekly or when the journal has grown.
+category: meta
 ---
 
 # /skill-suggest — feed memory back into workflows

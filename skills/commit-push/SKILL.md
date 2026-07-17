@@ -1,5 +1,6 @@
 ---
 description: Commit (if needed) and push to the user's fork, with repo-aware remote selection and user confirmation before push
+category: deliver
 ---
 
 # Commit and Push

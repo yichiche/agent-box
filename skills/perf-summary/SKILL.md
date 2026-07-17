@@ -1,6 +1,7 @@
 ---
 name: perf-summary
 description: "Summarize kernel performance from difference graphs and Excel data. Produces a 2-3 sentence status and bullet-point action items for kernels to optimize. Use when the user says '/perf-summary' or provides kernel difference graphs/Excel files for performance analysis."
+category: measure
 ---
 
 # Performance Summary

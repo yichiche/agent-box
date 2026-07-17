@@ -1,5 +1,7 @@
 ---
 description: Compare kernel categories and timings between two trace analysis Excel files. Use when the user says "/compare-kernels" followed by two xlsx paths, or asks to compare kernel breakdowns across platforms (e.g., B200 vs MI355).
+category: research
+data_sources: [trace-xlsx, aiter-upstream, sglang-upstream, jira-amd]
 ---
 
 # Compare Kernels
@@ -11,9 +13,15 @@ Side-by-side kernel comparison between two trace analysis Excel files, grouped b
 ```
 /compare-kernels <file_A.xlsx> <file_B.xlsx>
 /compare-kernels --budget <file_A.xlsx> <file_B.xlsx>   # phase-level logical-op budget diff (works on decode)
+/compare-kernels --refs <keyword>                       # research only: find upstream+Jira prior art for a kernel
 ```
 
 If the user doesn't provide two paths, ask for them using `AskUserQuestion`.
+
+**Research mode (`--refs`):** skip the trace diff and jump straight to Step 8 — given a
+kernel/op keyword, find prior art in aiter + sglang upstream + Jira. Useful before
+starting an optimization ("has anyone already done this?"). Sources resolve through
+[`_shared/data-sources.md`](../_shared/data-sources.md).
 
 **Two views:** the default module-grouped comparison (Steps 1–4) needs a module tree
 → **prefill/extend only**. The `--budget` view (Step 4.5) is a category-based
@@ -564,11 +572,71 @@ Implementation Roadmap for [Block Name]:
 
 ---
 
+## Step 8: Upstream & Jira reference finder (research)
+
+> **PIPELINE_MODE**: Skip this step (same as Step 7).
+
+Before finalizing the Tier 1/2/3 plan, **check whether the fix already exists upstream or
+is in-flight in Jira** — cherry-picking beats reinventing. This is the `research` half of
+the skill: it turns the slow kernel from Step 4/5 into a search across the sources
+registered in [`_shared/data-sources.md`](../_shared/data-sources.md).
+
+**Trigger it when** you have a concrete slow kernel/op (after Step 5), or directly via
+`/compare-kernels --refs <keyword>`.
+
+### 8a. Run the finder
+
+Pick the keyword from the top absolute-gap op — the **kernel family name**, not the full
+symbol (e.g. `ck_gemm`, `moe_sorting`, `fused_moe`, `rmsnorm`, `mla`), optionally the
+budget category:
+
+```bash
+python3 ~/agent-box/skills/compare-kernels/scripts/find_references.py <keyword> [--category <cat>] [--json]
+```
+
+It queries three sources, each with graceful degradation (no MCP required today):
+
+| source | preferred | fallback | last resort |
+|--------|-----------|----------|-------------|
+| `aiter-upstream` | `gh search prs ROCm/aiter` | GitHub REST search (+`GITHUB_TOKEN`) → local `git log`/grep on `/sgl-workspace/aiter` | GitHub search URL |
+| `sglang-upstream` | `gh search prs sgl-project/sglang` | GitHub REST search → local `git log`/grep on `$SGLANG_ROOT` | GitHub search URL |
+| `jira-amd` | atlassian-mcp *(planned)* | REST via `JIRA_EMAIL`+`JIRA_API_TOKEN` | JQL browse URL |
+
+The `[live:...]` / `[fallback:...]` tag on each section tells you how the hits were
+obtained, so you know when a section is empty because there's nothing vs because a tool
+was missing.
+
+### 8b. Read the results into the plan
+
+- **Upstream PR that already implements the fusion/tune** → the optimization becomes a
+  **cherry-pick / rebase**, not new code. Note the PR number in the Tier plan and drop the
+  tier by one (a merged upstream PR is Tier 1 even if it's C++).
+- **Local-checkout commit/file hits** → the kernel already exists in the installed aiter;
+  the gap may be a **dispatch/wiring** issue (Tier 1), not a missing kernel. Cross-check
+  with [[../../memory/workflows/sglang-integration]] (`_is_hip` vs `_use_aiter`).
+- **Jira ticket touching the kernel** → someone owns related work; **coordinate / follow
+  up** instead of duplicating. Feed transferable tickets through
+  [`/qwen35-jira-track`](../qwen35-jira-track/SKILL.md) for full triage.
+- **Nothing anywhere** → genuinely new work; proceed with the Tier plan as written.
+
+### 8c. Enabling the live paths / MCP
+
+- `GITHUB_TOKEN` → higher GitHub search rate limit (REST search is throttled hard when
+  anonymous). `gh auth login` (if `gh` is installed) is preferred over REST.
+- `JIRA_EMAIL` + `JIRA_API_TOKEN` (same vars as `/qwen35-jira-track`) → live Jira search;
+  without them you get the JQL URL to open in a browser.
+- When a **GitHub MCP** or **Atlassian MCP** is registered, flip the matching row in
+  [`_shared/data-sources.md`](../_shared/data-sources.md) to `status: live` and update the
+  `MCP_HINTS` call in `scripts/find_references.py` to call the MCP tool first (the REST/gh
+  path stays as the offline fallback).
+
+---
+
 ## PIPELINE_MODE contract (from `/kernel-fusion-pipeline`)
 
 When invoked with `pipeline_mode: true`:
 
-- **Stop after Step 6** (category mismatches). Do NOT enter Step 7 (deep-dive / AskUserQuestion).
+- **Stop after Step 6** (category mismatches). Do NOT enter Step 7 (deep-dive / AskUserQuestion) or Step 8 (reference finder).
 - Return the ranked Tier-1 fusion list directly to the pipeline.
 - Do **not** use `AskUserQuestion` for any reason.
 - The pipeline only needs: block name, slug, target op, kernels, savings, sglang file.

@@ -1,6 +1,7 @@
 ---
 name: benchmark
 description: "Run before/after e2e benchmark of an SGLang code change. Collects baseline (change reverted), restores the change, re-benchmarks, and produces a comparison table. Optionally profiles with /generate-profile. Use when the user says '/benchmark' or asks for a before/after benchmark."
+category: measure
 ---
 
 # Before / After Benchmark

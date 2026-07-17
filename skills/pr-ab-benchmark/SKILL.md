@@ -1,6 +1,7 @@
 ---
 name: pr-ab-benchmark
 description: "Before/after A/B benchmark of an aiter (or sglang) PR on an SGLang server, with per-kernel profiling confirmation. Applies one or more baseline PRs, benchmarks e2e throughput across concurrencies for one or more IL/OL workloads, then applies the PR-under-test (rebuilding any csrc/JIT module it touches), re-benchmarks, and profiles a target kernel at chosen concurrencies via the client --profile path. Emits before/after throughput tables + a target-kernel µs/launch comparison. Use when asked to 'benchmark before/after applying PR X', 'confirm kernel Y improves', or A/B a perf PR end to end."
+category: measure
 ---
 
 # pr-ab-benchmark — A/B a perf PR (e2e throughput + kernel profile)

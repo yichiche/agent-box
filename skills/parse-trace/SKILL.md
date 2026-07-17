@@ -1,6 +1,7 @@
 ---
 name: parse-trace
 description: Parse a profiling trace file with trace_module_analyzer.py. Supports default mode (full analysis) and specialized prefill/decode modes with configurable detail modules and instances.
+category: measure
 ---
 
 # Parse Trace

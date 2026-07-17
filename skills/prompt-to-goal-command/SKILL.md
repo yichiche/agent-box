@@ -7,6 +7,7 @@ description: >-
   agents, or asks to turn a vague request into a command aligned with a stated
   goal.
 disable-model-invocation: true
+category: meta
 ---
 
 # Prompt → Goal-Aligned Command

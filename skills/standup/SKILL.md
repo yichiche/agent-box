@@ -1,5 +1,6 @@
 ---
 description: "Generate or formalize a daily standup: auto-gather from history/git/gh, or rewrite user-pasted notes into Teams-ready bullets (Yesterday / Today / Blocker). Use when the user says '/standup', 'formalize' standup, or pastes draft standup text."
+category: meta
 ---
 
 # Daily Standup Summary

@@ -1,5 +1,6 @@
 ---
 description: Implement a kernel optimization for SGLang on MI355/ROCm. Takes a free-text description of the change, designs it in plan mode, implements it, validates with /validate, and commits only after validation passes. Use when the user says "/implement-kernel" followed by an optimization description.
+category: kernel-opt
 ---
 
 # Implement Kernel Optimization

@@ -1,6 +1,7 @@
 ---
 name: perf-sweep
 description: "Accuracy-gated concurrency-sweep benchmark for an SGLang server, end to end. Launches the server once, runs a GSM8K accuracy gate (must pass a threshold before benchmarking), then sweeps concurrency (e.g. 4,8,…,256) at a fixed IL/OL, with optional per-concurrency profiling, and emits a summary CSV + table. Model-agnostic; can inherit server flags from a reference bash script under /home/yichiche. Use when the user asks to benchmark a model across concurrencies, run a perf sweep, or 'accuracy then throughput/latency sweep'."
+category: measure
 ---
 
 # perf-sweep — accuracy gate → concurrency sweep (→ optional profiling)

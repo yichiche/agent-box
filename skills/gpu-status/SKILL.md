@@ -1,6 +1,7 @@
 ---
 name: gpu-status
 description: "Show which AMD GPUs are free and the exact CUDA_VISIBLE_DEVICES to use for SGLang. Joins rocm-smi to torch's CUDA index via PCI bus (the numberings differ!). Use when the user says '/gpu-status', '/gpu', asks which GPUs are free, or which CUDA_VISIBLE_DEVICES / device to launch on."
+category: infra
 ---
 
 # GPU Status (which AMD GPUs are free + the CUDA index to use)

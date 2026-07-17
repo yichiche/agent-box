@@ -1,5 +1,6 @@
 ---
 description: Commit, push, and create a PR in one flow — checks state at each stage, confirms push target, collects accuracy/benchmark data, drafts PR in HackMD format for review before submitting
+category: deliver
 ---
 
 # Commit, Push, and Create PR
