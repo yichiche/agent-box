@@ -90,8 +90,25 @@ benchmark/   — Performance benchmarking (run, compare, analyze CSVs)
 profile/     — Profiler trace analysis & model structure inspection (git submodule → torch-profiler-parser)
 debug/       — Regression detection (perf-regression subsystem)
 configs/     — Shared model configuration files
-env.sh       — Central environment config (HOST_HOME, AGENT_BOX_DIR)
+env.sh       — Central environment config (HOST_HOME, AGENT_BOX_DIR, AGENT_SCRATCH_DIR, AGENT_RUNS_DIR)
 ```
+
+## Scratch & Output File Hygiene
+
+**Never write agent-created files into `$HOST_HOME` (`/home/yichiche`) root.** It clutters
+the home dir. Use the defaults from `env.sh`:
+
+- **Ad-hoc scripts / logs / reports** (e.g. `summarize_*.py`, `*_driver.sh`,
+  `tmp_*.log`, one-off `*_report.md`, quick analysis) → **`$AGENT_SCRATCH_DIR`**
+  (`$HOST_HOME/agent-scratch`), ideally under a per-task subdir.
+- **Structured run outputs** (traces, sweep result dirs) → **`$AGENT_RUNS_DIR`**
+  (`$HOST_HOME/agent-runs`) or the existing per-model dirs (`agent-runs/<model>/<label>`).
+- **Truly ephemeral** one-shot temp → `/tmp`.
+
+Source `env.sh` to get the paths: `source "$AGENT_BOX_DIR/env.sh"`. Create the target
+dir before writing (`mkdir -p "$AGENT_SCRATCH_DIR/<task>"`). **Exception:** canonical,
+human-owned files already at `$HOST_HOME` — especially `~/run_*.sh` model launch
+scripts — stay where they are; do not move or relocate them.
 
 ## Container Task Execution
 

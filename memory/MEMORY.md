@@ -44,6 +44,7 @@ See [[models/INDEX]] for server script, client script, TP, accuracy gate, and en
 - [[gotchas/bench-cwd-shadow]] — never launch from `$HOME`; stale `aiter/` + `sglang/` shadows
 - [[gotchas/container-bench-flags]] — newer `bench_serving` CLI on rocm images
 - [[gotchas/no-edit-running-script]] — don't edit a `.sh` while it's executing
+- [[gotchas/home-scratch-hygiene]] — never drop scratch files in `$HOME` root; use `$AGENT_SCRATCH_DIR`/`$AGENT_RUNS_DIR`
 
 ## Ops gotchas (server hung / crashed / OOM — check these first)
 
