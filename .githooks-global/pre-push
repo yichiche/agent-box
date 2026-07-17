@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Global identity guard (pre-push): every commit being pushed must be authored AND
+# committed by the required identity. Install via `core.hooksPath` so it covers repos
+# you do NOT maintain (aiter, sglang) without editing their tracked files.
+# NOTE: client-side hooks can be bypassed with --no-verify; the un-bypassable rule is a
+# GitHub ruleset (Restrict commit author email) on the remote you own (your fork).
+REQ="${IDENTITY_GUARD_REQUIRED:-jacky.cheng <yichiche@amd.com>}"
+Z=0000000000000000000000000000000000000000
+bad=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$Z" ] && continue                       # branch delete
+  if [ "$remote_sha" = "$Z" ]; then
+    range=$(git rev-list "$local_sha" --not --remotes)       # new branch: only new commits
+  else
+    range=$(git rev-list "${remote_sha}..${local_sha}")
+  fi
+  for c in $range; do
+    a=$(git show -s --format='%an <%ae>' "$c")
+    cm=$(git show -s --format='%cn <%ce>' "$c")
+    if [ "$a" != "$REQ" ] || [ "$cm" != "$REQ" ]; then
+      echo "  ✗ ${c:0:12}  author='$a' committer='$cm'"
+      bad=1
+    fi
+  done
+done
+if [ "$bad" = 1 ]; then
+  echo ""
+  echo "ERROR: push blocked — every commit must be authored & committed by ${REQ}."
+  echo "  Fix identity:  git config user.name jacky.cheng && git config user.email yichiche@amd.com"
+  echo "  Rewrite bad commits: git rebase -i <base>  (or  git commit --amend --reset-author)"
+  echo ""
+  exit 1
+fi
+exit 0
