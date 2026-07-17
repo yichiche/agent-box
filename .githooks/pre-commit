@@ -1,44 +1,61 @@
 #!/usr/bin/env bash
 #
-# pre-commit hook: checks git user identity before committing.
+# pre-commit hook: enforces the git author/committer identity.
 # - Blocks if user.name or user.email is not set.
-# - Displays current identity so you can verify it's yours.
+# - Blocks unless the identity is EXACTLY the required one (no other option).
+# - Also checks the RESOLVED author/committer ident (git var) so a
+#   `git commit --author=...` or GIT_AUTHOR_*/GIT_COMMITTER_* override can't slip past.
 #
+
+REQUIRED_NAME="jacky.cheng"
+REQUIRED_EMAIL="yichiche@amd.com"
+REQUIRED="${REQUIRED_NAME} <${REQUIRED_EMAIL}>"
 
 USER_NAME=$(git config user.name)
 USER_EMAIL=$(git config user.email)
 
 # Block if identity is missing
 ERRORS=""
-if [ -z "$USER_NAME" ]; then
-  ERRORS="${ERRORS}  - user.name is not set\n"
-fi
-if [ -z "$USER_EMAIL" ]; then
-  ERRORS="${ERRORS}  - user.email is not set\n"
-fi
-
+[ -z "$USER_NAME" ]  && ERRORS="${ERRORS}  - user.name is not set\n"
+[ -z "$USER_EMAIL" ] && ERRORS="${ERRORS}  - user.email is not set\n"
 if [ -n "$ERRORS" ]; then
   echo ""
   echo "ERROR: Git identity is not configured."
   echo ""
   echo -e "$ERRORS"
-  echo "  Set your identity with:"
-  echo "    git config user.name \"Your Name\""
-  echo "    git config user.email \"your@email.com\""
+  echo "  This repo requires committing as:"
+  echo "    git config user.name  \"${REQUIRED_NAME}\""
+  echo "    git config user.email \"${REQUIRED_EMAIL}\""
   echo ""
   exit 1
 fi
 
-# Display current identity for verification
-echo ""
-echo "Committing as: $USER_NAME <$USER_EMAIL>"
-echo ""
-echo "  If this is not you, abort (Ctrl+C) and run:"
-echo "    git config user.name \"Your Name\""
-echo "    git config user.email \"your@email.com\""
-echo ""
-echo "  If you already committed with the wrong identity, fix it with:"
-echo "    git commit --amend --author=\"Your Name <your@email.com>\" --no-edit"
-echo ""
+# Helpers: pull "Name <email>" out of a `git var *_IDENT` string ("Name <email> ts tz")
+ident_of() { printf '%s' "$1" | sed -E 's/> .*/>/'; }
 
+AUTHOR_IDENT=$(ident_of "$(git var GIT_AUTHOR_IDENT 2>/dev/null)")
+COMMITTER_IDENT=$(ident_of "$(git var GIT_COMMITTER_IDENT 2>/dev/null)")
+
+# Enforce: configured identity AND resolved author/committer must all equal REQUIRED.
+BAD=""
+[ "$USER_NAME" = "$REQUIRED_NAME" ]   || BAD="${BAD}  - config user.name is '$USER_NAME' (must be '$REQUIRED_NAME')\n"
+[ "$USER_EMAIL" = "$REQUIRED_EMAIL" ] || BAD="${BAD}  - config user.email is '$USER_EMAIL' (must be '$REQUIRED_EMAIL')\n"
+[ -z "$AUTHOR_IDENT" ]    || [ "$AUTHOR_IDENT" = "$REQUIRED" ]    || BAD="${BAD}  - author is '$AUTHOR_IDENT' (must be '$REQUIRED')\n"
+[ -z "$COMMITTER_IDENT" ] || [ "$COMMITTER_IDENT" = "$REQUIRED" ] || BAD="${BAD}  - committer is '$COMMITTER_IDENT' (must be '$REQUIRED')\n"
+
+if [ -n "$BAD" ]; then
+  echo ""
+  echo "ERROR: Commits in this repo must be authored by ${REQUIRED} only."
+  echo ""
+  echo -e "$BAD"
+  echo "  Fix your identity with:"
+  echo "    git config user.name  \"${REQUIRED_NAME}\""
+  echo "    git config user.email \"${REQUIRED_EMAIL}\""
+  echo ""
+  echo "  (Do NOT use 'git commit --author=...' or GIT_AUTHOR_*/GIT_COMMITTER_* to override.)"
+  echo ""
+  exit 1
+fi
+
+echo "Committing as: ${USER_NAME} <${USER_EMAIL}>  ✓"
 exit 0
