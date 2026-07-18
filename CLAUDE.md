@@ -128,6 +128,18 @@ scripts — stay where they are; do not move or relocate them.
 - **Source of truth:** `agent-box/memory/` (git-tracked); journal is raw history, curated dirs are canonical
 - **Cross-container bridge:** `memory/bridge/` — `/remote-bridge`: file bus + `bridge.sh exec` (allowlisted `docker exec` into your own containers)
 
+## Benchmark, Profiling & Kernel-Dev Conventions
+
+Load-bearing defaults every session must honor. Detail lives in `memory/workflows/`;
+these numbers are defaults, not suggestions.
+
+- **num_prompts** — benchmark/sweep `num_prompts = conc × 10`; profiling capture `× 2`.
+- **Benchmark shapes** — no shape given ⇒ run **both** `diag-1k` (IL1024/OL1024) and `canonical-8k` (IL8192/OL1024); report both, **claim perf only on `canonical-8k`**.
+- **Reference table** — when the model card has one (e.g. `memory/models/qwen35-mxfp4-mi355-reference.csv`), the default benchmark output is measured **side by side with the reference** (per-cell delta), columns `Median E2E / total tok/s / tok/s/gpu / TTFT / TPOT`.
+- **Profiling anchors** — profile at **conc4 / conc64** (also the kernel-confirm anchors).
+- **Kernel-dev loop** (`memory/workflows/kernel-dev.md`) — unit test in aiter first (shapes reflecting conc4~conc128; improvement = **geomean across conc4~conc128**, not one shape) → profile c4/c64 to confirm on the served trace → no improvement ⇒ back to unit test → geomean **>10% ⇒ escalate to e2e full sweep** → keep/ship still per `gates.md` (≥30% served-trace, stacked ship).
+- **Time budget → scope** (`memory/workflows/time-budget.md`) — a long budget (e.g. 8h) means *explore broadly* (kernel rewrites, fusions, algorithm/layout/quant variants, tuned configs, in parallel worktrees), **not** flipping one SGLang global var at a time.
+
 ## Profiling & Trace Analysis
 
 - When analyzing profiling outputs (trace Excel, evaluation CSV, raw traces, kernel performance), use `/profile` or see `profile/profile.md`.

@@ -21,20 +21,22 @@ Guide: `profile/profile.md`
 
 ## Which concurrency to profile
 
-A perf **sweep** keeps the whole frontier (`4 8 16 32 64 128 256`). A **deep
-profile** does not — profiling distorts throughput and produces huge traces, so
-capture only the three anchor points **c4 / c32 / c128**, each answering a
-different question:
+A perf **sweep** keeps the whole frontier (`4 8 16 32 64 128 256`). A **profiling
+pass** does not — profiling distorts throughput and produces huge traces, so capture
+only the two anchor points **c4 / c64**, each answering a different question:
 
 | Conc | Regime | What it tells you |
 |---|---|---|
 | **c4** | latency-bound / near-idle | Per-layer decode critical path; kernel launch + small-GEMM overhead. Best for decode deep-dives (won't OOM host). |
-| **c32** | throughput knee | The point where batching starts to saturate; most representative of steady-state serving. |
-| **c128** | saturation | Contention, memory pressure, scheduler/queueing effects; where high-conc regressions surface. |
+| **c64** | throughput / near-saturation | Steady-state serving cost and where batching contention starts to bite; the representative high-conc point for kernel-improvement confirmation. |
 
-**Rule:** run the full frontier for the perf table, then deep-profile only
-c4/c32/c128. Don't profile every concurrency — it wastes hours and disk for no
-extra signal. Workload shape stays fixed per [[workloads]] (default `canonical-8k`;
+**Rule:** run the full frontier for the perf table, then profile only **c4 / c64**.
+These are also the kernel-dev confirmation anchors — see [[kernel-dev]]. Don't profile
+every concurrency — it wastes hours and disk for no extra signal.
+
+**Capture cost:** a profiling pass uses `num_prompts = conc × 2`
+(`PROFILE_NUM_PROMPTS_MULT=2`) — just enough for a representative trace, not a
+measurement. Workload shape stays fixed per [[workloads]] (default `canonical-8k`;
 `diag-1k` for a cheap capture).
 
 ## Typical questions → mode

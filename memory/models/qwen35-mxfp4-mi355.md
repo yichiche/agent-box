@@ -35,7 +35,47 @@ python3 -m sglang.launch_server \
 
 - `PORT=9000`, `INPUT_LEN=70000`, `OUTPUT_LEN=300` (override with env)
 - Concurrency sweep: `4 8 16 32 64 128 256`
+- `num_prompts = concurrency × 10` (benchmark) — matches
+  `run_qwen3.5_mxfp4_inferencemax_client.sh`; profiling capture uses × 2 (see [[../workflows/workloads]]).
 - **CWD:** launch server AND client from `/tmp` or other neutral dir — see [[../gotchas/bench-cwd-shadow]]
+
+## Reference table (the default output compares against this)
+
+Every benchmark of this model presents its results **side by side with this reference
+table** and shows the per-cell delta (`(measured − ref)/ref`). Machine-readable copy:
+[`qwen35-mxfp4-mi355-reference.csv`](qwen35-mxfp4-mi355-reference.csv). Both shapes are
+part of the benchmark set ([[../workflows/workloads]]); perf **claims** are still made
+only on `canonical-8k`.
+
+Columns: **Median E2E (ms) · total tok/s · total tok/s/gpu · Median TTFT (ms) ·
+Median TPOT (ms)**, per concurrency.
+
+### diag-1k — ISL 1024 / OSL 1024
+
+| conc | Median E2E (ms) | total tok/s | tok/s/gpu | TTFT (ms) | TPOT (ms) |
+|---:|---:|---:|---:|---:|---:|
+| 4 | 7,415.5 | 957.0 | 478.5 | 118.6 | 8.0 |
+| 8 | 9,222.9 | 1,580.2 | 790.1 | 121.4 | 9.8 |
+| 16 | 13,244.6 | 2,470.6 | 1,235.3 | 125.9 | 12.8 |
+| 32 | 16,626.4 | 3,561.3 | 1,780.7 | 137.4 | 17.6 |
+| 64 | 23,922.4 | 5,038.2 | 2,519.1 | 137.0 | 25.2 |
+| 128 | 33,678.6 | 6,840.3 | 3,420.2 | 203.0 | 37.5 |
+| 256 | — | — | — | — | — |
+
+### canonical-8k — ISL 8192 / OSL 1024 (claim shape)
+
+| conc | Median E2E (ms) | total tok/s | tok/s/gpu | TTFT (ms) | TPOT (ms) |
+|---:|---:|---:|---:|---:|---:|
+| 4 | 8,584.4 | 3,772.2 | 1,886.1 | 372.6 | 8.8 |
+| 8 | 11,006.0 | 5,939.7 | 2,969.8 | 377.2 | 11.4 |
+| 16 | 15,023.2 | 8,567.6 | 4,283.8 | 380.8 | 16.0 |
+| 32 | 24,241.7 | 10,691.7 | 5,345.9 | 468.3 | 25.3 |
+| 64 | 38,581.7 | 13,822.5 | 6,911.3 | 523.5 | 41.1 |
+| 128 | 61,862.7 | 17,290.7 | 8,645.3 | 633.3 | 66.4 |
+| 256 | — | — | — | — | — |
+
+> conc 256 rows are intentionally blank in the reference (not yet measured). Fill them
+> in here once a trusted 256 run lands; until then, treat 256 as no-reference.
 
 ## Accuracy
 

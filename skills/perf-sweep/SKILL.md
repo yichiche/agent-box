@@ -33,7 +33,7 @@ For a single before/after change benchmark use `/benchmark`; for just a profile 
    ```bash
    docker exec -e MODEL=/data/amd/<model> -e GPUS=6,7 -e TP=2 \
      -e INPUT_LEN=8192 -e OUTPUT_LEN=1024 \
-     -e CONCURRENCIES="4 8 16 32 64 128 256" -e NUM_PROMPTS_MULT=8 \
+     -e CONCURRENCIES="4 8 16 32 64 128 256" -e NUM_PROMPTS_MULT=10 \
      -e ACCURACY=1 -e ACC_THRESHOLD=0.92 \
      -e PROFILE_CONCS="4" \
      -e RESULT_DIR=/home/yichiche/<run_dir> \
@@ -56,7 +56,8 @@ For a single before/after change benchmark use `/benchmark`; for just a profile 
 | `INPUT_LEN`/`OUTPUT_LEN` | 8192/1024 | random dataset IL/OL |
 | `RANGE_RATIO` | 0.8 | random range ratio |
 | `CONCURRENCIES` | `4 8 16 32 64 128 256` | sweep points |
-| `NUM_PROMPTS_MULT` | 8 | `num_prompts = conc * MULT` |
+| `NUM_PROMPTS_MULT` | 10 | benchmark: `num_prompts = conc * 10` (measurement) |
+| `PROFILE_NUM_PROMPTS_MULT` | 2 | profiling capture: `num_prompts = conc * 2` (trace only) |
 | `NUM_PROMPTS_CAP` | 0 | cap num_prompts (0 = uncapped) |
 | `ACCURACY` | 1 | run GSM8K gate first |
 | `ACC_THRESHOLD` | 0.92 | min accuracy to proceed |

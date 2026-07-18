@@ -37,7 +37,8 @@ RANGE_RATIO="${RANGE_RATIO:-0.8}"
 DATASET="${DATASET:-random}"
 BACKEND="${BACKEND:-sglang}"
 CONCURRENCIES="${CONCURRENCIES:-4 8 16 32 64 128 256}"
-NUM_PROMPTS_MULT="${NUM_PROMPTS_MULT:-8}"     # num_prompts = conc * MULT
+NUM_PROMPTS_MULT="${NUM_PROMPTS_MULT:-10}"    # benchmark: num_prompts = conc * 10 (measurement)
+PROFILE_NUM_PROMPTS_MULT="${PROFILE_NUM_PROMPTS_MULT:-2}"  # profiling capture: conc * 2 (just for a trace)
 NUM_PROMPTS_CAP="${NUM_PROMPTS_CAP:-0}"       # 0 = uncapped
 
 # Accuracy gate
@@ -195,7 +196,7 @@ profile_pass() {
   has_arg "--profile" || { warn "client has no --profile; skipping profiling pass"; return 0; }
   mkdir -p "$PROFILE_DIR"
   for conc in $PROFILE_CONCS; do
-    local nump=$(( conc * 4 )); [ "$nump" -lt 8 ] && nump=8   # short run, just for a trace
+    local nump=$(( conc * PROFILE_NUM_PROMPTS_MULT )); [ "$nump" -lt 8 ] && nump=8   # profiling capture (×2), just for a trace
     local plog="$RESULT_DIR/profile_conc${conc}.log"
     log "PROFILING pass conc=$conc (num_prompts=$nump) -> $PROFILE_DIR"
     local pargs=( --model "$MODEL" --backend "$BACKEND" --host "$HOST" --port "$PORT"

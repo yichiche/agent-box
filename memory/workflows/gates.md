@@ -33,6 +33,11 @@ A microbench speedup does **not** predict e2e. Journal evidence:
 Use Gate 2 only to *kill* candidates that don't even get faster in isolation. A pass
 means "proceed to 2.5", nothing more.
 
+**Measure the microbench right (unit test in aiter):** sweep the shapes that reflect
+the served **conc4 ~ conc128** range, and score improvement as the **geomean across
+those shapes** — never a single conc. A single-shape win is overfit and ships a
+regression elsewhere. Full loop: [[kernel-dev]].
+
 ## Gate 2.5 — wiring confirmation (cheapest gate, blocks the most expensive waste)
 
 **Before running any sweep, confirm the new kernel actually executes on the target
@@ -50,6 +55,18 @@ grep -i "<your_kernel_name>" <trace-DECODE...>  # must appear on the decode path
 
 Only after the kernel is confirmed on the hot path do you spend a full sweep.
 Related dispatch/wiring conventions: [[sglang-integration]].
+
+### Escalation to e2e — the >10% screen
+
+Confirm the improvement on the **served trace at c4 / c64** ([[profiling]]). Then:
+
+- **geomean improvement > 10%** (across the conc4~conc128 shapes, confirmed on the
+  served trace) ⇒ **escalate to a full e2e sweep**.
+- **no improvement on the served trace** ⇒ back to the unit test (the unit win did not
+  transfer — wiring or shape-mismatch). See [[kernel-dev]].
+
+This >10% is only a **screen to justify the e2e spend** — it is *not* the keep bar.
+The keep decision below (Gate K) is still the served-trace **≥30%** per-op rule.
 
 ## Gate 3 — accuracy
 
@@ -130,6 +147,8 @@ computed; a future `REPEATS>1` mode would add it.
 
 ## Related
 
-- [[workloads]] — canonical vs diagnostic shapes; ≥5% claim rule
+- [[kernel-dev]] — the unit→profile→e2e on-ramp that feeds this funnel
+- [[time-budget]] — how many candidates to run this funnel on, per budget
+- [[workloads]] — canonical vs diagnostic shapes; ≥5% claim rule; benchmark set
 - [[accuracy]] — Gate 3 detail, two-tier thresholds
 - [[benchmark]] / [[profiling]] — the tools each gate uses

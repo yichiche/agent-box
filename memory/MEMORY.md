@@ -8,8 +8,10 @@
 | You want to… | Read first |
 |---|---|
 | Launch a model server | [[models/INDEX]] → pick model card |
-| Run benchmark / perf sweep | [[workflows/benchmark]] |
+| Run benchmark / perf sweep | [[workflows/benchmark]] (num_prompts ×10; both shapes; vs reference table) |
 | Pick a workload (IL/OL) & what a delta may claim | [[workflows/workloads]] |
+| Develop an aiter kernel end to end | [[workflows/kernel-dev]] (unit→profile c4/c64→>10% e2e) |
+| Spend a long time budget (8h / overnight) | [[workflows/time-budget]] (explore broadly, not global-var tweaks) |
 | Validate a code change | [[workflows/validate]] + skill `/validate` |
 | Know if an optimization is ship-worthy | [[workflows/gates]] (funnel + verdict rules) |
 | Pick what to optimize next | [[candidates/README]] (ranked queue + Amdahl priority) |
@@ -24,10 +26,12 @@ See [[models/INDEX]] for server script, client script, TP, accuracy gate, and en
 
 ## Workflows
 
-- [[workflows/benchmark]] — concurrency sweep, InferenceX, perf tables
-- [[workflows/workloads]] — named IL/OL presets (`canonical-8k`, `diag-1k`) + claim rules
+- [[workflows/benchmark]] — concurrency sweep, InferenceX, perf tables; num_prompts ×10; both shapes by default; side-by-side vs model-card reference table
+- [[workflows/workloads]] — named IL/OL presets (`canonical-8k`, `diag-1k`), benchmark set (both), claim rules, num_prompts multipliers (bench ×10 / profile ×2)
+- [[workflows/kernel-dev]] — aiter kernel loop: unit (geomean conc4~128) → profile c4/c64 → no-improve back to unit → >10% ⇒ e2e full sweep → keep/ship per gates
+- [[workflows/time-budget]] — budget → exploration scope; long budget = explore broadly (rewrites/fusion/quant/tuned, parallel worktrees), not global-var tweaks
 - [[workflows/validate]] — before/after benchmark + accuracy + profile for PRs
-- [[workflows/profiling]] — trace capture, `trace_module_analyzer.py`, kernel diff
+- [[workflows/profiling]] — trace capture, `trace_module_analyzer.py`, kernel diff; profile anchors **c4/c64**, capture ×2
 - [[workflows/accuracy]] — GSM8K, thinking models, two-tier thresholds, invalid-rate triage
 - [[workflows/gates]] — ship funnel: microbench=filter, Gate 2.5 wiring, e2e verdict from raw csv
 - [[workflows/sglang-integration]] — HIP/aiter gating (`_is_hip` vs `_use_aiter`), dispatch-wiring checklist, common-path byte-identical

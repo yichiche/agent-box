@@ -12,6 +12,17 @@ Cross-model knowledge vault (Cursor, Claude Code, Codex). Start at [`memory/MEMO
 
 **Model → scripts:** see [`memory/models/INDEX.md`](memory/models/INDEX.md) (e.g. Qwen3.5 MXFP4 → `~/run_qwen3.5_mxfp4_perf.sh` + `~/run_qwen3.5_mxfp4_inferencemax_client.sh`, GSM8K ≥ 0.92).
 
+## Benchmark, Profiling & Kernel-Dev Conventions (load-bearing — every session honors)
+
+Detail in [`memory/workflows/`](memory/workflows/); the numbers below are defaults, not suggestions.
+
+- **num_prompts** — benchmark/sweep `num_prompts = conc × 10`; profiling capture `× 2`. ([`benchmark`](memory/workflows/benchmark.md), [`profiling`](memory/workflows/profiling.md))
+- **Benchmark shapes** — with no shape given, run **both** `diag-1k` (IL1024/OL1024) and `canonical-8k` (IL8192/OL1024); report both, but **claim perf only on `canonical-8k`**. ([`workloads`](memory/workflows/workloads.md))
+- **Reference table** — when the model card has a reference table (e.g. [`qwen35-mxfp4-mi355-reference.csv`](memory/models/qwen35-mxfp4-mi355-reference.csv)), the default benchmark output is measured **side by side with the reference** (per-cell delta), columns `Median E2E / total tok/s / tok/s/gpu / TTFT / TPOT`. ([`benchmark`](memory/workflows/benchmark.md))
+- **Profiling anchors** — profile at **conc4 / conc64** (these are also the kernel-confirm anchors). ([`profiling`](memory/workflows/profiling.md))
+- **Kernel-dev loop** — unit test in aiter first (shapes reflecting conc4~conc128; improvement = **geomean across conc4~conc128**, not one shape) → profile c4/c64 to confirm on the served trace → no improvement ⇒ back to unit test → geomean **>10% ⇒ escalate to e2e full sweep** → keep/ship still per gates (≥30% served-trace, stacked ship). ([`kernel-dev`](memory/workflows/kernel-dev.md), [`gates`](memory/workflows/gates.md))
+- **Time budget → scope** — a long budget (e.g. 8h) means *explore broadly* (kernel rewrites, fusions, algorithm/layout/quant variants, tuned configs, in parallel worktrees), **not** flipping one SGLang global var at a time. ([`time-budget`](memory/workflows/time-budget.md))
+
 **Workflows:** benchmark [`memory/workflows/benchmark.md`](memory/workflows/benchmark.md) · validate [`memory/workflows/validate.md`](memory/workflows/validate.md) · profile [`memory/workflows/profiling.md`](memory/workflows/profiling.md)
 
 **Maintenance:** session shards auto-converge into `memory/journal/YYYY-MM/` (a Stop hook runs `memory/bin/memory-sync.sh`; provenance in `memory/meta/provenance.tsv`). `/memory-capture` after sessions · `/memory-consolidate` weekly promotes journal facts and refreshes this file · `/skill-suggest` drafts workflow improvements.
