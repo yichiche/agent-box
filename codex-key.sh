@@ -212,6 +212,14 @@ else
   sed -i '1imodel = "gpt-5.6-sol"' /root/.codex/config.toml
 fi
 
+# Codex only reads openai_base_url at top level — a copy under [profiles.gateway]
+# is ignored and Codex falls back to api.openai.com (401 with AMD gateway keys).
+if grep -q '^openai_base_url = ' /root/.codex/config.toml 2>/dev/null; then
+  sed -i 's|^openai_base_url = .*|openai_base_url = "http://127.0.0.1:18742/v1"|' /root/.codex/config.toml
+else
+  sed -i '1iopenai_base_url = "http://127.0.0.1:18742/v1"' /root/.codex/config.toml
+fi
+
 # Append env vars and proxy auto-start to .bashrc (idempotent)
 if ! grep -q "codex-proxy" /root/.bashrc 2>/dev/null; then
   cat >> /root/.bashrc <<EOF
