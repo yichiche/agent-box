@@ -45,8 +45,20 @@ fi
 mkdir -p /root/.claude
 if [ -f "${HOST_HOME}/.claude/.credentials.json" ]; then
   python3 - "${HOST_HOME}/.claude/.credentials.json" /root/.claude/.credentials.json <<'PY'
-import json, sys
+import json, os, sys
 src, dst = sys.argv[1], sys.argv[2]
+# The launcher bind-mounts BOTH $HOME and $HOME/.claude, so /root/.claude and
+# $HOST_HOME/.claude can be the SAME host dir (same inode). Writing dst would then
+# truncate the host credential file and delete the user's claude.ai login.
+# NOTE: must compare st_dev/st_ino (os.path.samefile), NOT realpath — realpath
+# resolves symlinks but NOT bind mounts, so it does not catch this case.
+if os.path.exists(dst) and os.path.samefile(src, dst):
+    sys.exit(
+        "[claude] REFUSING to write MCP tokens: dst resolves to the SAME FILE as the "
+        "host credential store (both bind-mounted). Writing would delete the host "
+        "claude.ai login. Skipping — give the container its own CLAUDE_CONFIG_DIR, "
+        "or mount $HOME/.claude read-only."
+    )
 creds = json.load(open(src))
 creds.pop("claudeAiOauth", None)  # never carry the subscription login into a container
 if creds:
