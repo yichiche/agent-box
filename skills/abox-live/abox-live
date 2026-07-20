@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# abox-live — LIVE claude sessions + the container each one runs in.
+#
+# Starts from running PROCESSES (not transcript files), so it resolves the container
+# exactly via cgroup even for sessions in the legacy shared projects dir, where
+# `abox-live ps` can only print "shared?".
+#
+# Usage:
+#   abox-live            table of live sessions (container, session id, cwd, age)
+#   abox-live <name>     only live sessions in the container matching <name>
+#   abox-live -v         same, plus each session's latest turn
+#   abox-live --json     machine-readable
+#   abox-live ps [min]   ALL recent sessions incl. finished (transcript-file view)
+#   abox-live tail <id> [n]   last n turns of a session
+#   abox-live watch <id>      live-follow a session (Ctrl-C to stop)
+#   abox-live path <id>       print the session's JSONL path
+#
+# The reader engine (ps/tail/watch/path) was formerly the standalone `abox` CLI;
+# it is now absorbed here (abox_report.py / abox_parse.py in this dir) so abox-live
+# is the single monitoring entry point. Files are root:root 0600 -> one sudo.
+set -uo pipefail
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+REPORT="$HERE/abox_report.py"
+PARSE="$HERE/abox_parse.py"
+PROJDIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
+
+if [ "${1:-}" = "ps" ]; then
+  lb="${2:-${LOOKBACK_MIN:-360}}"
+  exec sudo -n python3 "$REPORT" ps "$lb" "$PROJDIR"
+fi
+if [ "${1:-}" = "tail" ] || [ "${1:-}" = "show" ] || [ "${1:-}" = "path" ]; then
+  cmd="$1"; shift
+  exec sudo -n python3 "$REPORT" "$cmd" "${1:-}" "${2:-}" "$PROJDIR"
+fi
+if [ "${1:-}" = "watch" ]; then
+  sel="${2:?usage: abox-live watch <session-id-prefix>}"
+  f=$(sudo -n python3 "$REPORT" path "$sel" "$PROJDIR" </dev/null 2>/dev/null)
+  case "$f" in /*) : ;; *) echo "no session matching '$sel'"; exit 1 ;; esac
+  echo "# watching $(basename "$f" .jsonl)  (Ctrl-C to stop)"
+  exec sudo -n tail -n0 -F "$f" 2>/dev/null | while IFS= read -r ln; do
+    printf '%s\n' "$ln" | python3 "$PARSE" lastn 1
+  done
+fi
+if [ "${1:-}" = "web" ]; then
+  shift
+  exec sudo -n python3 "$HERE/abox_web.py" "$@"
+fi
+if [ "${1:-}" = "snapshot" ]; then
+  shift
+  exec sudo -n python3 "$HERE/abox_snapshot.py" "$@"
+fi
+if [ "${1:-}" = "publish" ]; then
+  # Refresh the ONE remote dashboard artifact: regenerate at the stable path, then
+  # print the exact Artifact-tool params for the agent to publish (same url=).
+  shift
+  exec sudo -n python3 "$HERE/abox_snapshot.py" --publish "$@"
+fi
+if [ "${1:-}" = "stop" ]; then
+  shift
+  exec sudo -n python3 "$HERE/abox_stop.py" "$@"
+fi
+if [ "${1:-}" = "say" ]; then
+  shift
+  exec sudo -n python3 "$HERE/abox_say.py" "$@"
+fi
+exec sudo -n python3 "$HERE/abox_live.py" "$@"
