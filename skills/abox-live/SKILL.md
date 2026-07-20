@@ -118,9 +118,11 @@ publish`, or asks to see their agents on **mobile / laptop Claude**, do this two
 abox-live publish        # rebuilds the stable HTML, chowns it, prints the Artifact params
 ```
 
-`publish` owns the stable path, the stable URL, and the title/favicon/description, and
-folds in sessions that finished <180 min ago. It ends with a `=== PUBLISH ARTIFACT ===`
-block listing `file_path` / `url` / `title` / `favicon` / `description`.
+`publish` owns the stable path, the stable URL, and the title/favicon/description. It
+shows **live sessions only** (a current-status dashboard — ended sessions are clutter
+there; see them with `abox-live ps`, or fold recent ones back in with `abox-live publish
+--recent 180`). It ends with a `=== PUBLISH ARTIFACT ===` block listing `file_path` /
+`url` / `title` / `favicon` / `description`.
 
 **2. Call the `Artifact` tool with exactly those printed params** — always including
 `url=`. A shell script *cannot* publish; only the Artifact tool can, which is why the

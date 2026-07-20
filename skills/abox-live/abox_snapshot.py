@@ -163,8 +163,9 @@ def build(show_all, max_turns, recent_min):
                     "turns": turns,
                 })
 
-    data.sort(key=lambda s: (not s["live"], s["container"] == "host",
-                             s["container"], s["idle"]))
+    # Most-recently-updated first: sort purely by transcript-write age (idle seconds),
+    # ascending. Unknown age (idle < 0) sinks to the bottom.
+    data.sort(key=lambda s: s["idle"] if s["idle"] >= 0 else float("inf"))
     return data
 
 
@@ -173,7 +174,10 @@ CSS = """
 @media(prefers-color-scheme:dark){:root{--bg:#16181c;--fg:#e6e6e6;--mut:#9aa0a6;--line:#2c3038;--card:#1d2026;--acc:#5aa9ff}}
 *{box-sizing:border-box}
 body{margin:0;padding:18px;font:14px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);color:var(--fg)}
-h1{font-size:18px;margin:0 0 4px}
+.hdr{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:4px;flex-wrap:wrap}
+h1{font-size:18px;margin:0}
+.ref{font:inherit;font-size:12px;padding:7px 14px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--acc);cursor:pointer;min-height:36px;white-space:nowrap}
+.ref:active{opacity:.6}
 .sub{color:var(--mut);font-size:12px;margin-bottom:16px}
 table{border-collapse:collapse;width:100%;margin-bottom:26px;font-size:12px;display:block;overflow-x:auto}
 th,td{text-align:left;padding:6px 9px;border-bottom:1px solid var(--line);white-space:nowrap}
@@ -293,18 +297,22 @@ def render_turn(t):
 
 
 def render_html(data, when, raw=False):
-    """No JavaScript at all: sandboxed viewers (and strict CSP) blank a JS page, and
-    this file has to survive being opened anywhere. <details> gives the click-to-open
-    behaviour natively."""
+    """Mostly no-JS: <details> gives click-to-open natively. Small progressive-
+    enhancement scripts handle copy-to-select and reload-with-cache-bust only."""
+    snap_epoch = int(time.time())
     p = ['<!doctype html><meta charset="utf-8">',
          # Stable title on purpose: this is republished to the same artifact URL on a
          # schedule, and a timestamped title would rename the artifact every run.
          "<title>abox dashboard</title>",
          '<meta name="viewport" content="width=device-width,initial-scale=1">',
+         '<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">',
          "<style>%s</style>" % CSS,
-         "<h1>abox dashboard</h1>",
+         '<div class="hdr"><h1>abox dashboard</h1>'
+         '<button class="ref" type="button" id="refresh" data-v="%d">'
+         "&#8635; Reload status</button></div>"
+         % snap_epoch,
          '<div class="sub">snapshot %s &middot; %d sessions &middot; %d live &middot; '
-         "%d containers &middot; static file, does not auto-refresh</div>"
+         "%d containers &middot; reload after <code>abox-live publish</code> on the box"
          % (esc(when), len(data), sum(1 for s in data if s["live"]),
             len({s["container"] for s in data}))]
 
@@ -371,6 +379,17 @@ document.addEventListener('click',function(e){
     navigator.clipboard.writeText(txt).then(ok,function(){if(btn)btn.textContent='已選取，長按複製'});
   } else if(btn){btn.textContent='已選取，長按複製'}
 });
+(function(){
+  var btn=document.getElementById('refresh'); if(!btn)return;
+  btn.addEventListener('click',function(){
+    btn.disabled=true; btn.textContent='Reloading\\u2026';
+    try{
+      var u=new URL(location.href);
+      u.searchParams.set('v',btn.getAttribute('data-v')||String(Date.now()));
+      location.replace(u.toString());
+    }catch(_){ location.reload(); }
+  });
+})();
 </script>""")
     return "\n".join(p)
 
@@ -481,8 +500,8 @@ def main():
     recent = 0
     if "--recent" in sys.argv:
         recent = int(sys.argv[sys.argv.index("--recent") + 1])
-    elif publish:
-        recent = 180   # dashboards want recently-finished sessions too, not just live
+    # publish is a CURRENT-STATUS dashboard: live sessions only, no ended clutter.
+    # Ended sessions stay reachable via `abox-live ps`; pass --recent N to fold them in.
     data = build("--all" in sys.argv, turns_n, recent)
 
     when = time.strftime("%Y-%m-%d %H:%M:%S")
