@@ -1,9 +1,7 @@
 {
-  "_comment": "Cached CUDA-index <-> PCI-bus map for this box. Keys are bus_key() form 'DDDD:BB:dd' (domain:bus:device, NO .function suffix) -- must match gpu_status.py bus_key(). The map is stable until the host reboots, so normal runs reuse it and only refresh live VRAM/usage via rocm-smi (no torch probe). Invalidated automatically when boot_id changes. Re-seed with: gpu_status.py --remap  (run where torch sees all GPUs; host + empty containers report 'No HIP GPUs' -- use a GPU-healthy container).",
-  "boot_id": "787ba661-bfa9-4273-8466-c9d6098aaec3",
-  "boot_time": "2026-03-25 11:50:18",
-  "generated_at": "2026-06-16T09:11:00Z",
-  "source": "torch probe inside container v0.5.13-rocm720-mi35x-20260614_marv (host + empty containers report 'No HIP GPUs')",
+  "_comment": "Cached CUDA<->PCI map; reused until boot_id changes. Re-seed with gpu_status.py --remap on a GPU-healthy host.",
+  "boot_id": "50ad9445-0b96-4353-bf95-4cf95bbfa30d",
+  "generated_at": "2026-07-31T01:15:24.428059Z",
   "map": {
     "0000:75:00": 0,
     "0000:05:00": 1,

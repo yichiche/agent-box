@@ -1,15 +1,16 @@
 
 export const meta = {
   name: 'implement-e2e',
-  description: 'E2E-gated ALGORITHMIC kernel improvement per target. Each task is optimized by an ALGORITHM change (fuse / replace-asm / restructure — not config tuning), filtered by a MULTI-SHAPE microbench, then gated on its INDIVIDUAL end-to-end serving throughput (sglang.bench_serving total_throughput) measured in ISOLATION vs a clean baseline. Tasks run SEQUENTIALLY on a shared editable aiter; each win is saved as a patch then reverted so the next task measures clean. Report-only; does NOT open a PR.',
+  description: 'E2E-gated ALGORITHMIC kernel improvement per target, with a served-trace PROFILE GATE before e2e. Gate ladder per task: (1) unit test — allclose equivalence vs the reference path; (2) multi-shape microbench filter; (3) PROFILE GATE — capture a prefill trace of the SERVED model with the change applied and prove the target kernel is actually exercised AND its summed time drops vs the shared baseline trace (compare-kernels style); only then (4) the expensive INDIVIDUAL e2e serving-throughput sweep vs a clean baseline. Tasks run SEQUENTIALLY on a shared editable aiter; each win is saved as a patch then reverted so the next task measures clean. Report-only; does NOT open a PR.',
   whenToUse: 'Use when the goal is real e2e/throughput gain (>5% per kernel) from ALGORITHM changes, not microbench tuning. Pass args.tasks=[{ target_op, workload?, regime?, mode?, priority? }] and the e2e config (model/tp/gpus/concurrencies). Gate is per-kernel individual e2e total_throughput, NOT the cumulative sum.',
   phases: [
     { title: 'Baseline', detail: 'One clean-aiter e2e sweep (total_throughput per concurrency + accuracy)' },
     { title: 'Feasibility', detail: 'Optional (amdahl_ref): target kernel share of prefill/e2e + reachability (report-only)' },
     { title: 'Recon', detail: 'Per task: mode, sources, multi-shape microbench, baseline, + a LOCAL test that reproduces the conc=4 trace per-call latency' },
     { title: 'Develop', detail: 'Per task: algorithmic loop, gated on multi-shape microbench (geomean across bs) + allclose' },
-    { title: 'E2E', detail: 'Per task: apply best, staged conc sweep (stage1 gate -> expand), measure total_throughput delta' },
-    { title: 'Profile', detail: 'Optional (profile_concs): conc4/64 prefill traces base vs opt, compare target-kernel sum opt/base' },
+    { title: 'ProfileGate', detail: 'Per task (default ON): OPT prefill trace of the served model vs shared baseline trace — target kernel must be exercised AND improve, else e2e is skipped' },
+    { title: 'E2E', detail: 'Per task (only after ProfileGate passes): staged conc sweep (stage1 gate -> expand), measure total_throughput delta' },
+    { title: 'Profile', detail: 'Optional deep confirm (profile_concs): multi-conc prefill traces base vs opt, compare target-kernel sum opt/base' },
     { title: 'Finalize', detail: 'Per task: patch + revert + report (micro geomean / staged e2e / profile / Amdahl)' },
   ],
 }
@@ -161,6 +162,55 @@ const FEAS_SCHEMA = {
     note: { type: 'string' },
   },
   required: ['note'],
+}
+
+// Baseline prefill traces captured ONCE (shared by every task's ProfileGate — no per-task base re-run).
+const BASE_PROFILE_SCHEMA = {
+  type: 'object',
+  properties: {
+    ran: { type: 'boolean' },
+    per_conc: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          concurrency: { type: 'number' },
+          trace_path: { type: ['string', 'null'], description: 'Raw prefill trace file for this conc' },
+          xlsx_path: { type: ['string', 'null'], description: 'trace_module_analyzer output xlsx for this conc' },
+        },
+        required: ['concurrency'],
+      },
+    },
+    error: { type: 'string' },
+    note: { type: 'string' },
+  },
+  required: ['ran', 'per_conc'],
+}
+
+const PROFILE_GATE_SCHEMA = {
+  type: 'object',
+  properties: {
+    ran: { type: 'boolean' },
+    kernel_found_in_opt: { type: ['boolean', 'null'], description: 'Target kernel name(s) actually appear in the OPT served trace (wired-in check)' },
+    per_conc: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          concurrency: { type: 'number' },
+          base_kernel_us: { type: ['number', 'null'], description: 'Summed target-kernel us in the shared BASELINE trace at this conc' },
+          opt_kernel_us: { type: ['number', 'null'], description: 'Summed target-kernel us in the OPT trace at this conc' },
+          ratio: { type: ['number', 'null'], description: 'opt_kernel_us / base_kernel_us (<= profile_gate_ratio = pass)' },
+          opt_xlsx: { type: ['string', 'null'] },
+        },
+        required: ['concurrency'],
+      },
+    },
+    gate_pass: { type: ['boolean', 'null'], description: 'true iff kernel_found_in_opt AND every conc ratio <= profile_gate_ratio' },
+    error: { type: 'string' },
+    note: { type: 'string' },
+  },
+  required: ['ran', 'per_conc'],
 }
 
 const PROFILE_SCHEMA = {
@@ -335,13 +385,14 @@ ${gpus ? `- GPU PINNING for microbench/op_test: prefix commands with HIP_VISIBLE
 
 // ── Per-task driver ──────────────────────────────────────────────────────────
 
-async function runTaskE2E(spec, e2eCfg, baselineE2E) {
+async function runTaskE2E(spec, e2eCfg, baselineE2E, baselineProfile) {
   const {
     targetOp, modeHint, regime, workload, aiterRootArg,
     perfGatePct, maxRounds, maxNoImprove, minBudgetReserve,
     microGpus, reportPath, patchPath, taskId,
     microGatePct, e2eStage1Concs, e2eStage2Concs, expandGatePct,
     profileConcs, profileKernels, profileGate, profileMode,
+    profileGateConcs, profileGateRatio,
     amdahlRef, amdahlMinSharePct,
   } = spec
 
@@ -351,7 +402,8 @@ async function runTaskE2E(spec, e2eCfg, baselineE2E) {
   log(`[${taskId}] perf_gate=${perfGatePct}% (individual e2e) max_rounds=${maxRounds} converge_after=${maxNoImprove}`)
   if (microGatePct != null) log(`[${taskId}] micro gate: geomean opt/base across bs MUST be >= ${microGatePct}% before e2e`)
   if (e2eStage1Concs) log(`[${taskId}] staged e2e: stage1="${e2eStage1Concs}" (gate ${perfGatePct}%) -> expand "${e2eStage2Concs || '(none)'}" (gate ${expandGatePct}%)`)
-  if (profileConcs) log(`[${taskId}] profile: concs="${profileConcs}" kernels=${JSON.stringify(profileKernels)} gate opt/base<=${profileGate}`)
+  if (profileConcs) log(`[${taskId}] deep profile (post-e2e): concs="${profileConcs}" kernels=${JSON.stringify(profileKernels)} gate opt/base<=${profileGate}`)
+  if (profileGateConcs) log(`[${taskId}] PROFILE GATE (pre-e2e): concs="${profileGateConcs}" served-trace target-kernel opt/base must be <= ${profileGateRatio} AND kernel must be exercised, else e2e is skipped`)
 
   // ── Feasibility (Amdahl) — report-only unless amdahl_min_share_pct set ──
   let feasibility = null
@@ -592,8 +644,62 @@ ${isAuthor ? `Delete new files ${JSON.stringify(recon.sources || [])}; ` : `git 
     return { status: 'apply_failed', target_op: targetOp, kernel_type: recon.kernel_type, mode: recon.mode, best_id: best.id, rounds: history.length, recon }
   }
 
-  // ── Isolated e2e sweep (server picks up the applied edit) ──
+  // ── ProfileGate: prove the kernel improves in the SERVED model before spending e2e ──
   const resultDir = `${spec.outDir}/e2e_runs/${spec.runTag}/${spec.fileTag}`
+  let profileGateRes = null
+  if (profileGateConcs && !(baselineProfile?.per_conc || []).some(p => p.xlsx_path)) {
+    log(`[${taskId}] PROFILE GATE SKIPPED: no shared baseline profile traces — proceeding to e2e WITHOUT kernel-level proof.`)
+  } else if (profileGateConcs) {
+    phase('ProfileGate')
+    const gateKernels = (profileKernels && profileKernels.length) ? profileKernels
+      : ((recon.replaced_kernels || []).length ? recon.replaced_kernels : [targetOp])
+    const gateDir = `${resultDir}/profile_gate`
+    log(`[${taskId}] ProfileGate: OPT ${profileMode} trace at conc="${profileGateConcs}" vs shared baseline — one server run, ~20-45 min.`)
+    profileGateRes = await agent(`
+You are the PROFILE GATE step. PIPELINE_MODE — autonomous, background+poll for the long run. The winning
+change ("${targetOp}", ${best.id}) is APPLIED right now (confirm with git status). Capture a ${profileMode}
+trace of the SERVED model and prove, at the kernel level, that the change (a) is actually exercised and
+(b) makes the target kernel(s) faster than the shared BASELINE trace. Follow the compare-kernels method:
+analyzer xlsx per trace, then compare the target kernels' summed us. This gate decides whether the expensive
+e2e sweep runs at all — report MEASURED numbers only; an absent kernel is a FAIL, not something to paper over.
+
+${REBUILD_GUIDE}
+TARGET KERNEL(S) (match by name substring; from ${profileKernels?.length ? 'args.profile_kernels' : ((recon.replaced_kernels || []).length ? 'recon replaced_kernels' : 'target_op text — refine to real symbols from the baseline xlsx first')}): ${JSON.stringify(gateKernels)}
+GATE CONCURRENCIES: ${profileGateConcs}   MODE: ${profileMode}   GATE: per-conc opt/base ratio <= ${profileGateRatio}
+SHARED BASELINE ANALYZER XLSX (per conc, already on disk — do NOT recapture base):
+${JSON.stringify((baselineProfile?.per_conc || []).map(p => ({ concurrency: p.concurrency, xlsx: p.xlsx_path })), null, 2)}
+PERF_SWEEP: ${PERF_SWEEP}   ANALYZER: /home/yichiche/agent-box/profile/trace_module_analyzer.py
+SERVER: model=${e2eCfg.model} tp=${e2eCfg.tp} gpus=${e2eCfg.gpus} IL=${e2eCfg.inputLen} OL=${e2eCfg.outputLen}
+
+DO (run perf_sweep from cwd /tmp to avoid the sglang import-shadow bug):
+1. rm -rf ${gateDir} first, then capture the OPT trace(s):
+     PROFILE_CONCS="${profileGateConcs}" PROFILE_DIR=${gateDir} MODEL=${e2eCfg.model} TP=${e2eCfg.tp} GPUS=${e2eCfg.gpus}${e2eCfg.port ? ` PORT=${e2eCfg.port}` : ''} \\
+       INPUT_LEN=${e2eCfg.inputLen} OUTPUT_LEN=${e2eCfg.outputLen} CONCURRENCIES="${profileGateConcs}" RESULT_DIR=${gateDir} bash ${PERF_SWEEP}
+2. Per conc trace: python3 /home/yichiche/agent-box/profile/trace_module_analyzer.py <trace> -o ${gateDir}/opt_conc<conc>_${profileMode}.xlsx --mode ${profileMode}
+3. WIRED-IN CHECK: the NEW/optimized kernel symbol(s) must appear in the OPT trace (and, for a replacement,
+   the replaced kernels should shrink/disappear). If the optimized path never shows up, set
+   kernel_found_in_opt=false and gate_pass=false — the change is not actually exercised by the model.
+4. Per conc: opt_kernel_us = summed target-kernel us from YOUR opt xlsx; base_kernel_us = summed target-kernel
+   us from the SHARED baseline xlsx above (same substrings; for a write-new kernel, base = the replaced kernels'
+   sum). ratio = opt/base. gate_pass = kernel_found_in_opt AND every ratio <= ${profileGateRatio}.
+5. LEAVE the change APPLIED (the e2e run needs it live if the gate passes). Return PROFILE_GATE_SCHEMA.
+`, { label: `profile-gate:${taskId}`, phase: 'ProfileGate', schema: PROFILE_GATE_SCHEMA, effort: 'medium' })
+    log(`[${taskId}] ProfileGate: found=${profileGateRes?.kernel_found_in_opt} ${(profileGateRes?.per_conc || []).map(p => `c${p.concurrency} opt/base=${p.ratio?.toFixed?.(3) ?? '?'}`).join(' ')} gate(<=${profileGateRatio})=${profileGateRes?.gate_pass}`)
+    if (!profileGateRes || profileGateRes.gate_pass !== true) {
+      log(`[${taskId}] PROFILE GATE FAIL — the served trace does not show a real kernel win. Skipping e2e, reverting.`)
+      await agent(`Revert aiter to clean baseline (profile gate failed). ${REBUILD_GUIDE}
+${isAuthor ? `Delete new files ${JSON.stringify(recon.sources || [])}; ` : `git -C <AITER_ROOT> checkout -- ${(recon.sources || []).join(' ') || '.'}; `}remove rebuilt .so ${JSON.stringify(recon.so_modules || [])}; confirm clean. One line.`, { label: `revert-profilegate:${taskId}`, phase: 'ProfileGate' })
+      return {
+        status: 'profile_gate_failed', target_op: targetOp, kernel_type: recon.kernel_type, mode: recon.mode,
+        best_id: best.id, micro_geomean_pct: bestGeo,
+        profile_gate: { per_conc: profileGateRes?.per_conc || [], kernel_found_in_opt: profileGateRes?.kernel_found_in_opt ?? null, gate_ratio: profileGateRatio, gate_pass: profileGateRes?.gate_pass ?? null, note: profileGateRes?.note || profileGateRes?.error || '' },
+        patch_path: patchPath, rounds: history.length, feasibility, recon,
+      }
+    }
+    log(`[${taskId}] PROFILE GATE PASS — kernel win proven in the served trace; proceeding to e2e.`)
+  }
+
+  // ── Isolated e2e sweep (server picks up the applied edit) ──
   let e2e, delta
   if (e2eStage1Concs) {
     // Staged: stage1 must clear the gate before spending the expand concs.
@@ -692,7 +798,8 @@ WINNING VARIANT: ${JSON.stringify({ id: best.id, change_summary: best.change_sum
 MICRO geomean across bs: ${bestGeo?.toFixed?.(1) ?? '?'}%${microGatePct != null ? ` (gate ${microGatePct}% — PASSED)` : ''}
 LOCAL REPRO (faithful proxy of conc=4 trace): ${recon.repro_unit_test || 'n/a'} | ${recon.repro_match_note || ''}
 FEASIBILITY (Amdahl): ${feasibility ? JSON.stringify({ kernel_share_pct: feasibility.kernel_share_pct, prefill_share_of_e2e_pct: feasibility.prefill_share_of_e2e_pct, e2e_ceiling_pct: feasibility.e2e_ceiling_pct, reachable: feasibility.reachable }) : 'not run'}
-PROFILE (prefill target-kernel opt/base): ${profile ? JSON.stringify({ per_conc: profile.per_conc, gate_pass: profile.gate_pass, gate: profileGate }) : 'not run'}
+PROFILE GATE (pre-e2e, served-trace kernel proof): ${profileGateRes ? JSON.stringify({ kernel_found_in_opt: profileGateRes.kernel_found_in_opt, per_conc: profileGateRes.per_conc, gate_ratio: profileGateRatio, gate_pass: profileGateRes.gate_pass }) : 'not run'}
+PROFILE (post-e2e deep confirm, target-kernel opt/base): ${profile ? JSON.stringify({ per_conc: profile.per_conc, gate_pass: profile.gate_pass, gate: profileGate }) : 'not run'}
 STAGED E2E: ${e2eStage1Concs ? `stage1="${e2eStage1Concs}" expand="${e2eStage2Concs || '(none)'}" (expanded only if stage1 median Δ>=${perfGatePct}%)` : 'single sweep'}
 BASELINE e2e (per conc total_throughput): ${JSON.stringify(baselineE2E?.per_conc || [])}
 THIS-TASK e2e (per conc total_throughput): ${JSON.stringify(e2e?.per_conc || [])}
@@ -708,9 +815,10 @@ DO:
    (what it replaced/fused/restructured), the op_test (allclose) command + verdict, the LOCAL REPRO command +
    its match-to-conc4-trace note (repro_unit_test / repro_match_note), the multi-shape microbench table
    (shape | baseline us | after us | Δ%) with the GEOMEAN across bs and the micro-gate verdict, the FEASIBILITY
-   (Amdahl) numbers (kernel share of prefill, prefill share of e2e, e2e ceiling, reachable), the STAGED e2e
-   tables (stage1 + expand if it ran) (conc | baseline tok/s | after tok/s | Δ%) with median/min e2e Δ%, the
-   PROFILE table if it ran (conc | base kernel us | opt kernel us | opt/base ratio | gate<=${profileGate}),
+   (Amdahl) numbers (kernel share of prefill, prefill share of e2e, e2e ceiling, reachable), the PROFILE GATE
+   table if it ran (conc | base kernel us | opt kernel us | opt/base ratio | gate<=${profileGateRatio} | wired-in),
+   the STAGED e2e tables (stage1 + expand if it ran) (conc | baseline tok/s | after tok/s | Δ%) with median/min
+   e2e Δ%, the deep PROFILE table if it ran (conc | base kernel us | opt kernel us | opt/base ratio | gate<=${profileGate}),
    GSM8K accuracy (baseline→after with the RELATIVE no-drop verdict; note the absolute ~0.69 is a known checkpoint
    issue, NOT a regression), the perf-gate verdict, and the patch path. Repo-relative paths only in prose.
    Be honest: if the e2e gate failed because the kernel's Amdahl ceiling is below it, SAY SO and report the
@@ -739,10 +847,12 @@ Return the full FINAL schema.
     repro_match_note: recon.repro_match_note ?? null,
     feasibility: feasibility || null,
     profile: profile ? { per_conc: profile.per_conc, gate_pass: profile.gate_pass, gate: profileGate } : null,
-    profile_gate_pass: fb.profile_gate_pass ?? (profile ? profile.gate_pass : null),
+    profile_gate: profileGateRes ? { per_conc: profileGateRes.per_conc, kernel_found_in_opt: profileGateRes.kernel_found_in_opt, gate_ratio: profileGateRatio, gate_pass: profileGateRes.gate_pass } : null,
+    profile_gate_pass: fb.profile_gate_pass ?? (profileGateRes ? profileGateRes.gate_pass : (profile ? profile.gate_pass : null)),
     kernel_win: fb.kernel_win ?? (
       (fb.correct ?? true)
       && (microGatePct == null || (bestGeo != null && bestGeo >= microGatePct))
+      && (profileGateRes == null || profileGateRes.gate_pass === true)
       && (profile == null || profile.gate_pass === true)
     ),
     e2e_improvement_pct_median: fb.e2e_improvement_pct_median ?? delta.median_pct,
@@ -802,10 +912,13 @@ const g = {
   e2eStage1Concs: args?.e2e_stage1_concs || null,    // staged sweep: stage1 (e.g. "4 8 16 32") gates expand
   e2eStage2Concs: args?.e2e_stage2_concs || null,    // stage2 expand (e.g. "64 128"), only if stage1 passes
   expandGatePct: args?.expand_gate_pct ?? 2.0,       // looser gate for the stage2 expand concs
-  profileConcs: args?.profile_concs || null,         // e.g. "4 64" → Profile phase (base vs opt prefill traces)
+  profileConcs: args?.profile_concs || null,         // e.g. "4 64" → optional deep Profile phase AFTER e2e (base vs opt prefill traces)
   profileKernels: Array.isArray(args?.profile_kernels) ? args.profile_kernels : (args?.profile_kernels ? [args.profile_kernels] : []),
-  profileGate: args?.profile_gate ?? 0.70,           // target-kernel-sum opt/base must be <= this
+  profileGate: args?.profile_gate ?? 0.70,           // deep Profile phase: target-kernel-sum opt/base must be <= this
   profileMode: args?.profile_mode || 'prefill',
+  // ProfileGate (pre-e2e, ON by default): the served-trace kernel-level gate. false disables (legacy order).
+  profileGateConcs: args?.profile_gate_concs === false ? null : (args?.profile_gate_concs || '4'),
+  profileGateRatio: args?.profile_gate_ratio ?? 0.97, // target-kernel opt/base in the served trace must be <= this before e2e
   amdahlRef: args?.amdahl_ref || null,               // path to a reference profile xlsx → Feasibility phase
   amdahlMinSharePct: args?.amdahl_min_share_pct ?? null, // optional hard-stop if kernel share below this
 }
@@ -861,6 +974,37 @@ if (!baselineE2E || baselineE2E.ran === false || !(baselineE2E.per_conc || []).l
 }
 log(`Baseline total_throughput: ${(baselineE2E.per_conc || []).map(r => `c${r.concurrency}=${r.total_throughput_tok_s}`).join(' ')} | acc=${baselineE2E.accuracy} (pass=${baselineE2E.acc_pass})`)
 
+// ── Baseline profile traces (once, shared by every task's ProfileGate) ──
+let baselineProfile = null
+if (g.profileGateConcs) {
+  const baseProfDir = `${g.outDir}/e2e_runs/${g.runTag}/baseline_profile`
+  log(`Capturing shared BASELINE ${g.profileMode} trace(s) at conc="${g.profileGateConcs}" for the per-task ProfileGate — one server run.`)
+  baselineProfile = await agent(`
+You are the BASELINE-PROFILE step. PIPELINE_MODE — autonomous, background+poll for the long run. The aiter
+tree is at the CLEAN baseline (confirm with git status; abort with ran=false if task edits are applied).
+Capture per-conc ${g.profileMode} torch-profiler traces of the served model and analyze them. These are the
+shared reference every task's ProfileGate compares against — no task-specific kernel extraction here.
+
+PERF_SWEEP: ${PERF_SWEEP}   ANALYZER: /home/yichiche/agent-box/profile/trace_module_analyzer.py
+SERVER: model=${g.model} tp=${g.tp} gpus=${g.gpus} IL=${g.inputLen} OL=${g.outputLen}
+
+DO (run perf_sweep from cwd /tmp to avoid the sglang import-shadow bug):
+1. rm -rf ${baseProfDir} first (never reuse stale traces), then:
+     PROFILE_CONCS="${g.profileGateConcs}" PROFILE_DIR=${baseProfDir} MODEL=${g.model} TP=${g.tp} GPUS=${g.gpus}${g.port ? ` PORT=${g.port}` : ''} \\
+       INPUT_LEN=${g.inputLen} OUTPUT_LEN=${g.outputLen} CONCURRENCIES="${g.profileGateConcs}" RESULT_DIR=${baseProfDir} bash ${PERF_SWEEP}
+2. For each conc trace found under ${baseProfDir}, run:
+     python3 /home/yichiche/agent-box/profile/trace_module_analyzer.py <trace> -o ${baseProfDir}/base_conc<conc>_${g.profileMode}.xlsx --mode ${g.profileMode}
+3. Return BASE_PROFILE_SCHEMA with the REAL on-disk trace/xlsx paths per conc (verify each file exists and is
+   non-empty; a missing/empty trace means ran=false for that capture — never invent paths).
+`, { label: 'profile:baseline', phase: 'Baseline', schema: BASE_PROFILE_SCHEMA, effort: 'medium' })
+  if (!baselineProfile || baselineProfile.ran === false || !(baselineProfile.per_conc || []).some(p => p.xlsx_path)) {
+    log('WARN: baseline profile capture failed — per-task ProfileGate will be SKIPPED (legacy order: micro gate -> e2e).')
+    baselineProfile = null
+  } else {
+    log(`Baseline profile ready: ${(baselineProfile.per_conc || []).map(p => `c${p.concurrency}=${p.xlsx_path ? 'ok' : 'missing'}`).join(' ')}`)
+  }
+}
+
 // ── Per-task (sequential, isolated) ──
 const results = []
 for (let i = 0; i < taskList.length; i++) {
@@ -894,11 +1038,13 @@ for (let i = 0; i < taskList.length; i++) {
     profileKernels: g.profileKernels,
     profileGate: g.profileGate,
     profileMode: g.profileMode,
+    profileGateConcs: g.profileGateConcs,
+    profileGateRatio: g.profileGateRatio,
     amdahlRef: raw.amdahl_ref || g.amdahlRef,
     amdahlMinSharePct: g.amdahlMinSharePct,
   }
   log(`=== implement-e2e task ${i + 1}/${taskList.length} (${spec.taskId}) target=${spec.targetOp} ===`)
-  const one = await runTaskE2E(spec, e2eCfg, baselineE2E)
+  const one = await runTaskE2E(spec, e2eCfg, baselineE2E, baselineProfile)
   results.push({ task_id: spec.taskId, task_index: i, ...one })
 
   const fatal = one?.status === 'recon_failed' || one?.status === 'baseline_incorrect'

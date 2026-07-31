@@ -1,5 +1,6 @@
 ---
 description: Stage, branch, and commit changes following repo conventions (auto-detects commit-msg hook tag format)
+category: deliver
 ---
 
 # Commit Changes
