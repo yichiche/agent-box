@@ -49,6 +49,7 @@ See [[models/INDEX]] for server script, client script, TP, accuracy gate, and en
 - [[gotchas/container-bench-flags]] — newer `bench_serving` CLI on rocm images
 - [[gotchas/no-edit-running-script]] — don't edit a `.sh` while it's executing
 - [[gotchas/home-scratch-hygiene]] — never drop scratch files in `$HOME` root; use `$AGENT_SCRATCH_DIR`/`$AGENT_RUNS_DIR`
+- [[gotchas/container-session-reflection]] — container claude sessions reflect to host `~/.claude/projects` (root:0600, live); watch with `/abox-live`; `claude-code-key.sh` headless-env + credential-wipe footguns
 
 ## Ops gotchas (server hung / crashed / OOM — check these first)
 

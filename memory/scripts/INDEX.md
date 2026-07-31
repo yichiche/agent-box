@@ -35,6 +35,7 @@ All paths relative to `$HOME` unless noted. **Run from neutral cwd** (`/tmp`) â€
 | `run_docker.sh` | Container launch helper |
 | `run_fp8_accuracy_test.sh` | FP8 accuracy |
 | `run_wan2.2_T2V.sh` / `run_wan_accuracy.sh` | Wan video gen |
+| `run_wan2.2_T2V_deterministic.sh` | Wan T2V determinism run (720p/40-step/seed 42, 8 GPU, `CUBLAS_WORKSPACE_CONFIG=:4096:8`) |
 | `run_det_test.sh` | Determinism test |
 
 ## Agent-box internals
