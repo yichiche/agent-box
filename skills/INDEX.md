@@ -48,6 +48,7 @@
 | [`/benchmark`](benchmark/SKILL.md) | Before/after e2e benchmark of a change |
 | [`/perf-sweep`](perf-sweep/SKILL.md) | Accuracy-gated concurrency sweep |
 | [`/pr-ab-benchmark`](pr-ab-benchmark/SKILL.md) | Before/after A/B benchmark of an aiter/sglang PR |
+| [`/validate-pr`](validate-pr/SKILL.md) | Validate a PR: conc4 kernel before/after (profiling) + gsm8k accuracy + before/after benchmark (conc4~256) → perf table |
 | [`/generate-profile`](generate-profile/SKILL.md) | Capture Chrome-compatible trace |
 | [`/parse-trace`](parse-trace/SKILL.md) | Run trace_module_analyzer (prefill/decode) |
 | [`/perf-summary`](perf-summary/SKILL.md) | Summarize kernel perf into status + action items |
@@ -60,6 +61,7 @@
 | [`/commit-push`](commit-push/SKILL.md) | Commit + push to fork |
 | [`/commit-push-pr`](commit-push-pr/SKILL.md) | Commit + push + PR in one flow |
 | [`/pr`](pr/SKILL.md) | Create a GitHub PR (HackMD draft first) |
+| [`/inferencemax-pr`](inferencemax-pr/SKILL.md) | Bump an InferenceX config to the latest lmsysorg/sglang-rocm image + changelog trigger, then commit-push + raise an English-only PR |
 
 ## infra — GPU / container / environment
 
