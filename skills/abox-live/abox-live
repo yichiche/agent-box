@@ -63,4 +63,8 @@ if [ "${1:-}" = "say" ]; then
   shift
   exec sudo -n python3 "$HERE/abox_say.py" "$@"
 fi
+if [ "${1:-}" = "instruct" ] || [ "${1:-}" = "drain" ] || [ "${1:-}" = "inbox" ]; then
+  cmd="$1"; shift
+  exec sudo -n python3 "$HERE/abox_inbox.py" "$cmd" "$@"
+fi
 exec sudo -n python3 "$HERE/abox_live.py" "$@"

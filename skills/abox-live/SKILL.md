@@ -43,7 +43,10 @@ abox-live path <id>     # print the session's JSONL path
 # act on a live session:
 abox-live stop <id>     # stop a live session (prints the target; needs --yes to act)
 abox-live say <id> "msg"  # send a follow-up to that session via `claude --resume`
-abox-live web           # LOCAL web UI at http://127.0.0.1:8848 — click a session, read it
+abox-live instruct <id> "msg"  # queue instruction (then: abox-live drain --yes)
+abox-live drain [--yes]   # execute queued instructions
+abox-live inbox           # list instruction queue
+abox-live web           # LOCAL web UI — human view + send instructions (POST /api/say)
 # remote dashboard (phone / laptop Claude):
 abox-live publish       # rebuild the stable HTML + print the Artifact params → then call the Artifact tool
 abox-live snapshot -o F # self-contained HTML file for hand-off (SendUserFile), NOT published
@@ -88,6 +91,29 @@ How it routes and guards:
 This overlaps `bridge.sh exec`, but that starts a **fresh** headless agent; `say`
 **continues an existing session** so the agent keeps all its context.
 
+## Remote Control instruction flow (`instruct` / `drain`)
+
+From your phone via **Command Center** (Remote Control), you cannot click buttons on
+the published Artifact — but RC Claude **can run shell commands**. Two paths:
+
+```bash
+abox-live say fda052ce "繼續跑 benchmark"          # immediate (refuses if agent is live)
+abox-live instruct fda052ce "繼續跑 benchmark"     # queue for later
+abox-live drain --yes                              # execute all pending queued items
+abox-live inbox                                    # show queue
+```
+
+**Typical RC loop from phone:**
+1. Open Command Center Remote Control session
+2. Ask: 「列出 container agent 狀態」→ RC runs `abox-live`
+3. Ask: 「叫 session fda052ce 繼續」→ RC runs `abox-live instruct fda052ce "…"` then `abox-live drain --yes`
+4. Or paste the **instruction panel** from the published dashboard (copy-select blocks)
+
+The published dashboard (`abox-live publish`) shows:
+- **Human view** — your instructions + agent replies; internal tool work folded under `⋯ internal steps` (`<details>`)
+- **Instruction panel** per live session — copy-paste `say` / `instruct` commands + natural-language RC prompt
+- **Inbox section** at top — pending queued instructions awaiting `drain`
+
 ## Stopping a session
 
 ```bash
@@ -119,10 +145,10 @@ abox-live publish        # rebuilds the stable HTML, chowns it, prints the Artif
 ```
 
 `publish` owns the stable path, the stable URL, and the title/favicon/description. It
-shows **live sessions only** (a current-status dashboard — ended sessions are clutter
-there; see them with `abox-live ps`, or fold recent ones back in with `abox-live publish
---recent 180`). It ends with a `=== PUBLISH ARTIFACT ===` block listing `file_path` /
-`url` / `title` / `favicon` / `description`.
+shows **live sessions only, always** — there is no arg that folds ended sessions back
+in (a current-status dashboard should never show clutter from finished sessions; see
+those with `abox-live ps` instead). It ends with a `=== PUBLISH ARTIFACT ===` block
+listing `file_path` / `url` / `title` / `favicon` / `description`.
 
 **2. Call the `Artifact` tool with exactly those printed params** — always including
 `url=`. A shell script *cannot* publish; only the Artifact tool can, which is why the
@@ -156,14 +182,21 @@ self-contained file and hand it over the conversation instead:
 
 ```bash
 abox-live snapshot -o /path/out.html            # live sessions + transcripts, embedded
-abox-live snapshot --recent 180                 # also fold in transcripts that ended <180m ago
 abox-live snapshot --turns 200                  # more turns per session (default 120)
 abox-live snapshot --all                        # include other people's containers
 ```
 
+Live sessions only, always — like `publish`, there is no arg that folds ended sessions
+back in (see those with `abox-live ps` instead).
+
 Then deliver it with **SendUserFile** (`display: "render"`). One HTML file, no server,
-no network: a summary table at the top, then one `<details>` block per session holding
-its full transcript (tool calls, results, thinking).
+no network: a summary table at the top, then one `<details>` block per session.
+
+**Human-centric layout (default):** user instructions and agent prose are shown
+directly; internal tool/thinking bursts collapse into expandable `⋯ internal steps`
+blocks. Each live session has an **instruction panel** with copy-paste commands for
+Remote Control (`say`, `instruct`, natural-language prompt). Pass `--raw` for the
+full unfiltered transcript.
 
 The table's **description** column is the session's `/resume`-style title: the Claude
 Code AI title (`ai-title`/`aiTitle` record, newest wins), falling back to a `summary`
@@ -191,10 +224,9 @@ Artifact would upload them to claude.ai.
 
 ## Web UI (`abox-live web`) — only when ports actually work
 
-A click-through view of the same data: sessions in a sidebar (state dot, container,
-cwd, latest line), transcript in the main pane. Filter box narrows by container /
-session / cwd; the list auto-refreshes every 8s and the open transcript refreshes with
-it, holding your scroll position unless you're already at the bottom.
+Human-centric view: sidebar lists sessions; main pane shows **you / agent dialogue**
+with internal work folded in `<details>`. Bottom **say bar** sends instructions directly
+(`POST /api/say`) or queues them (`queue: true`). Toggle "human view" off for raw transcript.
 
 ```bash
 abox-live web                  # foreground, Ctrl-C to stop
@@ -202,6 +234,9 @@ abox-live web --port 9000      # different port
 abox-live web --all            # include other people's containers
 nohup abox-live web >/tmp/aboxweb.log 2>&1 &   # background
 ```
+
+When SSH port-forwarding works, this is the richest interface — read + send in one place.
+For phone-only access, use `publish` + Command Center `instruct`/`drain` instead.
 
 **Binds 127.0.0.1 only** and reads transcripts straight off disk on each request —
 nothing leaves the box. This is deliberate: session transcripts are internal work
@@ -308,10 +343,10 @@ When the user names a container, use `abox-live <name>` to scope the table to it
 
 ## Limits
 
-- Read-only. It cannot steer or resume an agent.
 - Transcripts are appended per turn, so a mid-turn agent shows its last completed turn
   (≈ one turn of lag); AGE is transcript-write age, not process age.
 - Sessions whose process has exited are not shown at all — use `abox-live ps` for history.
+- Published Artifact cannot execute commands — use RC `say`/`instruct`/`drain` or local `web`.
 
 ## Container auth (`claude-container-auth.sh`)
 
