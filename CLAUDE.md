@@ -113,7 +113,7 @@ scripts — stay where they are; do not move or relocate them.
 ## Container Task Execution
 
 **Any task executed inside a container must run Claude Code with the API key, never the personal claude.ai subscription.**
-- Source `agent-box/claude-code-key.sh` in the container — it wires `ANTHROPIC_BASE_URL`/`ANTHROPIC_CUSTOM_HEADERS` to the AMD gateway API key (from `~/.claude_api_key`), so the session bills against the API key instead of the host's subscription.
+- Source `agent-box/skills/abox-live/claude-container-auth.sh` in the container (or `agent-box/fix-claude-auth.sh` to repair) — it wires `ANTHROPIC_BASE_URL`/`ANTHROPIC_CUSTOM_HEADERS` to the AMD gateway API key via an isolated `CLAUDE_CONFIG_DIR`, so the session bills against the API key instead of the host's subscription.
 - Do **not** run `claude /login` inside a container for normal task execution — that authenticates against the personal claude.ai subscription and burns subscription tokens instead.
 - Exception: `claude /login` + `claude --remote-control` inside a container is fine when the explicit goal is Native Remote Control (phone / claude.ai/code live session) — see `memory/bridge/README.md`. That's a deliberate opt-in, not the default for running tasks.
 

@@ -31,7 +31,7 @@ run_step() {
 
 # Steps (echo '' feeds the one prompt in claude-code.sh)
 step_claude_code() { echo '' | bash "$DIR/claude-code.sh"; }
-step_claude_key()  { bash "$DIR/claude-code-key.sh"; }
+step_claude_key()  { bash "$DIR/skills/abox-live/claude-container-auth.sh"; }
 step_gh()          { bash "$DIR/gh-setup.sh"; }
 step_identity()    { bash "$DIR/setup-global-identity-guard.sh"; }
 step_codex()       { bash "$DIR/codex-key.sh"; }

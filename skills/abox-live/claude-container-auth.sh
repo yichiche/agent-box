@@ -42,16 +42,18 @@ if [ -f "${HOST_CLAUDE}/.credentials.json" ]; then
 import json, os, sys
 src, dst = sys.argv[1], sys.argv[2]
 # The guard that the old script was missing: never write onto the host file.
-if os.path.realpath(src) == os.path.realpath(dst):
+if os.path.exists(dst) and os.path.samefile(src, dst):
     sys.exit("[claude] REFUSING to write onto the host credential file (same inode)")
 creds = json.load(open(src))
-creds.pop("claudeAiOauth", None)   # subscription login never enters a container
+creds.pop("claudeAiOauth", None)  # subscription login never enters a container
 if creds:
     with open(dst, "w") as f:
         json.dump(creds, f)
     print(f"[claude] MCP OAuth shared into container ({', '.join(sorted(creds))})")
 else:
-    print("[claude] no MCP OAuth tokens on host yet")
+    if os.path.exists(dst):
+        os.remove(dst)
+    print("[claude] no MCP OAuth tokens — container credentials cleared")
 PY
   chmod 600 "$CFG/.credentials.json" 2>/dev/null || true
 fi
@@ -64,17 +66,20 @@ if [ ! -f "$KEY_FILE" ]; then
 fi
 CLAUDE_KEY=$(cat "$KEY_FILE")
 
-# Idempotent: strip any previous block before re-appending.
+# Idempotent: strip legacy claude-code-key.sh and prior container-env blocks.
 sed -i '/# >>> claude container env >>>/,/# <<< claude container env <<</d' ~/.bashrc 2>/dev/null || true
+sed -i '/^# Claude Code environment$/,/^export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1$/d' ~/.bashrc 2>/dev/null || true
 cat >> ~/.bashrc <<EOF
 # >>> claude container env >>>
 export CLAUDE_CONFIG_DIR="${CFG}"
 export ANTHROPIC_API_KEY="dummy"
 export ANTHROPIC_BASE_URL="https://llm-api.amd.com/Anthropic"
 export ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key:${CLAUDE_KEY}"
-export ANTHROPIC_MODEL="claude-opus-4-8[1m]"
-export ANTHROPIC_DEFAULT_OPUS_MODEL="claude-opus-4-8[1m]"
-export ANTHROPIC_DEFAULT_SONNET_MODEL="claude-sonnet-4-6[1m]"
+export ANTHROPIC_MODEL="claude-opus-5[1m]"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="claude-opus-5[1m]"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="claude-sonnet-5[1m]"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="Claude-Haiku-4.5"
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 # <<< claude container env <<<
 EOF
 
