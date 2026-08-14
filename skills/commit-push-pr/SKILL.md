@@ -58,9 +58,14 @@ interactive flow; only the "ask the user" gates are replaced by CONFIG values.
      (`--web`, `curl` REST POST, prefill URL). In pipeline_mode do NOT block on the user —
      record the failure and return `status: fail` with the reason.
 
+5b. **Tag `run-ci` label** (when `<repo>` is `sgl-project/sglang` and the PR was created
+    programmatically): follow Step 9b below. Non-fatal on failure — record
+    `run_ci_tagged: true/false` in the return JSON.
+
 6. Cleanup: `cd "$sglang_root"` then `git worktree remove <worktree>` (keep the local branch).
 
-7. Return JSON: `{ slug, commit_hash, pr_url, status }` (`status` = `pass`/`fail`, plus `error` if failed).
+7. Return JSON: `{ slug, commit_hash, pr_url, run_ci_tagged, status }` (`status` = `pass`/`fail`,
+   plus `error` if failed).
 
 ---
 
@@ -245,7 +250,7 @@ gh pr create \
 
 Use `--body-file` (not `--body`) so the draft markdown is passed verbatim without shell-escaping issues.
 
-If this succeeds: capture the printed PR URL and skip to Step 10.
+If this succeeds: capture the printed PR URL and skip to Step 9b.
 
 If Attempt 1 fails with an **auth error** (e.g., "please run `gh auth login`", "token lifetime", "OAuth token", expired/invalid token), do NOT fall through to Attempt 2 immediately. Instead:
 
@@ -287,7 +292,7 @@ jq -Rn --arg title "<title>" \
     https://api.github.com/repos/<base_repo>/pulls
 ```
 
-If this returns the PR JSON: extract `.html_url` and skip to Step 10.
+If this returns the PR JSON: extract `.html_url` and skip to Step 9b.
 
 ### Attempt 4 — Print a prefill URL for manual creation
 
@@ -329,13 +334,43 @@ Build a manual creation URL that prefills the title and body via query string pa
 
 **Do NOT delete the draft file** — it stays as a record regardless of which attempt succeeded.
 
+For Attempt 2 (`--web`) or Attempt 4 (manual prefill URL), the PR is created outside the API — skip Step 9b and tell the user to comment `/tag-and-rerun-ci` on the PR after they submit it in the browser.
+
+## Step 9b: Tag `run-ci` label (sglang only)
+
+**When:** Immediately after a PR is successfully created via API (Step 9 Attempt 1 or 3, or PIPELINE_MODE step 5). Skip if the PR target is not `sgl-project/sglang`.
+
+SGLang CI is gated on the `run-ci` label. Adding it fires a `pull_request.labeled` event that dispatches `pr-test.yml` on the current commit.
+
+1. Get the PR number from the create output URL, or:
+   ```bash
+   GH_TOKEN="" gh pr view --repo sgl-project/sglang --json number,labels -q '.number'
+   ```
+
+2. Check existing labels; skip if `run-ci` is already present:
+   ```bash
+   GH_TOKEN="" gh pr view <num> --repo sgl-project/sglang --json labels -q '.labels[].name'
+   ```
+
+3. Add the label (always prefix `GH_TOKEN=""` per repo-config):
+   ```bash
+   GH_TOKEN="" gh pr edit <num> --repo sgl-project/sglang --add-label run-ci
+   ```
+
+4. If that fails (GraphQL/projects-classic deprecation or permission), REST fallback:
+   ```bash
+   GH_TOKEN="" gh api -X POST repos/sgl-project/sglang/issues/<num>/labels -f labels[]=run-ci
+   ```
+
+5. If both fail: note in the report that CI was not triggered automatically. The user should comment `/tag-and-rerun-ci` on the PR or ask a maintainer listed in [CI_PERMISSIONS.json](https://github.com/sgl-project/sglang/blob/main/.github/CI_PERMISSIONS.json).
+
 ## Step 10: Report back
 
 After the PR is created, show the user:
 - The PR URL
 - A summary of the full flow: what was committed, where it was pushed, and the PR link
 - The draft file location for reference
-- For sglang: remind them about the review process (ping merge oncalls, get CODEOWNER approvals, trigger CI)
+- For sglang: whether the `run-ci` label was added (Step 9b), and remind them about the review process (ping merge oncalls, get CODEOWNER approvals)
 
 ## Step 11: Offer to return to the base branch
 
