@@ -398,6 +398,17 @@ Rules:
 | Custom `SGLANG_OPT_*` env var for gating | `_use_aiter` or `_is_hip` flag |
 | `_use_aiter` for non-aiter Triton kernel | `_is_hip` (aiter not required) |
 
+### Related skills
+
+| Skill | Use when |
+|-------|----------|
+| `/add-jit-kernel` | Adding a new lightweight kernel (CUDA jit_kernel or ROCm Triton) |
+| `/add-sgl-kernel` | Adding heavyweight AOT kernel (CUDA sgl-kernel or aiter C++/HIP) |
+| `/kl-consistency-test` | Prefill/decode KL gate after kernel change |
+| `/debug-kernel-crash` | GPU crash / NaN / illegal memory access during dev |
+| `/kernel-profile-triage` | Find optimization targets from a trace |
+| `/validate-pr` | Before/after benchmark + profiling gate |
+
 ### Implementation Checklist
 
 Before declaring done:
