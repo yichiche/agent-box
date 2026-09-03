@@ -15,7 +15,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../../env.sh"
 
-# Container-LOCAL config dir. Not a bind mount -> nothing here can reach the host.
+# Container config dir (overlay). Credentials stay here so the host login is
+# never overwritten. Session files are symlinked onto NFS ~/.claude below.
 CFG="${CLAUDE_CONFIG_DIR:-/root/.claude-local}"
 HOST_CLAUDE="${HOST_HOME}/.claude"
 mkdir -p "$CFG"
@@ -30,9 +31,45 @@ link "${HOST_CLAUDE}/commands"             commands
 link "${HOST_CLAUDE}/agents"               agents
 link "${HOST_CLAUDE}/plugins"              plugins
 
-# Deliberately NOT linked (must stay container-local, or they collide across
-# containers): projects/, history.jsonl, shell-snapshots/, todos/, sessions/,
-# statsig/, .credentials.json
+# Session store lives on the host NFS home so `claude resume` still works after
+# the container is recreated on another node. Credentials / statsig stay local.
+link_session() {
+    local host_item="$1" name="$2"
+    local cfg_item="$CFG/$name"
+    mkdir -p "$(dirname "$host_item")" "$(dirname "$cfg_item")"
+    if [[ -L "$cfg_item" ]]; then
+        ln -sfn "$host_item" "$cfg_item"
+        return 0
+    fi
+    if [[ -d "$cfg_item" ]]; then
+        mkdir -p "$host_item"
+        if [[ -n "$(ls -A "$cfg_item" 2>/dev/null || true)" ]]; then
+            cp -a "$cfg_item"/. "$host_item"/ 2>/dev/null || true
+        fi
+        rm -rf "$cfg_item"
+    elif [[ -f "$cfg_item" ]]; then
+        if [[ -s "$cfg_item" ]]; then
+            if [[ -s "$host_item" ]]; then
+                cat "$cfg_item" >> "$host_item" || true
+                rm -f "$cfg_item"
+            else
+                mv "$cfg_item" "$host_item"
+            fi
+        else
+            rm -f "$cfg_item"
+        fi
+    fi
+    ln -sfn "$host_item" "$cfg_item"
+}
+mkdir -p "${HOST_CLAUDE}/projects" "${HOST_CLAUDE}/sessions" "${HOST_CLAUDE}/todos"
+[[ -f "${HOST_CLAUDE}/history.jsonl" ]] || : > "${HOST_CLAUDE}/history.jsonl"
+link_session "${HOST_CLAUDE}/projects"     projects
+link_session "${HOST_CLAUDE}/sessions"     sessions
+link_session "${HOST_CLAUDE}/todos"        todos
+link_session "${HOST_CLAUDE}/history.jsonl" history.jsonl
+
+# Still container-local (must not touch the host): shell-snapshots/, statsig/,
+# .credentials.json
 
 # ------------------------------------------------- 2. MCP OAuth tokens (Jira)
 # Copy host MCP tokens in, MINUS the claude.ai subscription login, so /mcp works
@@ -60,8 +97,12 @@ fi
 
 # --------------------------------------------------------- 3. API-key auth
 KEY_FILE="${HOST_HOME}/.claude_api_key"
+if [[ ! -f "$KEY_FILE" && -f /root/.claude_api_key ]]; then
+  KEY_FILE="/root/.claude_api_key"
+fi
 if [ ! -f "$KEY_FILE" ]; then
   echo "[claude] ERROR: $KEY_FILE not found — cannot authenticate container." >&2
+  echo "[claude] Run ~/run_docker.sh once on the host to save the gateway key locally." >&2
   exit 1
 fi
 CLAUDE_KEY=$(cat "$KEY_FILE")

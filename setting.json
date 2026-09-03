@@ -33,6 +33,6 @@
   "effortLevel": "xhigh",
   "tui": "default",
   "skipWorkflowUsageWarning": true,
-  "theme": "light",
+  "theme": "dark",
   "agentPushNotifEnabled": true
 }
