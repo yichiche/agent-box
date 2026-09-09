@@ -15,10 +15,114 @@ jacky.cheng <yichiche@amd.com>
 |---|---|---|---|---|
 | `$SGLANG_ROOT` (detect via `python3 -c "import sglang, pathlib; print(pathlib.Path(sglang.__file__).resolve().parents[2])"`) | `https://github.com/yichiche/sglang` | `sgl-project/sglang` | `main` | No — must use feature branch |
 | `$HOME/agent-box` | `https://github.com/yichiche/agent-box` | `yichiche/agent-box` | `main` | Yes — commit directly on main |
+| InferenceX / InferenceMax (detect via `git rev-parse --show-toplevel` basename `InferenceX`, e.g. `/sgl-workspace/InferenceX`) | `origin` → `https://github.com/SemiAnalysisAI/InferenceX` (**direct push, no fork**) | `SemiAnalysisAI/InferenceX` | `main` | No — must use an `amd/<branch_name>` branch |
 
 **IMPORTANT:** The SGLang repo root may be at different paths on different machines (e.g., `/sgl-workspace/sglang`, `$HOME/sglang`). Always detect it dynamically from the active Python environment instead of hardcoding a path.
 
 For any repo not listed above, ask the user for the remote URL, PR base repo, and base branch.
+
+## InferenceX / InferenceMax (`SemiAnalysisAI/InferenceX`)
+
+Also referred to as **InferenceMax** — the repo is `InferenceX`, the benchmark/dashboard the user
+and others call InferenceMax. Treat both names as the same target.
+
+Benchmark-recipe repo (config YAML + launcher scripts), **not** a code repo. Read `AGENTS.md`,
+`CONTRIBUTING.md`, and `.claude/commands/nuke.md` in the checkout before editing — they are the
+source of truth and override anything here.
+
+### Branch and title conventions (NON-NEGOTIABLE)
+
+- **Branch**: `amd/<branch_name>`, pushed **to the InferenceX repo itself** (`origin` =
+  `SemiAnalysisAI/InferenceX`), not to a personal fork. The PR is opened from that branch to `main`.
+  Do NOT use `klaud-cold/*` — that namespace belongs to the automated `/nuke` cron bumps.
+- **Title / commit subject**: `[AMD][<model_name>] <title>` — two bracket tags, e.g.
+  `[AMD][Qwen3.5] …`, `[AMD][DSV4] …`, `[AMD][GLM5.2] …`. Confirm the existing spelling of the
+  model tag with `git log origin/main --format='%s' -200 | grep -oE '^\[[^]]+\]\[[^]]+\]'`; the repo
+  also uses SKU/scenario tags such as `[AMD][MI35X]` and `[AMD][AgentX]` where that fits better.
+- **English only.** The repo's `AGENTS.md` asks for bilingual PR text, but the user has overridden
+  this: write **no Chinese characters** in commit subjects, commit bodies, PR titles, PR bodies, or
+  PR comments. English only, everywhere.
+
+### Push (credential helper is NOT configured)
+
+Plain `git push` fails with `fatal: could not read Username for 'https://github.com'` even though
+`gh auth status` is logged in (the gh config lives at `/home/yichiche/.gh`, and `gh auth setup-git`
+does not stick). Push through gh's credential helper inline — this does not mutate any git config:
+
+```bash
+GIT_CONFIG_COUNT=1 \
+GIT_CONFIG_KEY_0=credential.helper \
+GIT_CONFIG_VALUE_0='!gh auth git-credential' \
+git push -u origin <branch>
+```
+
+`GH_TOKEN=""` is **not** needed here — the OAuth token works against this repo.
+
+### `gh pr edit` is broken on this repo
+
+Any `gh pr edit` / `gh pr view` call that touches PR metadata fails with:
+`GraphQL: Projects (classic) is being deprecated … (repository.pullRequest.projectCards)`.
+Use the REST API for edits, and `gh api` for reads:
+
+```bash
+gh api -X PATCH repos/SemiAnalysisAI/InferenceX/pulls/<num> -f title="<title>"
+gh api -X PATCH repos/SemiAnalysisAI/InferenceX/pulls/<num> -f body="$(cat <draft-file>)"
+gh api repos/SemiAnalysisAI/InferenceX/pulls/<num> --jq '.title'
+gh api -X POST repos/SemiAnalysisAI/InferenceX/issues/<num>/labels -f 'labels[]=full-sweep-fail-fast'
+```
+
+`gh pr create --label full-sweep-fail-fast` and `gh pr checks <num>` both work fine.
+
+### Mandatory per-PR requirements
+
+- **`perf-changelog.yaml` entry.** Every recipe change or perf-affecting change needs one. CI job
+  `check-changelog` fails without it. The file is **append-only and byte-sensitive**: preserve all
+  existing bytes and separator whitespace, append only at the tail, and it **must end with a
+  trailing newline** (CI errors with `perf-changelog.yaml at <sha> does not end with a newline`).
+- **`full-sweep-fail-fast` label** on the PR, or no benchmark sweep runs. Prefer it over
+  `full-sweep-enabled` — a broken change burns one job per matrix instead of the full fan-out.
+- **Commit subject `[AMD][<model_name>] <title>`** — see the conventions section above.
+- **`Co-Authored-By` for humans is allowed** on this repo (unlike sglang) when the user names one.
+  Resolve the noreply address from the numeric id: `gh api users/<login> --jq '.id'` →
+  `<login> <id>+<login>@users.noreply.github.com`. Still **never** add a Claude co-author trailer.
+- **No pre-commit config** exists in this repo — skip the pre-commit loop.
+
+### Editing config YAML safely
+
+`configs/amd-master.yaml` / `configs/nvidia-master.yaml` reuse the same image tag under many
+top-level keys, so a blind `sed` is unsafe. Edit the `image:` line scoped to the specific config
+key (see the `edit_image.py` helper in `.claude/commands/nuke.md`), or use `Edit` with the config
+key line included in `old_string` for uniqueness.
+
+Before bumping an image tag, verify it exists — never invent a tag. AMD/ROCm SGLang tags live in
+`lmsysorg/sglang-rocm`, **not** `lmsysorg/sglang` (the ROCm-suffixed tag 404s there):
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" \
+  "https://hub.docker.com/v2/repositories/lmsysorg/sglang-rocm/tags/<TAG>"   # want 200
+```
+
+### Python file-rewrite footgun (cost a broken CI run)
+
+Never write `open(f,'w').write(open(f).read().replace(...))` — `open(f,'w')` truncates the file
+before the inner read runs, silently emptying it. Always read first, then write:
+
+```python
+c = open(f).read()
+c = c.replace(old, new, 1)
+if not c.endswith('\n'): c += '\n'
+open(f, 'w').write(c)
+```
+
+After any scripted edit to `perf-changelog.yaml`, verify before committing:
+
+```bash
+python3 -c "
+import yaml; d=open('perf-changelog.yaml','rb').read()
+assert d.endswith(b'\n'), 'missing trailing newline'
+print('entries', len(yaml.safe_load(d.decode())))"
+git diff origin/main --stat   # expect a small, additive diff
+```
 
 ## Prerequisites
 

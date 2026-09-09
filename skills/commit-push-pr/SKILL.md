@@ -69,6 +69,40 @@ interactive flow; only the "ask the user" gates are replaced by CONFIG values.
 
 ---
 
+## Repo-specific fast paths
+
+Detect the repo in Step 1. If it is **InferenceX** — also called **InferenceMax** —
+(`SemiAnalysisAI/InferenceX`), read the InferenceX section of `_shared/repo-config.md` **before**
+Step 2 and apply these deltas:
+
+- **Step 2 (push target)**: push goes to `origin` = `SemiAnalysisAI/InferenceX` directly — there is
+  no fork. Base `main`. The working branch must be named **`amd/<branch_name>`**; if the current
+  branch is not, create one (`git checkout -b amd/<name>`) before pushing. Titles and commit
+  subjects are **`[AMD][<model_name>] <title>`** (e.g. `[AMD][Qwen3.5] …`).
+- **Step 3 (commit/push)**: no pre-commit config exists — skip the lint loop. Plain `git push`
+  fails on a missing credential helper; use the `GIT_CONFIG_COUNT=1 … '!gh auth git-credential'`
+  prefix from repo-config. A human `Co-Authored-By` trailer is allowed here when the user names one;
+  a Claude co-author trailer never is.
+- **Step 6 (data collection)**: for recipe/config/image-bump PRs there is no local benchmark to
+  collect — the GPU sweep runs in CI. Skip 6a-6c and instead record the evidence that the change is
+  valid (e.g. the Docker Hub tag check returning 200), then go straight to Step 7.
+- **Step 7 (draft)**: use `_shared/pr-template-simple.md`. Write **English only — no Chinese
+  characters anywhere** (this overrides the bilingual rule in the repo's `AGENTS.md`); the same
+  applies to commit messages and PR comments. Every recipe or perf-affecting change
+  also needs an appended `perf-changelog.yaml` entry **in the same commit** — see repo-config for the
+  append-only / trailing-newline rules and the read-then-write footgun.
+- **Step 9 (submit)**: `gh pr create --label full-sweep-fail-fast` works. Any later title/body edit
+  must go through `gh api -X PATCH repos/.../pulls/<num>` — `gh pr edit` fails on this repo with a
+  projects-classic GraphQL deprecation error.
+- **Step 9b**: not applicable (that is sglang's `run-ci` label). The InferenceX equivalent is the
+  `full-sweep-fail-fast` label, already applied at create time. Verify with
+  `gh pr checks <num> --repo SemiAnalysisAI/InferenceX`.
+- **After creating the PR**: patch the `pr-link:` placeholder in the `perf-changelog.yaml` entry with
+  the real PR URL, amend, and force-push. Re-verify the trailing newline and `git diff origin/main
+  --stat` before pushing — an amend is the step most likely to silently corrupt that file.
+- **Bulk image bumps** across many recipes are a different job — use the repo's `/nuke` command
+  (`.claude/commands/nuke.md`), which owns the one-PR-per-model+precision+SKU grouping rules.
+
 ## Step 0: Ensure `gh` CLI is available and authenticated
 
 Check that the GitHub CLI is the real one (v2.x+, not the pip `gh` v0.0.4):
