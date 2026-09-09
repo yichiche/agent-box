@@ -202,5 +202,6 @@ This applies to all `gh` commands that target `sgl-project/sglang`. Commands tar
 - NEVER commit or push .env files, credentials, or secrets
 - NEVER push to `main` or `master` directly (exception: agent-box allows it)
 - NEVER create PRs to branches other than `main` unless the user explicitly asks
-- ALWAYS confirm with the user before pushing
-- ALWAYS confirm the commit message with the user before committing
+- ALWAYS confirm with the user before pushing (exception: `$HOME/agent-box` — standing
+  authorization to commit on `main` and push to `origin` without asking)
+- ALWAYS confirm the commit message with the user before committing (same agent-box exception)
