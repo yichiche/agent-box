@@ -138,7 +138,30 @@ of this workflow. Serve the real app locally with the CSV already on the chart:
 ```
 
 It copies the CSVs into the app's `public/`, starts Vite on 127.0.0.1:5173 if it
-is not already up, and prints the SSH tunnel command plus a `?seed=` URL per CSV.
+is not already up, and prints how to reach it plus a `?seed=` URL per CSV.
+
+**Reaching it: let the editor forward the port, do not build a tunnel by hand.**
+The agent container shares the **host network namespace**, so `127.0.0.1:5173` is
+the GPU host's own loopback — a Cursor/VS Code Remote-SSH server running on that
+host sees it directly. Tell the user:
+
+> PORTS panel → Forward a Port → `5173` → Open in Browser
+> (or `Ctrl+Shift+P` → `Simple Browser: Show` → the URL, to view inside the editor)
+
+The editor picks a free local port itself. Only fall back to `ssh -L` when the
+user has no Remote-SSH session. Two things that bite on that fallback, both hit
+for real:
+
+- The **short hostname often does not resolve** off-cluster; use `hostname -f`.
+- **A low local port can be refused on Windows** (`bind [127.0.0.1]:5173:
+  Permission denied`) because Hyper-V/WSL/Docker reserve dynamic TCP ranges —
+  nothing is listening, the range is just reserved. Forward to a high local port
+  (`-L 15173:localhost:5173`); the remote port is unchanged.
+
+Confirm the namespace before claiming any of this — `readlink /proc/self/ns/net`
+matching `/proc/1/ns/net`, plus `hostname -I` showing the host's addresses. In a
+container with its own network namespace, a loopback bind is invisible to the
+host and the server must bind `0.0.0.0` instead.
 
 Setup, once per machine:
 

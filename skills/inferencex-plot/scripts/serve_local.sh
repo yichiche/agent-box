@@ -51,12 +51,21 @@ LOCAL_PORT="${INFERENCEX_LOCAL_PORT:-1$PORT}"
 
 echo "Server up on 127.0.0.1:$PORT ($HOST_NAME)"
 echo
-echo "On your laptop (keep this session open):"
+echo "If your editor is connected to this host over Remote-SSH (Cursor/VS Code),"
+echo "do NOT open an ssh tunnel yourself - it forwards ports for you:"
+echo "  PORTS panel -> Forward a Port -> $PORT -> Open in Browser"
+echo "  or Ctrl+Shift+P -> 'Simple Browser: Show' -> the URL below"
+echo "(This container shares the host network namespace, so 127.0.0.1:$PORT is"
+echo " the host's loopback and the remote server can see it.)"
+echo
+echo "Otherwise, from a plain terminal on your laptop (keep the session open):"
 echo "  ssh -L $LOCAL_PORT:localhost:$PORT $SSH_USER@$HOST_NAME"
 [ -n "$HOST_IP" ] && echo "  # if the hostname does not resolve:"
 [ -n "$HOST_IP" ] && echo "  ssh -L $LOCAL_PORT:localhost:$PORT $SSH_USER@$HOST_IP"
 echo
-echo "Then open:"
+echo
+echo "URLs (use the editor-forwarded port if you took that route):"
 for f in "${files[@]}"; do
-  echo "  http://localhost:$LOCAL_PORT/InferenceXCurve/?seed=$(basename "$f")"
+  echo "  http://localhost:$PORT/InferenceXCurve/?seed=$(basename "$f")   # editor-forwarded"
+  echo "  http://localhost:$LOCAL_PORT/InferenceXCurve/?seed=$(basename "$f")   # manual ssh -L"
 done
