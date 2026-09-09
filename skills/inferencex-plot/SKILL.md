@@ -1,17 +1,22 @@
 ---
 name: inferencex-plot
-description: "Turn local benchmark output into an import-ready CSV for the InferenceX Curve site (https://duyi-wang.github.io/InferenceXCurve/), so curves land on the chart in one Import File click instead of being typed point by point. Accepts a perf-sweep run dir, summary.csv, benchmark_serving result JSONs, or numbers pasted into the chat, converts units to the site's contract (tok/s/gpu, tok/s/user, ms→s), and validates before writing. Use when the user says '/inferencex-plot', 'plot these on InferenceX Curve', 'make a CSV for InferenceXCurve', or wants a before/after Pareto curve on that site."
+description: "Plot benchmark numbers on the InferenceX Curve chart and serve the result locally, already loaded, so the user opens a URL instead of downloading a CSV and clicking Import File. Accepts a perf-sweep run dir, summary.csv, benchmark_serving result JSONs, or numbers pasted into the chat; converts units to the site's contract (tok/s/gpu, tok/s/user, ms→s), keeps the Pareto frontier by default, merges topologies into one line per SKU, validates, then serves it. Use when the user says '/inferencex-plot', 'plot these on InferenceX Curve', 'make a CSV for InferenceXCurve', or wants a before/after Pareto curve on that site."
 category: meta
 ---
 
-# inferencex-plot — benchmark output → InferenceX Curve CSV
+# inferencex-plot — benchmark output → a chart the user can just open
 
 The site: <https://duyi-wang.github.io/InferenceXCurve/> (repo `duyi-wang/InferenceXCurve`).
 
-It has **no URL/query data loading** — data lives in the browser's `localStorage`.
-So the only agent-side integration point is: **write a contract-valid CSV → the
-user clicks `Import File` → they manipulate the chart in the UI.** That is the
-whole point of this skill; do not try to drive the chart itself.
+The **published** site has no URL/query data loading — data lives in the browser's
+`localStorage`, so there it is: write a contract-valid CSV → the user clicks
+`Import File`. Do not try to drive that chart remotely.
+
+**Prefer not to leave them there.** Run the app locally with a `?seed=` bootstrap
+and the user opens one URL to a chart that is already loaded — no download, no
+upload, and `InferenceX Sync` works because the dev proxy sidesteps the API's
+missing CORS headers. See *Preferred delivery* below. The CSV is still the
+artifact; the local server is just how it gets delivered.
 
 ## When to use
 
@@ -189,21 +194,27 @@ Two payoffs beyond skipping the round trip:
 - **The user's browser stays clean** — no token pasted into the site, no
   CORS-unblocking extension left enabled.
 
-### Two failure modes that make a seed silently no-op
+### Three failure modes that make a seed silently no-op
 
-Both were hit for real; the import reports success while the chart is unchanged.
+All hit for real. In every one the in-page status still reads "Appended N lines"
+while the chart is unchanged, so **never treat that message as verification**.
 
-1. **Seeding before the app finishes initializing.** The app boots asynchronously
-   and loads its example data during init, overwriting anything seeded at module
-   scope. Wait for `#model-filter` to have options before importing.
-2. **Not moving the filters.** The lines import fine but the filter selects keep
-   their default model and scenario, so the chart still draws the example series.
-   Set `#model-filter`, `#scenario-filter`, `#precision-filter`, `#mtp-filter`
-   from the CSV's first data row and dispatch `change` on each.
+1. **Seeding before the app finishes initializing.** It boots asynchronously and
+   loads its example data during init, overwriting anything seeded at module
+   scope. "`#model-filter` has options" is *not* enough — the app renders once
+   from partial state and keeps loading. Wait for the option list to **stop
+   changing** (consecutive stable polls), then import.
+2. **Not moving the filters.** The lines import fine but the selects keep their
+   default model and scenario, so the chart still draws the example series. Set
+   `#model-filter`, `#scenario-filter`, `#precision-filter`, `#mtp-filter` from
+   the CSV's first data row and dispatch `change` on each.
+3. **Verifying only on a warm server.** The init race only opens when the first
+   page load is slow, so a seed can pass every warm run and fail the moment the
+   server is restarted. After the import, assert the seeded model is present in
+   `#model-filter` and retry if not.
 
-Verify with Playwright rather than trusting the status text — the in-page
-"Appended N lines" message appears in both failure modes. Check that the model
-option list actually contains the seeded model, and screenshot the chart.
+Verify with Playwright: check the model option list, and screenshot the chart.
+**Test cold, warm, then cold again** — a single warm pass proves nothing.
 
 ## Output location — ALWAYS `/home/yichiche/inferencex-plots/`
 
@@ -341,12 +352,22 @@ hand-edit rows afterwards.
 
 ## Reporting to the user
 
-Give them the path, then the import steps, then the echoed CSV (the benchmark
-usually runs in a container while the browser is on their laptop, so the
-copy/paste fallback matters):
+Lead with the **URL they can open right now**, then the file path, then what the
+Pareto filter dropped. Do not lead with a CSV path and import instructions — that
+is the fallback, not the deliverable.
+
+> Cursor PORTS → Forward a Port → `5173` → open
+> `http://localhost:5173/InferenceXCurve/?seed=<name>.csv`
+
+Only when there is no local server (no Remote-SSH, npm unavailable, the user
+wants it on the published site) fall back to:
 
 > Open <https://duyi-wang.github.io/InferenceXCurve/#/inferencex> → `Import File`
 > → pick the CSV → review the staged lines → `Add`.
+
+State the kept/total point count and the dropped concurrencies, and flag any
+metric that is not what the site's axis labels imply — e.g. P90 values sitting in
+the base `Interactivity`/`TTFT`/`End-to-end` columns.
 
 Zero/negative values block the site's Log Scale toggle; the script warns, so
 pass the warning along.
@@ -366,6 +387,11 @@ land in the transcript, tell them to revoke it.
 Token guidance from the site's README: repo you own ⇒ fine-grained PAT with
 `Actions: Read-only` on that repo; private repo owned by someone else ⇒ classic
 PAT with `repo` scope.
+
+**Running locally removes the token question entirely** for Sync (the dev proxy
+makes it same-origin), and the agent can fetch `/api/v1/*` server-side with no
+browser at all — that is how the published MI355X and B200 curves in the worked
+example were pulled. Prefer that over asking the user for a token.
 
 **Token-free alternative:** `Import File` also accepts `.zip`, and unpacks it in
 the browser. So `gh run download <id>` locally, then import the artifact zip

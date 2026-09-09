@@ -27,8 +27,10 @@ done
 # Bind to loopback only; reach it with an SSH tunnel rather than exposing the
 # port to the network.
 if ! curl -sf -o /dev/null -m 3 "http://127.0.0.1:$PORT/InferenceXCurve/"; then
-  (cd "$APP" && nohup npx vite --host 127.0.0.1 --port "$PORT" --strictPort \
-      > /tmp/inferencex-curve.log 2>&1 &)
+  # </dev/null matters: without it the background child keeps this script's
+  # stdin/stdout open and the script never returns when its output is piped.
+  (cd "$APP" && setsid nohup npx vite --host 127.0.0.1 --port "$PORT" --strictPort \
+      < /dev/null > /tmp/inferencex-curve.log 2>&1 &)
   for _ in $(seq 30); do
     curl -sf -o /dev/null -m 2 "http://127.0.0.1:$PORT/InferenceXCurve/" && break
     sleep 1
@@ -42,8 +44,8 @@ curl -sf -o /dev/null -m 3 "http://127.0.0.1:$PORT/InferenceXCurve/" \
 # not fall back to IPv4 fails with "connection reset". Bridge the IPv6 loopback
 # instead of binding 0.0.0.0, which would expose the port to the whole LAN.
 if ! curl -sf -o /dev/null -m 3 "http://[::1]:$PORT/InferenceXCurve/"; then
-  (nohup node "$(dirname "$0")/ipv6_loopback_bridge.js" "$PORT" \
-      > /tmp/inferencex-ipv6-bridge.log 2>&1 &)
+  (setsid nohup node "$(dirname "$0")/ipv6_loopback_bridge.js" "$PORT" \
+      < /dev/null > /tmp/inferencex-ipv6-bridge.log 2>&1 &)
   sleep 2
   curl -sf -o /dev/null -m 3 "http://[::1]:$PORT/InferenceXCurve/" \
     || echo "warning: IPv6 loopback bridge did not come up; see /tmp/inferencex-ipv6-bridge.log" >&2
