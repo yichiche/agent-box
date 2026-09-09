@@ -127,6 +127,52 @@ Relay the kept/total count and the dropped concurrencies when reporting — the
 dropped points are usually the interesting ones (saturation, a bad run, a
 harness artifact), even though they do not belong on the curve.
 
+## Preferred delivery: serve it locally, already loaded
+
+Do NOT stop at "here is a CSV, go click Import File". The user is on a laptop and
+the data is on the GPU box, so a download → upload round trip is the whole cost
+of this workflow. Serve the real app locally with the CSV already on the chart:
+
+```bash
+~/.claude/skills/inferencex-plot/scripts/serve_local.sh <csv>...
+```
+
+It copies the CSVs into the app's `public/`, starts Vite on 127.0.0.1:5173 if it
+is not already up, and prints the SSH tunnel command plus a `?seed=` URL per CSV.
+
+Setup, once per machine:
+
+```bash
+git clone https://github.com/duyi-wang/InferenceXCurve.git ~/InferenceXCurve
+cd ~/InferenceXCurve && npm install
+# then apply the local/dev-seed branch (the ?seed= bootstrap at the end of src/main.ts)
+```
+
+Two payoffs beyond skipping the round trip:
+
+- **Sync works.** The published Pages app cannot reach `inferencex.semianalysis.com`
+  because the `/api/v1/*` routes send no `Access-Control-Allow-Origin`. Vite's dev
+  proxy is same-origin, so `InferenceX Sync` and `Import Action Data` both work
+  locally with no CORS extension and no third-party proxy.
+- **The user's browser stays clean** — no token pasted into the site, no
+  CORS-unblocking extension left enabled.
+
+### Two failure modes that make a seed silently no-op
+
+Both were hit for real; the import reports success while the chart is unchanged.
+
+1. **Seeding before the app finishes initializing.** The app boots asynchronously
+   and loads its example data during init, overwriting anything seeded at module
+   scope. Wait for `#model-filter` to have options before importing.
+2. **Not moving the filters.** The lines import fine but the filter selects keep
+   their default model and scenario, so the chart still draws the example series.
+   Set `#model-filter`, `#scenario-filter`, `#precision-filter`, `#mtp-filter`
+   from the CSV's first data row and dispatch `change` on each.
+
+Verify with Playwright rather than trusting the status text — the in-page
+"Appended N lines" message appears in both failure modes. Check that the model
+option list actually contains the seeded model, and screenshot the chart.
+
 ## Output location — ALWAYS `/home/yichiche/inferencex-plots/`
 
 Every generated CSV goes in this fixed folder, so the user always knows where to
