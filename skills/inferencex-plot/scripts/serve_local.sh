@@ -37,10 +37,19 @@ fi
 curl -sf -o /dev/null -m 3 "http://127.0.0.1:$PORT/InferenceXCurve/" \
   || { echo "server did not start; see /tmp/inferencex-curve.log" >&2; exit 1; }
 
-echo "Server up on 127.0.0.1:$PORT ($(hostname))"
+# Print a literal username, never $USER: the tunnel is usually run from
+# PowerShell on Windows, which does not expand $USER and silently turns the
+# destination into "@host" -> ssh prints its usage text.
+SSH_USER="${INFERENCEX_SSH_USER:-$(basename "$(dirname "$PLOTS")")}"
+HOST_NAME="$(hostname)"
+HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+
+echo "Server up on 127.0.0.1:$PORT ($HOST_NAME)"
 echo
-echo "On your laptop:"
-echo "  ssh -L $PORT:localhost:$PORT \$USER@$(hostname)"
+echo "On your laptop (keep this session open):"
+echo "  ssh -L $PORT:localhost:$PORT $SSH_USER@$HOST_NAME"
+[ -n "$HOST_IP" ] && echo "  # if the hostname does not resolve:"
+[ -n "$HOST_IP" ] && echo "  ssh -L $PORT:localhost:$PORT $SSH_USER@$HOST_IP"
 echo
 echo "Then open:"
 for f in "${files[@]}"; do
