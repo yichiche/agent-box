@@ -111,3 +111,5 @@ added_utc	source	project	src_mtime	sha256	journal_path
 2026-08-06T18:32:09Z	claude	-sgl-workspace-aiter	2026-08-06T18:31:35Z	16601fdd4a488c496147966f036560a89efa909c9b42c41f7b556698ba722012	journal/2026-08/-sgl-workspace-aiter__a16w4-serving-enabled-verdict.md
 2026-08-06T18:32:09Z	claude	-sgl-workspace-aiter	2026-08-06T18:31:49Z	58d86b6a5c2d689d2952e64586ca70e7aeb06d863daf5e0a7cc89b0cd189c588	journal/2026-08/-sgl-workspace-aiter__qwen35-decode-hang-pr4502-checkout__58d86b6a.md
 2026-08-12T03:45:43Z	claude	-sgl-workspace-aiter	2026-08-07T03:32:44Z	82d0dd0b9080f992492bf58a2e3b00d2e6d8848a3b917bc1a8d099b513859461	journal/2026-08/-sgl-workspace-aiter__node-interconnect-degraded-tp2-unusable__82d0dd0b.md
+2026-09-04T16:28:57Z	claude	-sgl-workspace-sglang	2026-08-29T02:28:04Z	0e26b038ec88f0e3c2b6297d5d4b9d0ec86caa02e385b65a027a901323421eba	journal/2026-08/-sgl-workspace-sglang__shared-container-kill-by-pid.md
+2026-09-04T16:28:57Z	claude	-sgl-workspace-sglang	2026-08-29T03:15:45Z	0b7f75514de4a4e06d1d4ced18d085598aee6ef7cef026fe9722b6b074a102f6	journal/2026-08/-sgl-workspace-sglang__qwen35-fp8-kv-high-batch-nan.md
