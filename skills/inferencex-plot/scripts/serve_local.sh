@@ -41,17 +41,22 @@ curl -sf -o /dev/null -m 3 "http://127.0.0.1:$PORT/InferenceXCurve/" \
 # PowerShell on Windows, which does not expand $USER and silently turns the
 # destination into "@host" -> ssh prints its usage text.
 SSH_USER="${INFERENCEX_SSH_USER:-$(basename "$(dirname "$PLOTS")")}"
-HOST_NAME="$(hostname)"
+# Prefer the FQDN: the short name often does not resolve off-cluster.
+HOST_NAME="${INFERENCEX_SSH_HOST:-$(hostname -f 2>/dev/null || hostname)}"
 HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+# Forward to a high local port. Windows reserves dynamic TCP ranges for
+# Hyper-V/WSL/Docker, and a low port inside one fails with
+# "bind [127.0.0.1]:<port>: Permission denied" even when nothing is listening.
+LOCAL_PORT="${INFERENCEX_LOCAL_PORT:-1$PORT}"
 
 echo "Server up on 127.0.0.1:$PORT ($HOST_NAME)"
 echo
 echo "On your laptop (keep this session open):"
-echo "  ssh -L $PORT:localhost:$PORT $SSH_USER@$HOST_NAME"
+echo "  ssh -L $LOCAL_PORT:localhost:$PORT $SSH_USER@$HOST_NAME"
 [ -n "$HOST_IP" ] && echo "  # if the hostname does not resolve:"
-[ -n "$HOST_IP" ] && echo "  ssh -L $PORT:localhost:$PORT $SSH_USER@$HOST_IP"
+[ -n "$HOST_IP" ] && echo "  ssh -L $LOCAL_PORT:localhost:$PORT $SSH_USER@$HOST_IP"
 echo
 echo "Then open:"
 for f in "${files[@]}"; do
-  echo "  http://localhost:$PORT/InferenceXCurve/?seed=$(basename "$f")"
+  echo "  http://localhost:$LOCAL_PORT/InferenceXCurve/?seed=$(basename "$f")"
 done
