@@ -80,6 +80,7 @@
 | [`/memory-consolidate`](memory-consolidate/SKILL.md) | Distill vault → AGENTS.md / CLAUDE.md |
 | [`/skill-suggest`](skill-suggest/SKILL.md) | Draft skill/workflow stubs from journal themes |
 | [`/standup`](standup/SKILL.md) | Generate / formalize daily standup |
+| [`/inferencex-plot`](inferencex-plot/SKILL.md) | Benchmark output → import-ready CSV for the InferenceX Curve site |
 | [`/prompt-to-goal-command`](prompt-to-goal-command/SKILL.md) | Rewrite prompts into goal-style commands |
 
 ---
