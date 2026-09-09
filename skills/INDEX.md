@@ -51,6 +51,7 @@
 | [`/pr-ab-benchmark`](pr-ab-benchmark/SKILL.md) | Before/after A/B benchmark of an aiter/sglang PR |
 | [`/validate-pr`](validate-pr/SKILL.md) | Validate a PR: conc4 kernel before/after (profiling) + gsm8k accuracy + before/after benchmark (conc4~256) → perf table |
 | [`/generate-profile`](generate-profile/SKILL.md) | Capture Chrome-compatible trace |
+| [`/inferencex-agent-profile`](inferencex-agent-profile/SKILL.md) | Profile an AgentX (agent-mode) replay via SGLang's /start_profile sidecar — agent mode has no client `--profile` |
 | [`/parse-trace`](parse-trace/SKILL.md) | Run trace_module_analyzer (prefill/decode) |
 | [`/perf-summary`](perf-summary/SKILL.md) | Summarize kernel perf into status + action items |
 
