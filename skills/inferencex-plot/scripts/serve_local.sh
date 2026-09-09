@@ -37,6 +37,18 @@ fi
 curl -sf -o /dev/null -m 3 "http://127.0.0.1:$PORT/InferenceXCurve/" \
   || { echo "server did not start; see /tmp/inferencex-curve.log" >&2; exit 1; }
 
+# Vite binds a single address. On 127.0.0.1 it is unreachable over IPv6, and
+# `localhost` resolves to ::1 first here, so an editor port forwarder that does
+# not fall back to IPv4 fails with "connection reset". Bridge the IPv6 loopback
+# instead of binding 0.0.0.0, which would expose the port to the whole LAN.
+if ! curl -sf -o /dev/null -m 3 "http://[::1]:$PORT/InferenceXCurve/"; then
+  (nohup node "$(dirname "$0")/ipv6_loopback_bridge.js" "$PORT" \
+      > /tmp/inferencex-ipv6-bridge.log 2>&1 &)
+  sleep 2
+  curl -sf -o /dev/null -m 3 "http://[::1]:$PORT/InferenceXCurve/" \
+    || echo "warning: IPv6 loopback bridge did not come up; see /tmp/inferencex-ipv6-bridge.log" >&2
+fi
+
 # Print a literal username, never $USER: the tunnel is usually run from
 # PowerShell on Windows, which does not expand $USER and silently turns the
 # destination into "@host" -> ssh prints its usage text.

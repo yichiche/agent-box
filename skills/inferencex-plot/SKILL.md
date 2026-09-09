@@ -158,6 +158,15 @@ for real:
   nothing is listening, the range is just reserved. Forward to a high local port
   (`-L 15173:localhost:5173`); the remote port is unchanged.
 
+**The server must answer on the IPv6 loopback too.** Vite binds a single address;
+on `127.0.0.1` it is invisible over IPv6, and `localhost` resolves to `::1` first
+on this host, so an editor port forwarder that does not fall back to IPv4 fails
+with a bare "Connection was reset". `serve_local.sh` starts
+`ipv6_loopback_bridge.js` (`[::1]:PORT` → `127.0.0.1:PORT`) rather than binding
+`0.0.0.0`, which would fix it by exposing the port to the whole LAN. Verify with
+`curl http://[::1]:PORT/...` — plain `curl localhost` hides the bug because it
+falls back to IPv4 on its own.
+
 Confirm the namespace before claiming any of this — `readlink /proc/self/ns/net`
 matching `/proc/1/ns/net`, plus `hostname -I` showing the host's addresses. In a
 container with its own network namespace, a loopback bind is invisible to the
