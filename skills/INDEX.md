@@ -38,6 +38,7 @@
 | skill | does |
 |-------|------|
 | [`/implement-kernel`](implement-kernel/SKILL.md) | Design → implement → validate → commit a kernel change (MI355/ROCm) |
+| [`/optimize-moe-kernel`](optimize-moe-kernel/SKILL.md) | Diagnose and optimize routed MoE pipelines across shapes, EP imbalance, stages, and dtypes |
 | `kernel-fusion-pipeline` | Orchestration scripts only — **no SKILL.md yet**, not a registered slash command |
 
 ## measure — benchmark & profile

@@ -1,0 +1,3 @@
+interface:
+  display_name: "Optimize Moe Kernel"
+  short_description: "Profile and optimize MoE kernels across dtypes"
