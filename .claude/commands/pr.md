@@ -1,4 +1,5 @@
 ---
+name: pr
 description: Create a GitHub Pull Request — collects accuracy/benchmark data, drafts in HackMD format for review before submitting
 category: deliver
 ---

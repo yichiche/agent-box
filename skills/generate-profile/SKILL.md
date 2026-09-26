@@ -1,4 +1,5 @@
 ---
+name: generate-profile
 description: Generate an e2e profiling trace of an SGLang server run. Launches a server, validates accuracy, captures a Chrome-compatible trace, and returns the profile path.
 category: measure
 ---

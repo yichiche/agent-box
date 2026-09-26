@@ -1,1 +1,1 @@
-/home/yichiche/agent-box/.claude/commands/pr.md
+../../.claude/commands/pr.md

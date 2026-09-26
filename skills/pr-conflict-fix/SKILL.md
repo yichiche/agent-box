@@ -1,4 +1,5 @@
 ---
+name: pr-conflict-fix
 description: Resolve a conflicting GitHub PR inside a throwaway container built from an image you name. Launches the container, reproduces the merge, auto-resolves mechanical conflicts (asks on semantic ones), verifies the PR's own changes survived, runs pre-commit on the changed files, then pushes the merge back to the PR branch. Use when a PR shows "This branch has conflicts", or the user says '/pr-conflict-fix', 'fix the conflict on PR X', 'rebase/merge main into PR X'.
 category: deliver
 ---

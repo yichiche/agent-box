@@ -1,1 +1,1 @@
-/home/yichiche/agent-box/.claude/commands/commit.md
+../../.claude/commands/commit.md

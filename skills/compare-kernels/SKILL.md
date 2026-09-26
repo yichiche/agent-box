@@ -1,4 +1,5 @@
 ---
+name: compare-kernels
 description: Compare kernel categories and timings between two trace analysis Excel files. Use when the user says "/compare-kernels" followed by two xlsx paths, or asks to compare kernel breakdowns across platforms (e.g., B200 vs MI355).
 category: research
 data_sources: [trace-xlsx, aiter-upstream, sglang-upstream, jira-amd]

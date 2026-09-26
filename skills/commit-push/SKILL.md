@@ -1,4 +1,5 @@
 ---
+name: commit-push
 description: Commit (if needed) and push to the user's fork, with repo-aware remote selection and user confirmation before push. Changes under ~/agent-box take a standing-authorization fast path — commit and push straight to main with no confirmation.
 category: deliver
 ---

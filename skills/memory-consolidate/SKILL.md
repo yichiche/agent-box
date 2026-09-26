@@ -1,4 +1,5 @@
 ---
+name: memory-consolidate
 description: Distill memory vault into AGENTS.md and CLAUDE.md; sync from Claude native memory. Use weekly, after major workflow changes, or when user says "/memory-consolidate".
 category: meta
 ---

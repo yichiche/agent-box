@@ -36,6 +36,7 @@ step_gh()          { bash "$DIR/gh-setup.sh"; }
 step_identity()    { bash "$DIR/setup-global-identity-guard.sh"; }
 step_codex()       { bash "$DIR/codex-key.sh"; }
 step_pip_extras()  { pip install openpyxl; }
+step_skills()      { bash "$DIR/skills/sync-to-agents.sh"; }
 
 # Order
 run_step "claude-code CLI + plugins"  step_claude_code
@@ -44,6 +45,7 @@ run_step "codex + AMD gateway proxy"  step_codex
 run_step "gh install + auth"          step_gh
 run_step "git identity guard"         step_identity
 run_step "pip extras"                 step_pip_extras
+run_step "skills -> claude + codex"   step_skills
 
 echo "════════════════════════════════════════════════════════════"
 if [ ${#FAILED[@]} -eq 0 ]; then
