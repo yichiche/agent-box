@@ -30,9 +30,17 @@ Read `_shared/repo-config.md` for the `GH_TOKEN=""` rule. Repo is
 /pr-ci-watch remove <pr url|number>…
 /pr-ci-watch list | status
 /pr-ci-watch sweep [--track high|regular|all] [--pr N…] [--apply] [--force]
+/pr-ci-watch triage <pr>…   # /ci-analysis + apply-verdict for PRs already swept
+/pr-ci-watch report         # the <P0><CI clear><PR…> status block
+/pr-ci-watch pause | resume # kill switch; a paused sweep is a no-op
 /pr-ci-watch dashboard [--port 8812]
 /pr-ci-watch arm            # register the two cron tracks
 ```
+
+**`triage`** is Phase B on demand: for each PR named, run
+[`/ci-analysis`](../ci-analysis/SKILL.md), reduce its table to one action, and
+record it with `apply-verdict --apply`. The dashboard's "Waiting on triage" panel
+generates this command for you to paste.
 
 Everything runs through `watch.py` in this directory. **No mutation happens
 without `--apply`** — a bare `sweep` prints exactly what it would do and touches
@@ -155,6 +163,31 @@ summary, re-run budget `n/2`, last swept. Auto-refreshes every 60s.
 **Quick add:** paste a PR link into the box at the top and pick a track. Accepts
 `https://github.com/sgl-project/sglang/pull/41870`, a `/files` deep link, `#41870`,
 or `41870`.
+
+**Buttons, and what each can actually reach:**
+
+| Button | Does | Needs Claude? |
+|---|---|---|
+| `Monitoring ON/OFF` | Writes `_config.enabled`; every sweep, including a cron-fired one, exits immediately when off | no — takes effect instantly |
+| `Refresh now` | Runs `sweep --track all --force` **without `--apply`** in a subprocess: re-reads merge state and red NVIDIA CI for every PR. Comments nothing, re-runs nothing | no |
+| `Copy` (triage panel) | Copies `/pr-ci-watch triage <prs>` to paste into Claude | yes, to run it |
+| `Copy` (status block) | Copies the `<P0><CI clear><PR…>` report | no |
+
+`Refresh now` is deliberately read-only. Deciding **re-run vs merge main vs real
+bug** means reading job logs — that is `/ci-analysis`, which needs a Claude turn,
+so no button can do it. Registering cron likewise needs a Claude turn.
+
+**Verdict column** is the answer to "is this just flaky, or is it stuck?":
+
+| Verdict | Means |
+|---|---|
+| `green` | nothing to do |
+| `awaiting-triage` | real failing NVIDIA jobs, no verdict yet — needs `/ci-analysis` |
+| `re-run` | cleared as unrelated and re-run; waiting on CI |
+| `merge-main` | **stuck** — main has the fix, the PR is behind; merge/rebase main |
+| `conflict` | **stuck** — author notified; `/pr-conflict-fix` to resolve |
+| `wait-upstream` | **stuck** — blocked on an upstream/dependency fix |
+| `code-fix` | real bug in this PR; author must fix. Never re-run |
 
 > The server reads and writes only `watchlist.json` / `state.json`. It makes no
 > `gh` calls and **cannot** re-run a workflow or post a comment — every

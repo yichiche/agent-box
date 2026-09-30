@@ -16,6 +16,7 @@ from __future__ import annotations
 import html
 import json
 import socket
+import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -40,6 +41,30 @@ from watch import (  # noqa: E402
 )
 
 REFRESH_SECONDS = 60
+
+# "Refresh now" runs phase A only, and deliberately WITHOUT --apply: it re-reads
+# every PR's merge state and red NVIDIA CI so the table is current, but posts no
+# comment and re-runs nothing. A button that could comment on someone else's PR
+# is not something a stray click should reach. The full pipeline (which includes
+# /ci-analysis) needs a Claude turn — ask for `/pr-ci-watch sweep now`.
+SWEEP = {"running": False, "started": "", "finished": "", "output": "", "rc": None}
+SWEEP_LOCK = threading.Lock()
+
+
+def run_refresh() -> None:
+    here = Path(__file__).resolve().parent
+    try:
+        p = subprocess.run(
+            [sys.executable, str(here / "watch.py"), "sweep", "--track", "all", "--force"],
+            capture_output=True, text=True, timeout=900, cwd=str(here),
+        )
+        out, rc = (p.stdout or "") + (p.stderr or ""), p.returncode
+    except subprocess.TimeoutExpired:
+        out, rc = "refresh timed out after 15 min", 1
+    except Exception as e:  # never let the worker kill the server
+        out, rc = f"refresh failed: {e}", 1
+    with SWEEP_LOCK:
+        SWEEP.update(running=False, finished=now(), output=out, rc=rc)
 
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -108,6 +133,9 @@ PAGE = """<!doctype html>
     <div class="sub">{repo} &middot; NVIDIA CI only &middot; {generated}</div>
   </div>
   <div class="grow"></div>
+  <form class="inline" method="post" action="/api/refresh">
+    <button class="primary" type="submit" {refresh_disabled}>{refresh_label}</button>
+  </form>
   <form class="inline" method="post" action="/api/monitoring">
     <input type="hidden" name="on" value="{toggle_to}">
     <button class="{toggle_class}" type="submit">{toggle_label}</button>
@@ -116,6 +144,8 @@ PAGE = """<!doctype html>
 </div>
 
 {banner}
+{refresh_status}
+{triage_panel}
 
 <div class="panel"><form class="add" method="post" action="/api/add">
   <input type="text" name="ref" placeholder="Paste a PR link or number — https://github.com/{repo}/pull/41870" autofocus>
@@ -147,14 +177,15 @@ PAGE = """<!doctype html>
 the ON/OFF switch. Data: <span class="mono">{data}</span></div>
 
 <script>
-  function copyReport(btn) {{
-    const t = document.getElementById('report');
+  function copyEl(id, btn) {{
+    const t = document.getElementById(id);
     t.select();
     navigator.clipboard.writeText(t.value).then(
       () => {{ btn.textContent = 'Copied'; setTimeout(() => btn.textContent = 'Copy', 1400); }},
       () => {{ document.execCommand('copy'); btn.textContent = 'Copied'; }}
     );
   }}
+  function copyReport(btn) {{ copyEl('report', btn); }}
   // Refresh on a timer, but never while a field is focused — otherwise a note
   // being typed gets wiped mid-edit.
   setInterval(() => {{
@@ -182,6 +213,18 @@ ACTION_CLASS = {
     "code-fix": "bad",
     "merge-main": "warn",
     "wait-upstream": "warn",
+}
+
+# The whole point of the Verdict column: say what to DO, not just what happened.
+# This is the "just re-run it" vs "stuck, needs a merge" split.
+ACTION_HINT = {
+    "green": "nothing to do",
+    "awaiting-triage": "needs /ci-analysis — ask Claude to triage",
+    "re-run": "re-ran; waiting on CI",
+    "code-fix": "real bug in this PR — author must fix",
+    "merge-main": "STUCK: PR is behind main — merge/rebase main",
+    "conflict": "STUCK: conflicts — author notified; /pr-conflict-fix to fix",
+    "wait-upstream": "STUCK: blocked on an upstream fix",
 }
 
 
@@ -278,6 +321,7 @@ def render_table(wl: dict, st: dict) -> str:
             f"<td>{merge_cell(s)}</td>"
             f"<td>{ci_cell(s)}</td>"
             f'<td><span class="{ACTION_CLASS.get(action, "dim")}">{esc(action)}</span>'
+            f'<div class="dim"><b>{esc(ACTION_HINT.get(action, ""))}</b></div>'
             f'<div class="dim">{esc(s.get("last_verdict", "")[:70])}</div></td>'
             f"<td>{rerun_cell(s)}</td>"
             f"<td>{note_cell(pr, meta)}</td>"
@@ -307,6 +351,50 @@ def render_banner(st: dict, enabled: bool) -> str:
             "registering cron needs a Claude turn, so this page cannot do it.</div>"
         )
     return ""
+
+
+def render_refresh_status() -> str:
+    with SWEEP_LOCK:
+        s = dict(SWEEP)
+    if s["running"]:
+        return (
+            f'<div class="banner warn">Refreshing since {esc(s["started"])}… '
+            f"reading merge state and CI for every watched PR. This page reloads "
+            f"when it finishes; nothing is being commented or re-run.</div>"
+        )
+    if not s["finished"]:
+        return ""
+    cls = "ok" if s["rc"] == 0 else "bad"
+    return (
+        f'<details class="panel"><summary class="{cls}">'
+        f'<b>Last refresh {esc(s["finished"])}</b> '
+        f'<span class="dim">(read-only — click to see what it found)</span></summary>'
+        f'<pre class="mono" style="white-space:pre-wrap; margin:10px 0 0;">'
+        f'{esc(s["output"][-6000:])}</pre></details>'
+    )
+
+
+def render_triage_panel(wl: dict, st: dict) -> str:
+    """PRs whose red CI has no verdict yet. Only Claude can clear these."""
+    pending = [
+        pr for pr in sorted(wl, key=int)
+        if st.get(pr, {}).get("last_action") == "awaiting-triage"
+    ]
+    if not pending:
+        return ""
+    cmd = "/pr-ci-watch triage " + " ".join(pending)
+    return (
+        f'<div class="panel"><h2>Waiting on triage &mdash; {len(pending)} PR(s)</h2>'
+        f'<div class="sub" style="margin-bottom:10px;">These have real failing '
+        f"NVIDIA jobs but no verdict yet. Deciding <b>re-run</b> vs <b>merge main</b> "
+        f"vs <b>real bug</b> means reading the job logs, which needs a Claude turn "
+        f"&mdash; this page cannot do it. The scheduled sweep handles it "
+        f"automatically; to do it now, paste this to Claude:</div>"
+        f'<div style="display:flex; gap:10px; align-items:center;">'
+        f'<input class="note" id="triagecmd" type="text" readonly value="{esc(cmd)}">'
+        f'<button class="primary" type="button" onclick="copyEl(\'triagecmd\', this)">Copy</button>'
+        f"</div></div>"
+    )
 
 
 def arm_line(st: dict) -> str:
@@ -358,8 +446,16 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         enabled = monitoring_enabled(raw_st)
+        with SWEEP_LOCK:
+            running = SWEEP["running"]
         page = PAGE.format(
-            refresh=REFRESH_SECONDS,
+            # Poll faster while a refresh is in flight so the result appears on
+            # its own instead of after a 60s wait.
+            refresh=5 if running else REFRESH_SECONDS,
+            refresh_label="Refreshing…" if running else "Refresh now",
+            refresh_disabled="disabled" if running else "",
+            refresh_status=render_refresh_status(),
+            triage_panel=render_triage_panel(wl, st),
             repo=html.escape(self.repo),
             generated=now(),
             data=html.escape(str(DATA_DIR)),
@@ -384,7 +480,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         form = self._form()
         try:
-            if self.path == "/api/monitoring":
+            if self.path == "/api/refresh":
+                with SWEEP_LOCK:
+                    if not SWEEP["running"]:
+                        SWEEP.update(running=True, started=now(), finished="",
+                                     output="", rc=None)
+                        threading.Thread(target=run_refresh, daemon=True).start()
+            elif self.path == "/api/monitoring":
                 st = load(STATE, {})
                 set_monitoring(st, form.get("on") == "1")
                 save(STATE, st)
