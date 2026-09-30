@@ -219,7 +219,7 @@ ACTION_CLASS = {
 # This is the "just re-run it" vs "stuck, needs a merge" split.
 ACTION_HINT = {
     "green": "nothing to do",
-    "awaiting-triage": "needs /ci-analysis — ask Claude to triage",
+    "awaiting-triage": "QUEUED — nothing is running; waiting for a Claude turn",
     "re-run": "re-ran; waiting on CI",
     "code-fix": "real bug in this PR — author must fix",
     "merge-main": "STUCK: PR is behind main — merge/rebase main",
@@ -385,11 +385,13 @@ def render_triage_panel(wl: dict, st: dict) -> str:
     cmd = "/pr-ci-watch triage " + " ".join(pending)
     return (
         f'<div class="panel"><h2>Waiting on triage &mdash; {len(pending)} PR(s)</h2>'
-        f'<div class="sub" style="margin-bottom:10px;">These have real failing '
-        f"NVIDIA jobs but no verdict yet. Deciding <b>re-run</b> vs <b>merge main</b> "
-        f"vs <b>real bug</b> means reading the job logs, which needs a Claude turn "
-        f"&mdash; this page cannot do it. The scheduled sweep handles it "
-        f"automatically; to do it now, paste this to Claude:</div>"
+        f'<div class="sub" style="margin-bottom:10px;">'
+        f"<b>Nothing is running right now</b> &mdash; these are parked, not in "
+        f"progress. They have real failing NVIDIA jobs but no verdict yet, and "
+        f"deciding <b>re-run</b> vs <b>merge main</b> vs <b>real bug</b> means "
+        f"reading the job logs, which needs a Claude turn &mdash; neither this "
+        f"page nor <i>Refresh now</i> can do it. The next scheduled sweep picks "
+        f"them up automatically; to do it now, paste this to Claude:</div>"
         f'<div style="display:flex; gap:10px; align-items:center;">'
         f'<input class="note" id="triagecmd" type="text" readonly value="{esc(cmd)}">'
         f'<button class="primary" type="button" onclick="copyEl(\'triagecmd\', this)">Copy</button>'
