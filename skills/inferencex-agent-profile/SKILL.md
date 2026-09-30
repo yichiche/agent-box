@@ -1,6 +1,6 @@
 ---
 name: inferencex-agent-profile
-description: "Capture a torch profiler trace of an InferenceX AgentX (agent-mode) trace replay. Agent mode has no client-side --profile hook, so this reuses /inferencemax-benchmark's arm resolution and recipe execution unchanged and attaches a sidecar that drives SGLang's /start_profile endpoint once the replay is past aiperf warmup and inside its measurement window. Emits per-rank traces ready for /parse-trace and /kernel-profile-triage. Use when asked to profile agent mode, get kernel breakdown for AgentX, or find where agentic-coding replay time goes."
+description: "Capture a torch profiler trace of an InferenceX AgentX (agent-mode) trace replay. Agent mode has no client-side --profile hook, so this reuses /inferencex-benchmark's arm resolution and recipe execution unchanged and attaches a sidecar that drives SGLang's /start_profile endpoint once the replay is past aiperf warmup and inside its measurement window. Emits per-rank traces ready for /parse-trace and /kernel-profile-triage. Use when asked to profile agent mode, get kernel breakdown for AgentX, or find where agentic-coding replay time goes."
 category: measure
 ---
 
@@ -27,10 +27,10 @@ server relaunch, and the profiler **self-terminates** after `num_steps` forward
 steps. That means a purely external sidecar can capture a trace of the real
 replay without touching the recipe, the server flags, or aiperf.
 
-So this skill is `/inferencemax-benchmark` plus one watcher process. It
+So this skill is `/inferencex-benchmark` plus one watcher process. It
 re-expresses no server flag, no client flag, and no arm. Everything comes from
 `run_infmax.sh` → `resolve_arm.py` → the upstream recipe, exactly as in
-[`/inferencemax-benchmark`](../inferencemax-benchmark/SKILL.md).
+[`/inferencex-benchmark`](../inferencex-benchmark/SKILL.md).
 
 ## What "the measurement window" means (and why the sidecar waits)
 
@@ -57,19 +57,19 @@ before it starts. `--trigger-regex` can pin an aiperf phase banner from
 - **The profiled run is not a benchmark number.** A profiler window stalls the
   scheduler for seconds; its aggregate JSON is invalid as a submission and the
   skill relaxes `AIPERF_LIVE_FAILED_REQUEST_THRESHOLD` to 0.5 so the stall does
-  not abort the replay. Report throughput from `/inferencemax-benchmark`, never
+  not abort the replay. Report throughput from `/inferencex-benchmark`, never
   from here.
 - **Output** — everything under `$AGENT_RUNS_DIR/inferencemax/`, nothing in
   `$HOST_HOME` root.
 
 ## Steps
 
-**1. Resolve the arm first** — same call as `/inferencemax-benchmark`, so the
+**1. Resolve the arm first** — same call as `/inferencex-benchmark`, so the
 user sees which recipe is about to run before a 397B load starts:
 
 ```bash
 INFERENCEX_DIR=/home/yichiche/InferenceX \
-  python3 ~/agent-box/skills/inferencemax-benchmark/resolve_arm.py \
+  python3 ~/agent-box/skills/inferencex-benchmark/resolve_arm.py \
   --model-prefix qwen3.5 --mode agent --tp 2
 ```
 
@@ -114,7 +114,7 @@ throughput numbers are profiling-distorted and not a benchmark result.
 |---|---|---|
 | `MODEL_PREFIX` | — | `qwen3.5`, `dsv4`, `glm5.2`, `kimik3`, `minimaxm3` … |
 | `MODEL_PATH` | — | local weights dir (agent mode still needs `MODEL` = HF repo id; `run_infmax.sh` handles that) |
-| `TP` / `SPEC` / `PRECISION` / `FRAMEWORK` / `HW` | as `/inferencemax-benchmark` | forwarded untouched to `resolve_arm.py` |
+| `TP` / `SPEC` / `PRECISION` / `FRAMEWORK` / `HW` | as `/inferencex-benchmark` | forwarded untouched to `resolve_arm.py` |
 | `PROFILE_CONCS` | `4 64` | the global profiling anchors |
 | `NUM_STEPS` | `100` | forward steps to capture; the profiler auto-stops |
 | `ACTIVITIES` | `CPU,GPU` | also `MEM`, `RPD` (ROCm) |
@@ -134,7 +134,7 @@ through from the environment unchanged.
 
 ## Load-bearing gotchas
 
-> - **All of [`/inferencemax-benchmark`'s gotchas still apply](../inferencemax-benchmark/SKILL.md#load-bearing-gotchas)** —
+> - **All of [`/inferencex-benchmark`'s gotchas still apply](../inferencex-benchmark/SKILL.md#load-bearing-gotchas)** —
 >   `/workspace` symlink, `MODEL` = HF repo id in agent mode, the `DURATION >= 900`
 >   floor, aiperf's own uv venv on Python 3.11+, never `pkill`, never share GPUs.
 > - **Do not start profiling during warmup.** Warmup requests are 1 token each.
@@ -184,7 +184,7 @@ through from the environment unchanged.
 
 ## Related
 
-- [`/inferencemax-benchmark`](../inferencemax-benchmark/SKILL.md) — the same run
+- [`/inferencex-benchmark`](../inferencex-benchmark/SKILL.md) — the same run
   without profiling; **this** is where the throughput number comes from.
 - [`/generate-profile`](../generate-profile/SKILL.md) — our house profiling flow
   for a fixed-length workload against a locally launched server.

@@ -1,16 +1,16 @@
 ---
-name: inferencemax-benchmark
+name: inferencex-benchmark
 description: "Run the current InferenceMax (SemiAnalysisAI/InferenceX) benchmark standard locally, end to end, for a model you name — fixed-length (ISL 8192 / OSL 1024) or agent mode (AgentX trace replay). Resolves the arm from configs/amd-master.yaml, exports exactly the env CI exports, and executes the upstream recipe script itself, so every server and client flag is aligned by construction rather than by copying. Use when asked to benchmark a model to InferenceMax standard, reproduce a dashboard number, or run agentic/fixed-seq benchmarks that must be comparable to InferenceX."
 category: measure
 ---
 
-# /inferencemax-benchmark — run the InferenceMax standard locally
+# /inferencex-benchmark — run the InferenceMax standard locally
 
 ```
-/inferencemax-benchmark <model-prefix> <fixed|agent> [tp=N] [conc=...] [full] [dry-run]
+/inferencex-benchmark <model-prefix> <fixed|agent> [tp=N] [conc=...] [full] [dry-run]
 ```
 
-`/inferencemax-benchmark qwen3.5 agent tp=2` · `/inferencemax-benchmark dsv4 fixed`
+`/inferencex-benchmark qwen3.5 agent tp=2` · `/inferencex-benchmark dsv4 fixed`
 
 ## The one idea
 
@@ -49,7 +49,7 @@ TP2 arm moved from **EP2 to EP1**. Any hand-copied script is already wrong.
 
 ```bash
 INFERENCEX_DIR=/home/yichiche/InferenceX \
-  python3 ~/agent-box/skills/inferencemax-benchmark/resolve_arm.py \
+  python3 ~/agent-box/skills/inferencex-benchmark/resolve_arm.py \
   --model-prefix qwen3.5 --mode agent --tp 2
 ```
 
@@ -63,7 +63,7 @@ first use after a pull):
 ```bash
 MODEL_PREFIX=qwen3.5 MODE=agent TP=2 DRY_RUN=1 \
   MODEL_PATH=/shared_nfs/models/Qwen/Qwen3.5-397B-A17B-MXFP4 \
-  bash ~/agent-box/skills/inferencemax-benchmark/run_infmax.sh
+  bash ~/agent-box/skills/inferencex-benchmark/run_infmax.sh
 ```
 
 This prints the full resolved env block and the exact `bash <recipe>` line per
@@ -77,7 +77,7 @@ the recipe's own EXIT trap tears it down.
 ```bash
 MODEL_PREFIX=qwen3.5 MODE=fixed TP=2 \
   MODEL_PATH=/shared_nfs/models/Qwen/Qwen3.5-397B-A17B-MXFP4 \
-  bash ~/agent-box/skills/inferencemax-benchmark/run_infmax.sh
+  bash ~/agent-box/skills/inferencex-benchmark/run_infmax.sh
 ```
 
 Long runs (agent mode is ~20 min replay + a 397B load *per concurrency point*)

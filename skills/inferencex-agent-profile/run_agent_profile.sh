@@ -2,7 +2,7 @@
 # Profile an InferenceX AgentX (agent-mode) trace replay.
 #
 # This adds NOTHING to the benchmark itself. It reuses
-# ~/agent-box/skills/inferencemax-benchmark/run_infmax.sh verbatim -- same arm
+# ~/agent-box/skills/inferencex-benchmark/run_infmax.sh verbatim -- same arm
 # resolution, same recipe, same server and client command lines, same GPU
 # picking and teardown -- and only attaches a sidecar that drives SGLang's
 # /start_profile HTTP endpoint once the replay reaches its measurement window.
@@ -18,7 +18,7 @@
 set -uo pipefail
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INFMAX_DIR="${INFMAX_DIR:-$SKILL_DIR/../inferencemax-benchmark}"
+INFMAX_DIR="${INFMAX_DIR:-$SKILL_DIR/../inferencex-benchmark}"
 RUNS_ROOT="${RUNS_ROOT:-$HOME/agent-runs/inferencemax}"
 
 MODEL_PREFIX="${MODEL_PREFIX:?set MODEL_PREFIX, e.g. qwen3.5}"
