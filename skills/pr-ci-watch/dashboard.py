@@ -25,7 +25,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from watch import (  # noqa: E402
     DATA_DIR,
-    MAX_RERUNS,
     PRIORITIES,
     STATE,
     WATCHLIST,
@@ -329,8 +328,8 @@ def action_cell(s: dict) -> str:
     for wf, rec in (s.get("reruns") or {}).items():
         if rec.get("sha") != sha:
             continue  # budget resets on a new push; stale rows are noise
-        out.append(f'<div class="dim">{esc(wf)} re-run {rec.get("count", 0)}'
-                   f'/{MAX_RERUNS} &middot; {esc(tw(rec.get("at")))}</div>')
+        out.append(f'<div class="dim">{esc(wf)} re-run &times;{rec.get("count", 0)}'
+                   f' &middot; {esc(tw(rec.get("at")))}</div>')
     if a == "Re-run failed CI" and not (s.get("reruns") or {}):
         out.append('<div class="dim">queued — GitHub refused while the run was '
                    "still going; next sweep retries</div>")

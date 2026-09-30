@@ -123,16 +123,23 @@ python3 watch.py apply-verdict --pr 41870 --action re-run \
   --summary "b200 shard 2: CUDA devices busy after teardown; unrelated" --apply
 ```
 
-On `re-run`, for each in-scope workflow with a real failing job and
-`reruns < 2` **for the current head SHA**:
+On `re-run`, for each in-scope workflow with a real failing job:
 
 ```bash
 GH_TOKEN="" gh api -X POST repos/sgl-project/sglang/actions/runs/<run_id>/rerun-failed-jobs
 ```
 
 Per-run rather than per-job: a run maps 1:1 to a workflow, and the workflow is
-already the scope unit. The cap is a backstop behind `/ci-analysis`, not the
-primary gate; it resets when the author pushes.
+already the scope unit.
+
+**There is no re-run count cap.** `/ci-analysis` is the gate: a failure
+attributed to the PR returns `code fix` and nothing is re-run at all, so a count
+limit could only ever block a failure already cleared as unrelated. Attempts are
+still counted per head SHA and shown as `re-run ×N` so a workflow being retried
+over and over is visible rather than silent.
+
+If GitHub answers `403 This workflow is already running`, the attempt is
+recorded as deferred, not counted, and the next sweep retries it.
 
 ## Conflicts
 
@@ -167,7 +174,7 @@ script prints the Remote-SSH / `ssh -L` instructions; `--stop` shuts it down.
 
 Columns: PR + title + author, track (click to flip), merge state, red NVIDIA
 workflows (gate-only marked as not re-runnable), last verdict + one-line
-summary, re-run budget `n/2`, last swept. Auto-refreshes every 60s.
+summary, re-run count `×N`, last swept (Taiwan time). Auto-refreshes every 60s.
 
 **Quick add:** paste a PR link into the box at the top and pick a track. Accepts
 `https://github.com/sgl-project/sglang/pull/41870`, a `/files` deep link, `#41870`,

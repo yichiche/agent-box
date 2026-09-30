@@ -58,7 +58,11 @@ ROLLUP_RE = re.compile(r"(-finish$|\bpr-gate\b|Standard Test Results|^finish$)",
 # off as out-of-scope on another. Watchers go to triage so the log decides.
 WATCHER_RE = re.compile(r"^(wait-for-|check-pr-test-health)", re.I)
 
-MAX_RERUNS = 2  # per (PR, head SHA, workflow)
+# No re-run cap. The gate on re-running is /ci-analysis: if a failure is
+# attributed to the PR it returns `code fix` and nothing is re-run at all. A
+# count limit on top of that would only ever block the case /ci-analysis has
+# already cleared as unrelated. Attempts are still counted, per head SHA, so the
+# dashboard can show how many times a workflow has been retried.
 SWEEP_DEDUP_MINUTES = 30
 ACTIONS = ("re-run", "code-fix", "merge-main", "wait-upstream", "out-of-scope")
 
@@ -546,7 +550,8 @@ def cmd_sweep(a) -> None:
             if g["jobs"]:
                 print(f"        {w}: {', '.join(g['jobs'][:6])}"
                       f"{' …' if len(g['jobs']) > 6 else ''}")
-            print(f"           [run {g['run_id']}, reruns {used}/{MAX_RERUNS}]")
+            tried = f", re-run x{used} so far" if used else ""
+            print(f"           [run {g['run_id']}{tried}]")
         s["failed_groups"] = groups
         if not real:
             # Every in-scope failure is an aggregation gate, so the root cause is
@@ -642,9 +647,6 @@ def cmd_apply_verdict(a) -> None:
                 f"--force-gates)"
             )
             continue
-        if used >= MAX_RERUNS:
-            skipped.append(f"{wf} (cap reached {used}/{MAX_RERUNS} for {sha[:8]})")
-            continue
         run_id = g.get("run_id")
         if not run_id:
             skipped.append(f"{wf} (no run id parsed from check link)")
@@ -656,7 +658,7 @@ def cmd_apply_verdict(a) -> None:
                 # "already running" is the common one: some shards are still in
                 # progress, so GitHub refuses. Not an error worth losing the
                 # verdict over — the next sweep retries, and the attempt is not
-                # counted against the cap because nothing was re-run.
+                # counted because nothing was actually re-run.
                 if "already running" in err.lower():
                     why = "deferred — workflow still running, next sweep retries"
                 else:
@@ -664,9 +666,9 @@ def cmd_apply_verdict(a) -> None:
                 skipped.append(f"{wf} ({why})")
                 continue
             reruns[wf] = {"sha": sha, "count": used + 1, "at": now()}
-            did.append(f"{wf} (run {run_id}, attempt {used + 1}/{MAX_RERUNS})")
+            did.append(f"{wf} (run {run_id}, attempt {used + 1})")
         else:
-            did.append(f"WOULD rerun {wf} (run {run_id}, attempt {used + 1}/{MAX_RERUNS})")
+            did.append(f"WOULD rerun {wf} (run {run_id}, attempt {used + 1})")
 
     for line in did:
         print(f"#{pr}  re-run: {line}")
