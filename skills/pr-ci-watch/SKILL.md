@@ -114,6 +114,19 @@ the head SHA). The dashboard falls back to that whenever the live checks show
 only gates — which is the normal state once a re-run is in flight — so the
 column always answers "what failed?" instead of printing an unactionable label.
 
+**Cascade demotion.** A job that failed at the `check-pr-test-health` step was
+killed by fail-fast before running a single test. Its *name* gives no hint —
+`base-b-test-2-gpu-large (5)` looks like a real shard either way — so the sweep
+spends one API call per real-looking failed job to read its failed step, and
+demotes cascades to gates. Without this, a PR whose only problem is a dead
+watcher gets sent to triage with a phantom "real" failure beside it.
+
+**Verdicts survive re-sweeps.** `apply-verdict` records a fingerprint of the
+failing jobs it judged. A later sweep that sees the same head SHA and the same
+failures keeps the verdict instead of resetting to `awaiting-triage` — otherwise
+a `code-fix` decision silently evaporates and the PR is re-triaged forever. A new
+push, or a different set of failures, correctly re-opens triage.
+
 ### Phase B — triage (you, via `/ci-analysis`)
 
 For each PR the sweep flagged, run `/ci-analysis <pr url>`, read its **Root

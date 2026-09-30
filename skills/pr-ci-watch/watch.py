@@ -158,6 +158,15 @@ def tw(iso: str | None) -> str:
     return t.astimezone(TAIPEI).strftime("%m/%d %H:%M") if t else "never"
 
 
+def failure_fingerprint(groups: dict) -> str:
+    """Identity of the actionable failures, so a verdict can be known to still
+    apply. Gate-only workflows are excluded: they flap as other runs finish."""
+    return "||".join(sorted(
+        f"{wf}:{g.get('sig', '')}" for wf, g in groups.items()
+        if not g.get("gate_only")
+    ))
+
+
 def ci_verdict(s: dict) -> str:
     """Current in-scope CI state, not our internal bookkeeping."""
     # A conflicting branch is a failure in its own right: CI cannot complete, so
@@ -286,6 +295,34 @@ def parse_pr(ref: str) -> str:
 def run_id_of(link: str) -> str | None:
     m = re.search(r"/actions/runs/(\d+)", link or "")
     return m.group(1) if m else None
+
+
+_CASCADE_CACHE: dict[str, bool] = {}
+
+
+def is_cascade(link: str) -> bool:
+    """True if this job failed at `check-pr-test-health` — i.e. fast-fail killed
+    it before it ran any test.
+
+    Job *names* cannot reveal this: `base-b-test-2-gpu-large (5)` looks like a
+    real shard whether it ran tests or was skipped by fail-fast. Only the failed
+    step name distinguishes them, which costs one API call per failed job.
+    Getting it wrong sends a PR to triage that has no root cause of its own.
+    """
+    m = re.search(r"/job/(\d+)", link or "")
+    if not m:
+        return False
+    job_id = m.group(1)
+    if job_id in _CASCADE_CACHE:
+        return _CASCADE_CACHE[job_id]
+    rc, out, _ = gh_try([
+        "api", f"repos/{REPO_DEFAULT}/actions/jobs/{job_id}",
+        "--jq", '[.steps[] | select(.conclusion=="failure") | .name] | first',
+    ])
+    step = out.strip() if rc == 0 else ""
+    result = "check-pr-test-health" in step
+    _CASCADE_CACHE[job_id] = result
+    return result
 
 
 def in_scope(workflow: str) -> bool:
@@ -419,6 +456,18 @@ def failed_in_scope(pr: str, repo: str) -> tuple[dict, dict]:
             g.setdefault("job_links", {})[name] = c["link"]
         if not g["run_id"]:
             g["run_id"] = run_id_of(c.get("link", ""))
+    # Second pass: demote jobs that fail-fast killed before they ran a test.
+    # Only done for jobs that still look real, so the API cost stays small.
+    for g in groups.values():
+        real, cascaded = [], []
+        for name in g["jobs"]:
+            (cascaded if is_cascade((g.get("job_links") or {}).get(name, "")) else real
+             ).append(name)
+        if cascaded:
+            g["jobs"] = real
+            g["cascade_jobs"] = cascaded
+            g["gate_jobs"].extend(cascaded)
+
     for g in groups.values():
         # Only a pure rollup failure is unactionable. A failed watcher still
         # needs a human/agent to read why it died.
@@ -466,14 +515,20 @@ def cmd_sweep(a) -> None:
         repo = meta.get("repo") or a.repo
         s = st.setdefault(pr, {})
 
-        last = parse_ts(s.get("last_sweep"))
+        # Dedup per mode. A read-only refresh (the dashboard button, or a bare
+        # `sweep`) must never suppress a scheduled --apply sweep: the dry run
+        # posts no conflict notice and re-runs nothing, so skipping the real
+        # sweep behind it silently drops the work.
+        last_key = "last_apply_sweep" if a.apply else "last_sweep"
+        last = parse_ts(s.get(last_key))
         if (
             not a.force
             and not a.pr
             and last
             and datetime.now(timezone.utc) - last < timedelta(minutes=SWEEP_DEDUP_MINUTES)
         ):
-            print(f"#{pr}  skipped — swept {s['last_sweep']} (<{SWEEP_DEDUP_MINUTES}m ago)")
+            mode = "applied" if a.apply else "swept"
+            print(f"#{pr}  skipped — {mode} {s[last_key]} (<{SWEEP_DEDUP_MINUTES}m ago)")
             continue
 
         snap = pr_snapshot(pr, repo)
@@ -490,6 +545,8 @@ def cmd_sweep(a) -> None:
             is_draft=snap.get("isDraft", False),
             last_sweep=now(),
         )
+        if a.apply:
+            s["last_apply_sweep"] = now()
         row = {"pr": pr, "title": s["title"], "author": author, "sha": sha[:8]}
 
         if snap.get("state") != "OPEN":
@@ -629,6 +686,18 @@ def cmd_sweep(a) -> None:
             report.append(row)
             continue
 
+        fp = failure_fingerprint(groups)
+        if (s.get("verdict_sha") == sha and s.get("verdict_fingerprint") == fp
+                and s.get("last_action") in ACTIONS):
+            # Already judged, same head SHA, same failing jobs. Re-triaging would
+            # throw away the verdict — and for `code-fix` that means quietly
+            # re-queueing a PR we already decided the author has to fix.
+            print(f"        -> keeping verdict `{s['last_action']}` "
+                  f"(same failures, already judged {tw(s.get('verdict_at'))})")
+            row["outcome"] = f"verdict-held:{s['last_action']}"
+            report.append(row)
+            continue
+
         s["last_action"] = "awaiting-triage"
         row["outcome"] = "needs-triage"
         row["groups"] = groups
@@ -692,6 +761,7 @@ def cmd_apply_verdict(a) -> None:
     s["last_action"] = a.action
     s["verdict_at"] = now()
     s["verdict_sha"] = sha
+    s["verdict_fingerprint"] = failure_fingerprint(s.get("failed_groups") or {})
 
     if a.action != "re-run":
         note = {
