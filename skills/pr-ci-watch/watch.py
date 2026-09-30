@@ -643,9 +643,21 @@ def cmd_sweep(a) -> None:
         repeats = []
         for w, g in groups.items():
             rec = (s.get("reruns") or {}).get(w)
-            if rec and rec.get("sha") == sha and rec.get("sig") == g["sig"]:
+            if not rec or rec.get("sha") != sha:
+                continue
+            # Intersection, not equality. The failing set legitimately shifts
+            # between sweeps — a shard finishes, a cascade gets demoted — and an
+            # exact-match test lets a genuine repeat slip through whenever it
+            # does. What matters is whether a job we already re-ran has failed
+            # again.
+            before = set((rec.get("sig") or "").split("|")) - {""}
+            nowset = set((g.get("sig") or "").split("|")) - {""}
+            again = before & nowset
+            if again:
                 g["repeat_after_rerun"] = rec.get("count", 1)
-                repeats.append(f"{w} (x{rec.get('count', 1)})")
+                g["repeat_jobs"] = sorted(again)
+                repeats.append(f"{w} (x{rec.get('count', 1)}: "
+                               f"{', '.join(sorted(again))})")
         if repeats:
             print(f"        !! SAME FAILURE AFTER RE-RUN: {', '.join(repeats)} — "
                   f"stop re-running; evaluate `merge main`")
