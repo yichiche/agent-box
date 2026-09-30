@@ -302,28 +302,42 @@ def ci_cell(s: dict) -> str:
     return "".join(out)
 
 
-VERDICT_CLASS = {"Pass": "ok", "Running": "warn", "Fail": "bad", "—": "dim"}
+VERDICT_CLASS = {"Pass": "ok", "Pending": "warn", "Fail": "bad", "—": "dim"}
 ACTION_COLOR = {
     "Solve conflict": "bad",
     "Merge main": "bad",
     "Code fix": "bad",
-    "Re-run failed CI": "warn",
+    "CI re-run": "warn",
     "Triage": "warn",
     "Wait upstream": "warn",
-    "Pending": "dim",
     "-": "dim",
 }
 
 
 def verdict_cell(s: dict) -> str:
-    """Current CI state: Running / Pass / Fail."""
+    """Just the state word. The job counts live in Status."""
     v = ci_verdict(s)
+    return f'<span class="pill {VERDICT_CLASS.get(v, "dim")}">{esc(v)}</span>'
+
+
+def tally_line(s: dict) -> str:
     t = s.get("tally") or {}
     bits = [f"{n} {k}" for k, n in
             (("pass", t.get("pass", 0)), ("fail", t.get("fail", 0)),
              ("running", t.get("pending", 0))) if n]
-    detail = f'<div class="dim">{esc(", ".join(bits))}</div>' if bits else ""
-    return f'<span class="pill {VERDICT_CLASS.get(v, "dim")}">{esc(v)}</span>{detail}'
+    if not bits:
+        return ""
+    # Say so when these counts predate the re-run, instead of quietly showing
+    # the run we already replaced.
+    sha = s.get("head_sha", "")
+    last_rerun = max((r.get("at", "") for r in (s.get("reruns") or {}).values()
+                      if r.get("sha") == sha), default="")
+    if last_rerun and last_rerun > (s.get("last_sweep") or ""):
+        return (f'<div class="warn"><b>{esc(", ".join(bits))}</b> — counts from '
+                f'<i>before</i> the {esc(tw(last_rerun))} re-run; hit '
+                f"<b>Refresh now</b></div>")
+    return (f'<div><b>{esc(", ".join(bits))}</b>'
+            f'<span class="dim"> @ {esc(tw(s.get("last_sweep")))}</span></div>')
 
 
 def action_cell(s: dict) -> str:
@@ -336,7 +350,7 @@ def action_cell(s: dict) -> str:
             continue  # budget resets on a new push; stale rows are noise
         out.append(f'<div class="dim">{esc(wf)} re-run &times;{rec.get("count", 0)}'
                    f' &middot; {esc(tw(rec.get("at")))}</div>')
-    if a == "Re-run failed CI" and not (s.get("reruns") or {}):
+    if a == "CI re-run" and not (s.get("reruns") or {}):
         out.append('<div class="dim">queued — GitHub refused while the run was '
                    "still going; next sweep retries</div>")
     return "".join(out)
@@ -356,9 +370,12 @@ def notify_cell(s: dict) -> str:
             f"{esc(tw(s.get('conflict_comment_at')))}{link}</div>")
 
 
-def detail_cell(s: dict) -> str:
-    """Why, in words. No input field — this column is read-only now."""
+def status_cell(s: dict) -> str:
+    """Where CI actually stands, in numbers then words. Read-only."""
     out = []
+    t = tally_line(s)
+    if t:
+        out.append(t)
     n = notify_cell(s)
     if n:
         out.append(n)
@@ -389,7 +406,7 @@ def render_table(wl: dict, st: dict) -> str:
         return EMPTY
     head = (
         "<tr><th>Pri</th><th>PR</th><th>Track</th><th>Merge</th><th>Red NVIDIA CI</th>"
-        "<th>Verdict</th><th>Action</th><th>Why</th>"
+        "<th>Verdict</th><th>Action</th><th>Status</th>"
         "<th>Last swept (TW)</th><th></th></tr>"
     )
     rows = []
@@ -414,7 +431,7 @@ def render_table(wl: dict, st: dict) -> str:
             f"<td>{ci_cell(s)}</td>"
             f"<td>{verdict_cell(s)}</td>"
             f"<td>{action_cell(s)}</td>"
-            f"<td>{detail_cell(s)}</td>"
+            f"<td>{status_cell(s)}</td>"
             f'<td class="mono dim">{esc(tw(s.get("last_sweep")))}</td>'
             f'<td><form class="inline" method="post" action="/api/remove">'
             f'<input type="hidden" name="pr" value="{esc(pr)}">'

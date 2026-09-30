@@ -177,7 +177,8 @@ def ci_verdict(s: dict) -> str:
     if real_fail:
         return "Fail"
     if t.get("pending"):
-        return "Running"
+        # In flight — first run or a re-run, same thing from here.
+        return "Pending"
     if t.get("fail"):
         return "Fail"  # nothing left running and gates are still red
     return "Pass" if t.get("pass") else "—"
@@ -186,7 +187,6 @@ def ci_verdict(s: dict) -> str:
 def ci_action(s: dict) -> str:
     """What needs doing about it."""
     action = s.get("last_action")
-    verdict = ci_verdict(s)
     # Two different problems that must not share a label:
     #   Solve conflict -> the branch has git conflicts with main; the author has
     #                     to resolve them before CI can even finish.
@@ -199,14 +199,21 @@ def ci_action(s: dict) -> str:
     if action == "code-fix":
         return "Code fix"
     if action == "re-run":
-        return "Re-run failed CI"
+        return "CI re-run"
     if action == "awaiting-triage":
         return "Triage"
     if action == "wait-upstream":
         return "Wait upstream"
-    if verdict == "Running":
-        # CI is still going and nothing has failed yet — waiting, not idle.
-        return "Pending"
+    # A re-run we fired for this head SHA that is still in flight stays visible
+    # as `CI re-run`, even if a later sweep overwrote last_action (e.g. the only
+    # remaining red became gate-only). Otherwise the row reads "-" while our own
+    # re-run is the thing everyone is waiting on.
+    sha = s.get("head_sha", "")
+    if (ci_verdict(s) == "Pending"
+            and any(r.get("sha") == sha for r in (s.get("reruns") or {}).values())):
+        return "CI re-run"
+    # Pending lives in the Verdict column now; an in-flight run we did not
+    # touch needs no action from us.
     return "-"
 
 

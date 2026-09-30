@@ -211,7 +211,14 @@ or `41870`.
 bug** means reading job logs — that is `/ci-analysis`, which needs a Claude turn,
 so no button can do it. Registering cron likewise needs a Claude turn.
 
-**Verdict column** is the answer to "is this just flaky, or is it stuck?":
+**Verdict** is the CI state only — `Pass` / `Pending` (in flight, first run or
+re-run) / `Fail`. **Action** is what to do — `CI re-run` (one is in flight),
+`Solve conflict`, `Merge main`, `Code fix`, `Triage`, `Wait upstream`, or `-`.
+**Status** carries the job counts (`34 pass, 2 fail, 10 running`), the conflict
+notice proof, and the triage reason; it flags the counts as stale when they
+predate a re-run.
+
+The internal verdicts map onto those columns as:
 
 | Verdict | Means |
 |---|---|
