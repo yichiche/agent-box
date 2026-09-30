@@ -50,7 +50,13 @@ EXTRA_SKIP_RE = re.compile(r"sgl-router", re.I)
 # are these has no root cause *here* — the real failure is in a skipped job or
 # an out-of-scope vendor workflow, and re-running the gate just re-fails it.
 ROLLUP_RE = re.compile(r"(-finish$|\bpr-gate\b|Standard Test Results|^finish$)", re.I)
-CASCADE_RE = re.compile(r"^(wait-for-|check-pr-test-health)", re.I)
+# Watchers are NOT rollups. A rollup only mirrors other jobs' results, so
+# re-running it can never change the outcome. A watcher polls the GitHub API and
+# dies on its own — HttpError 5xx, timeout — while the jobs it watches are still
+# green and running. That failure IS re-runnable, and lumping the two together
+# made an identical `wait-for-base-b` HttpError get re-run on one PR and written
+# off as out-of-scope on another. Watchers go to triage so the log decides.
+WATCHER_RE = re.compile(r"^(wait-for-|check-pr-test-health)", re.I)
 
 MAX_RERUNS = 2  # per (PR, head SHA, workflow)
 SWEEP_DEDUP_MINUTES = 30
@@ -184,6 +190,15 @@ def gh(args: list[str], check: bool = True) -> str:
     return proc.stdout
 
 
+def gh_try(args: list[str]) -> tuple[int, str, str]:
+    """gh that reports failure instead of exiting — for calls with expected
+    non-fatal errors, e.g. re-running a workflow that is still in progress."""
+    env = dict(os.environ, GH_TOKEN="")
+    p = subprocess.run(["gh", *args], capture_output=True, text=True,
+                       env=env, timeout=180)
+    return p.returncode, p.stdout, p.stderr.strip()
+
+
 def parse_pr(ref: str) -> str:
     """Accept a full PR URL, `#41870`, or a bare number."""
     ref = ref.strip()
@@ -313,16 +328,22 @@ def failed_in_scope(pr: str, repo: str) -> tuple[dict, dict]:
         wf = c["workflow"]
         name = c.get("name", "?")
         g = groups.setdefault(
-            wf, {"run_id": run_id_of(c.get("link", "")), "jobs": [], "gate_jobs": []}
+            wf,
+            {"run_id": run_id_of(c.get("link", "")), "jobs": [],
+             "gate_jobs": [], "watcher_jobs": []},
         )
-        if ROLLUP_RE.search(name) or CASCADE_RE.match(name):
+        if WATCHER_RE.match(name):
+            g["watcher_jobs"].append(name)
+        elif ROLLUP_RE.search(name):
             g["gate_jobs"].append(name)
         else:
             g["jobs"].append(name)
         if not g["run_id"]:
             g["run_id"] = run_id_of(c.get("link", ""))
     for g in groups.values():
-        g["gate_only"] = not g["jobs"]
+        # Only a pure rollup failure is unactionable. A failed watcher still
+        # needs a human/agent to read why it died.
+        g["gate_only"] = not g["jobs"] and not g["watcher_jobs"]
     return groups, tally
 
 
@@ -448,10 +469,15 @@ def cmd_sweep(a) -> None:
                 print(f"        {w}: GATE-ONLY ({', '.join(g['gate_jobs'][:4])}) — "
                       f"no test job failed here; root cause is in a skipped job or an "
                       f"out-of-scope vendor workflow. Re-running would just re-fail.")
-            else:
+                continue
+            if g["watcher_jobs"]:
+                print(f"        {w}: WATCHER FAILED ({', '.join(g['watcher_jobs'][:3])}) "
+                      f"— check the log: an API/timeout death is re-runnable, a "
+                      f"watched-job failure is not.")
+            if g["jobs"]:
                 print(f"        {w}: {', '.join(g['jobs'][:6])}"
-                      f"{' …' if len(g['jobs']) > 6 else ''}  "
-                      f"[run {g['run_id']}, reruns {used}/{MAX_RERUNS}]")
+                      f"{' …' if len(g['jobs']) > 6 else ''}")
+            print(f"           [run {g['run_id']}, reruns {used}/{MAX_RERUNS}]")
         s["failed_groups"] = groups
         if not real:
             # Every in-scope failure is an aggregation gate, so the root cause is
@@ -556,7 +582,18 @@ def cmd_apply_verdict(a) -> None:
             continue
         endpoint = f"repos/{a.repo}/actions/runs/{run_id}/rerun-failed-jobs"
         if a.apply:
-            gh(["api", "-X", "POST", endpoint])
+            rc, _, err = gh_try(["api", "-X", "POST", endpoint])
+            if rc != 0:
+                # "already running" is the common one: some shards are still in
+                # progress, so GitHub refuses. Not an error worth losing the
+                # verdict over — the next sweep retries, and the attempt is not
+                # counted against the cap because nothing was re-run.
+                if "already running" in err.lower():
+                    why = "deferred — workflow still running, next sweep retries"
+                else:
+                    why = err.splitlines()[-1] if err else "rerun failed"
+                skipped.append(f"{wf} ({why})")
+                continue
             reruns[wf] = {"sha": sha, "count": used + 1, "at": now()}
             did.append(f"{wf} (run {run_id}, attempt {used + 1}/{MAX_RERUNS})")
         else:
