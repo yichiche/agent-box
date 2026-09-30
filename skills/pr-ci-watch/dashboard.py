@@ -112,6 +112,7 @@ PAGE = """<!doctype html>
   .ok {{ color:var(--ok); }} .warn {{ color:var(--warn); }} .bad {{ color:var(--bad); }}
   .mono {{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }}
   .empty {{ color:var(--dim); padding:28px; text-align:center; }}
+  .reason {{ max-width:40ch; white-space:normal; word-break:break-word; margin-top:2px; }}
   .inline {{ display:inline; }}
   .linkish {{ background:none; border:none; color:var(--dim); padding:0 4px;
     font:inherit; font-size:12px; cursor:pointer; }}
@@ -213,6 +214,7 @@ ACTION_CLASS = {
     "code-fix": "bad",
     "merge-main": "warn",
     "wait-upstream": "warn",
+    "out-of-scope": "dim",
 }
 
 # The whole point of the Verdict column: say what to DO, not just what happened.
@@ -224,7 +226,8 @@ ACTION_HINT = {
     "code-fix": "real bug in this PR — author must fix",
     "merge-main": "STUCK: PR is behind main — merge/rebase main",
     "conflict": "STUCK: conflicts — author notified; /pr-conflict-fix to fix",
-    "wait-upstream": "STUCK: blocked on an upstream fix",
+    "wait-upstream": "STUCK: an NVIDIA job is blocked on an upstream fix",
+    "out-of-scope": "nothing to do — red is outside NVIDIA scope",
 }
 
 
@@ -248,6 +251,19 @@ def ci_cell(s: dict) -> str:
     if not groups:
         return '<span class="dim">&mdash;</span>'
     out = []
+    # After a re-run the stored failure list describes the run we *replaced*.
+    # Showing it as if it were current is what made this column unreadable.
+    last_rerun = max(
+        (r.get("at", "") for r in (s.get("reruns") or {}).values()
+         if r.get("sha") == s.get("head_sha")),
+        default="",
+    )
+    if last_rerun and last_rerun > (s.get("last_sweep") or ""):
+        out.append(
+            f'<div class="warn"><b>stale</b> &mdash; this is the state <i>before</i> '
+            f'the {esc(last_rerun[11:19])} re-run. Hit <b>Refresh now</b> for '
+            f"current status.</div>"
+        )
     for wf, g in groups.items():
         if g.get("gate_only"):
             out.append(f'<div class="mono warn">{esc(wf)} <span class="dim">'
@@ -266,8 +282,51 @@ def rerun_cell(s: dict) -> str:
             continue  # budget resets on a new push; stale rows are noise
         n = rec.get("count", 0)
         cls = "bad" if n >= MAX_RERUNS else "warn"
-        rows.append(f'<div class="mono {cls}">{esc(wf)} {n}/{MAX_RERUNS}</div>')
-    return "".join(rows) or '<span class="dim">&mdash;</span>'
+        at = (rec.get("at") or "")[11:19]  # HH:MM:SS
+        rows.append(
+            f'<div class="mono {cls}">{esc(wf)} {n}/{MAX_RERUNS}</div>'
+            f'<div class="dim">re-run sent {esc(at)} UTC</div>'
+        )
+    return "".join(rows) or '<span class="dim">never</span>'
+
+
+def verdict_cell(s: dict, action: str) -> str:
+    """Short status token only. Every explanation lives in the detail column."""
+    return f'<span class="pill {ACTION_CLASS.get(action, "dim")}">{esc(action)}</span>'
+
+
+def notify_cell(s: dict) -> str:
+    """Conflicts are the one thing this tool says to a third party — so show
+    proof it happened, or say plainly that it has not."""
+    if s.get("mergeable") != "CONFLICTING":
+        return ""
+    if s.get("conflict_comment_sha") != s.get("head_sha"):
+        return ('<div class="bad"><b>NOT notified yet</b> — the author has not '
+                "been told about this conflict.</div>")
+    at = (s.get("conflict_comment_at") or "")[11:16]
+    url = s.get("conflict_comment_url", "")
+    link = f' &middot; <a href="{esc(url)}" target="_blank">see comment</a>' if url else ""
+    return (f'<div class="ok"><b>Notified</b> @{esc(s.get("author"))} '
+            f"{esc(at)} UTC{link}</div>")
+
+
+def detail_cell(pr: str, s: dict, meta: dict) -> str:
+    """What is going on, in words: the auto verdict reason plus your own note."""
+    out = []
+    n = notify_cell(s)
+    if n:
+        out.append(n)
+    hint = ACTION_HINT.get(s.get("last_action", ""), "")
+    if hint:
+        out.append(f'<div><b>{esc(hint)}</b></div>')
+    # Wrap, never truncate: cutting the reason mid-word ("…OOM on a 32GB GPU;
+    # un") is worse than showing no reason at all.
+    if s.get("last_verdict"):
+        at = (s.get("verdict_at") or "")[11:16]
+        out.append(f'<div class="dim reason">{esc(s["last_verdict"])}'
+                   f'<span class="dim"> ({esc(at)} UTC)</span></div>')
+    out.append(note_cell(pr, meta))
+    return "".join(out)
 
 
 def prio_cell(pr: str, meta: dict) -> str:
@@ -296,7 +355,7 @@ def render_table(wl: dict, st: dict) -> str:
         return EMPTY
     head = (
         "<tr><th>Pri</th><th>PR</th><th>Track</th><th>Merge</th><th>Red NVIDIA CI</th>"
-        "<th>Verdict</th><th>Re-runs</th><th>Note (line 2 of the report)</th>"
+        "<th>Verdict</th><th>Re-runs</th><th>What's going on / note</th>"
         "<th>Last swept</th><th></th></tr>"
     )
     rows = []
@@ -320,11 +379,9 @@ def render_table(wl: dict, st: dict) -> str:
             f"</button></form></td>"
             f"<td>{merge_cell(s)}</td>"
             f"<td>{ci_cell(s)}</td>"
-            f'<td><span class="{ACTION_CLASS.get(action, "dim")}">{esc(action)}</span>'
-            f'<div class="dim"><b>{esc(ACTION_HINT.get(action, ""))}</b></div>'
-            f'<div class="dim">{esc(s.get("last_verdict", "")[:70])}</div></td>'
+            f'<td>{verdict_cell(s, action)}</td>'
             f"<td>{rerun_cell(s)}</td>"
-            f"<td>{note_cell(pr, meta)}</td>"
+            f"<td>{detail_cell(pr, s, meta)}</td>"
             f'<td class="mono dim">{esc(s.get("last_sweep", "never"))}</td>'
             f'<td><form class="inline" method="post" action="/api/remove">'
             f'<input type="hidden" name="pr" value="{esc(pr)}">'

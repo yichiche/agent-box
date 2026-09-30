@@ -54,7 +54,7 @@ CASCADE_RE = re.compile(r"^(wait-for-|check-pr-test-health)", re.I)
 
 MAX_RERUNS = 2  # per (PR, head SHA, workflow)
 SWEEP_DEDUP_MINUTES = 30
-ACTIONS = ("re-run", "code-fix", "merge-main", "wait-upstream")
+ACTIONS = ("re-run", "code-fix", "merge-main", "wait-upstream", "out-of-scope")
 
 PRIORITIES = ("P0", "P1", "P2")
 # Reporting label, not the sweep cadence. Defaults off the track so you only
@@ -70,6 +70,7 @@ CI_TOKEN = {
     "code-fix": "CI fail",
     "merge-main": "merge main",
     "wait-upstream": "blocked",
+    "out-of-scope": "CI n/a",
 }
 
 AGENT_BOX = Path(__file__).resolve().parents[2]
@@ -409,10 +410,16 @@ def cmd_sweep(a) -> None:
             else:
                 body = conflict_comment(author, sha, snap.get("headRefName", "?"))
                 if a.apply:
-                    gh(["pr", "comment", pr, "--repo", repo, "--body", body])
+                    # gh prints the comment URL; keep it so the dashboard can
+                    # link to the actual proof rather than just claiming it.
+                    out = gh(["pr", "comment", pr, "--repo", repo, "--body", body])
+                    url = next((ln.strip() for ln in out.splitlines()
+                                if ln.strip().startswith("http")), "")
                     s["conflict_comment_sha"] = sha
-                    log_line(f"#{pr} conflict comment posted for {sha[:8]} -> @{author}")
-                    print(f"#{pr}  CONFLICTING — commented to @{author}")
+                    s["conflict_comment_url"] = url
+                    s["conflict_comment_at"] = now()
+                    log_line(f"#{pr} conflict comment posted for {sha[:8]} -> @{author} {url}")
+                    print(f"#{pr}  CONFLICTING — commented to @{author}  {url}")
                 else:
                     print(f"#{pr}  CONFLICTING — would comment to @{author}:")
                     print("      " + body.replace("\n", "\n      "))
@@ -446,6 +453,21 @@ def cmd_sweep(a) -> None:
                       f"{' …' if len(g['jobs']) > 6 else ''}  "
                       f"[run {g['run_id']}, reruns {used}/{MAX_RERUNS}]")
         s["failed_groups"] = groups
+        if not real:
+            # Every in-scope failure is an aggregation gate, so the root cause is
+            # in a vendor workflow we deliberately ignore (or a job that never
+            # ran). There is nothing here to re-run and nothing for /ci-analysis
+            # to decide — spending a triage pass on it just burns time.
+            s["last_action"] = "out-of-scope"
+            s["last_verdict"] = (
+                "no in-scope NVIDIA job failed; only aggregation gates are red"
+            )
+            s["verdict_at"] = now()
+            print("        -> out-of-scope: nothing in NVIDIA scope to act on; "
+                  "no triage needed")
+            row["outcome"] = "out-of-scope"
+            report.append(row)
+            continue
         s["last_action"] = "awaiting-triage"
         row["outcome"] = "needs-triage"
         row["groups"] = groups
@@ -500,7 +522,9 @@ def cmd_apply_verdict(a) -> None:
         note = {
             "code-fix": "real failure attributed to this PR — NOT re-running; author must fix",
             "merge-main": "main already has the fix — NOT re-running; PR should merge main",
-            "wait-upstream": "blocked on an upstream/dependency fix — NOT re-running",
+            "wait-upstream": "an in-scope NVIDIA job is blocked on an upstream fix",
+            "out-of-scope": "no in-scope NVIDIA failure — the red is from a vendor "
+                            "workflow we ignore; nothing to do here",
         }[a.action]
         print(f"#{pr}  {a.action}: {note}")
         print(f"       {a.summary}")

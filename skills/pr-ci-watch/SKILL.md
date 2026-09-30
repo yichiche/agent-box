@@ -102,10 +102,19 @@ Cause Failures** table, and reduce it to **one** action:
 | any `Action: wait upstream` | `wait-upstream` — record, no re-run |
 | all remaining `Action: re-run` | `re-run` |
 
-Precedence: `code-fix` > `merge-main` > `wait-upstream` > `re-run`. When
-`/ci-analysis` traces the root cause into a **vendor** workflow (AMD, NPU, …),
-that is out of scope — record `wait-upstream` or `code-fix` as it directs and do
-not re-run the NVIDIA gates.
+Precedence: `code-fix` > `merge-main` > `wait-upstream` > `re-run`.
+
+**When the root cause is not NVIDIA, the verdict is `out-of-scope` — never
+`wait-upstream`.** If `/ci-analysis` traces the failure into a vendor workflow
+(NPU, AMD, MUSA, …), this tool has nothing to act on: those workflows are
+excluded by design, and the red NVIDIA gates are only echoing them. Reserve
+`wait-upstream` for an **in-scope NVIDIA job** genuinely blocked on a dependency
+(the `cutlass-dsl` pin bug is the archetype).
+
+The sweep now reaches this conclusion on its own: a PR whose in-scope failures
+are *all* gate-only is recorded `out-of-scope` and never enters the triage
+queue, because there is nothing to re-run and nothing for `/ci-analysis` to
+decide.
 
 ### Phase C — act
 
@@ -186,7 +195,8 @@ so no button can do it. Registering cron likewise needs a Claude turn.
 | `re-run` | cleared as unrelated and re-run; waiting on CI |
 | `merge-main` | **stuck** — main has the fix, the PR is behind; merge/rebase main |
 | `conflict` | **stuck** — author notified; `/pr-conflict-fix` to resolve |
-| `wait-upstream` | **stuck** — blocked on an upstream/dependency fix |
+| `wait-upstream` | **stuck** — an in-scope NVIDIA job is blocked on an upstream fix |
+| `out-of-scope` | nothing to do — the red is entirely from vendor workflows (NPU/AMD/…) |
 | `code-fix` | real bug in this PR; author must fix. Never re-run |
 
 > The server reads and writes only `watchlist.json` / `state.json`. It makes no
