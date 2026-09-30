@@ -83,6 +83,24 @@ conflict case (below); otherwise classifies in-scope failed checks into
 A PR swept in the last 30 minutes is skipped (so the daily track does not redo a
 high sweep that just ran). `--force` or `--pr N` overrides.
 
+### Two failures the sweep resolves without a triage pass
+
+**Watcher-only → auto `re-run`.** A `wait-for-*` job that failed with *no* real
+failing job beside it died on its own — GitHub API 5xx, timeout — while the jobs
+it watched were still green. (If a watched job had truly failed, it would be in
+the failure list too.) That is unambiguous infra, so the sweep records `re-run`
+directly instead of spending a `/ci-analysis` pass on it.
+
+**Same failure after a re-run → stop, evaluate `merge main`.** Each re-run stores
+a signature of what failed. If the next sweep sees the identical set of failing
+jobs for the same head SHA, it prints `SAME FAILURE AFTER RE-RUN` and forces the
+PR into triage with an explicit instruction: do **not** record `re-run` again —
+check `gh api compare/<head>...main` and prefer `merge-main`, or `code-fix` if it
+is the PR's own bug. The dashboard shows the same warning in red.
+
+This is the escalation ladder: *re-run once → if it comes back identical, it is
+not flaky, so stop retrying and look at main.*
+
 **Gate-only** uses the same taxonomy as `/ci-analysis` Phase 2.5: `*-finish`,
 `pr-gate`, `Standard Test Results`, `wait-for-*`, `check-pr-test-health`. A
 workflow whose only in-scope failures are these has **no root cause here** — the

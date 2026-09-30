@@ -283,6 +283,12 @@ def ci_cell(s: dict) -> str:
         if g.get("gate_only"):
             out.append(f'<div class="dim">{esc(wf)}: gate only, not re-runnable</div>')
             continue
+        if g.get("repeat_after_rerun"):
+            out.append(
+                f'<div class="bad"><b>{esc(wf)}: SAME failure after '
+                f'{g["repeat_after_rerun"]} re-run(s)</b> &mdash; re-running '
+                f"again will not help; evaluate <b>Merge main</b>.</div>"
+            )
         if g.get("watcher_jobs"):
             out.append(
                 f'<div class="warn">{esc(wf)}: watcher died &mdash; '

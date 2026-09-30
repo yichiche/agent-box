@@ -416,6 +416,12 @@ def failed_in_scope(pr: str, repo: str) -> tuple[dict, dict]:
         # Only a pure rollup failure is unactionable. A failed watcher still
         # needs a human/agent to read why it died.
         g["gate_only"] = not g["jobs"] and not g["watcher_jobs"]
+        # A watcher that died with no real job failure beside it died on its
+        # own — API 5xx, timeout — while the jobs it watched were fine. That is
+        # unambiguous infra, so it does not need a triage pass.
+        g["watcher_only"] = bool(g["watcher_jobs"]) and not g["jobs"]
+        # Signature of *what* failed, so a repeat after a re-run is detectable.
+        g["sig"] = "|".join(sorted(g["jobs"] + g["watcher_jobs"]))
     return groups, tally
 
 
@@ -447,6 +453,7 @@ def cmd_sweep(a) -> None:
 
     report: list[dict] = []
     triage: list[str] = []
+    rerun: list[str] = []
     for pr in sorted(targets, key=int):
         meta = targets[pr] or {}
         repo = meta.get("repo") or a.repo
@@ -552,6 +559,19 @@ def cmd_sweep(a) -> None:
                       f"{' …' if len(g['jobs']) > 6 else ''}")
             tried = f", re-run x{used} so far" if used else ""
             print(f"           [run {g['run_id']}{tried}]")
+        # Did a workflow come back with the *same* failure after we re-ran it?
+        # Re-running again would just repeat it; that is the signal to evaluate
+        # `merge main` instead.
+        repeats = []
+        for w, g in groups.items():
+            rec = (s.get("reruns") or {}).get(w)
+            if rec and rec.get("sha") == sha and rec.get("sig") == g["sig"]:
+                g["repeat_after_rerun"] = rec.get("count", 1)
+                repeats.append(f"{w} (x{rec.get('count', 1)})")
+        if repeats:
+            print(f"        !! SAME FAILURE AFTER RE-RUN: {', '.join(repeats)} — "
+                  f"stop re-running; evaluate `merge main`")
+
         s["failed_groups"] = groups
         if not real:
             # Every in-scope failure is an aggregation gate, so the root cause is
@@ -568,6 +588,26 @@ def cmd_sweep(a) -> None:
             row["outcome"] = "out-of-scope"
             report.append(row)
             continue
+        # Watcher-only failure, first time round: the watcher died on its own
+        # (API 5xx / timeout) while the jobs it watched were still fine — if a
+        # watched job had actually failed it would be sitting in `jobs` too.
+        # That is unambiguous infra, so re-run it without spending a triage pass.
+        # A *repeat* of the same failure is different: stop and evaluate main.
+        if (all(g["watcher_only"] or g["gate_only"] for g in groups.values())
+                and not any(g.get("repeat_after_rerun") for g in groups.values())):
+            watchers = [w for w, g in groups.items() if g["watcher_only"]]
+            s["last_action"] = "re-run"
+            s["last_verdict"] = (
+                f"watcher {', '.join(sorted({j for w in watchers for j in groups[w]['watcher_jobs']}))} "
+                f"died on its own (API/timeout) with no failing test beside it"
+            )
+            s["verdict_at"] = now()
+            print("        -> re-run: watcher-only failure, no triage needed")
+            row["outcome"] = "auto-re-run"
+            rerun.append(pr)
+            report.append(row)
+            continue
+
         s["last_action"] = "awaiting-triage"
         row["outcome"] = "needs-triage"
         row["groups"] = groups
@@ -581,16 +621,30 @@ def cmd_sweep(a) -> None:
     save(SWEEPS / f"{stamp}.json", {"track": a.track, "at": now(), "rows": report})
     log_line(f"sweep track={a.track} prs={len(targets)} triage={len(triage)} apply={a.apply}")
 
+    if rerun:
+        print("\n=== AUTO RE-RUN (no triage needed) ===")
+        for pr in rerun:
+            print(f"  python3 {Path(__file__).name} apply-verdict --pr {pr} "
+                  f"--action re-run --summary \"{st[pr]['last_verdict']}\" --apply")
+
     if triage:
         print("\n=== TRIAGE REQUIRED ===")
         print("Run /ci-analysis on each PR below, reduce its Root Cause Failures table")
         print("to one action, then record it:\n")
         for pr in triage:
+            reps = [w for w, g in (st[pr].get("failed_groups") or {}).items()
+                    if g.get("repeat_after_rerun")]
+            if reps:
+                print(f"  !! {', '.join(reps)} failed the SAME way after a re-run.")
+                print("     Do NOT record re-run again. Check whether main already")
+                print("     has the fix (gh api compare/<head>...main) and prefer")
+                print("     `merge-main`; use `code-fix` if it is the PR's own bug.")
             print(f"  /ci-analysis {st[pr].get('url') or pr}")
             print(f"  python3 {Path(__file__).name} apply-verdict --pr {pr} "
-                  f"--action <re-run|code-fix|merge-main|wait-upstream> "
+                  f"--action <re-run|code-fix|merge-main|wait-upstream|out-of-scope> "
                   f"--summary \"<one line>\" --apply\n")
-    else:
+
+    if not triage and not rerun:
         print("\nno triage needed.")
 
 
@@ -665,7 +719,10 @@ def cmd_apply_verdict(a) -> None:
                     why = err.splitlines()[-1] if err else "rerun failed"
                 skipped.append(f"{wf} ({why})")
                 continue
-            reruns[wf] = {"sha": sha, "count": used + 1, "at": now()}
+            # Store what failed, so the next sweep can tell "same failure again"
+            # from "a different failure this time".
+            reruns[wf] = {"sha": sha, "count": used + 1, "at": now(),
+                          "sig": g.get("sig", "")}
             did.append(f"{wf} (run {run_id}, attempt {used + 1})")
         else:
             did.append(f"WOULD rerun {wf} (run {run_id}, attempt {used + 1})")
