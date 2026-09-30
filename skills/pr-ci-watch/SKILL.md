@@ -193,8 +193,8 @@ so no button can do it. Registering cron likewise needs a Claude turn.
 | `green` | nothing to do |
 | `awaiting-triage` | real failing NVIDIA jobs, no verdict yet — needs `/ci-analysis` |
 | `re-run` | cleared as unrelated and re-run; waiting on CI |
-| `merge-main` | **stuck** — main has the fix, the PR is behind; merge/rebase main |
-| `conflict` | **stuck** — author notified; `/pr-conflict-fix` to resolve |
+| `merge-main` | **stuck** — no conflict, but main already has the fix for a CI failure and the PR is behind. Action: **Merge main** |
+| `conflict` | **stuck** — the branch has git conflicts with main; CI cannot complete. Action: **Solve conflict** (a different problem from `merge-main` — never label them the same) |
 | `wait-upstream` | **stuck** — an in-scope NVIDIA job is blocked on an upstream fix |
 | `out-of-scope` | nothing to do — the red is entirely from vendor workflows (NPU/AMD/…) |
 | `code-fix` | real bug in this PR; author must fix. Never re-run |

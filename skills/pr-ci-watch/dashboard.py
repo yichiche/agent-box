@@ -227,7 +227,7 @@ ACTION_HINT = {
     "re-run": "re-ran; waiting on CI",
     "code-fix": "real bug in this PR — author must fix",
     "merge-main": "STUCK: PR is behind main — merge/rebase main",
-    "conflict": "STUCK: conflicts — author notified; /pr-conflict-fix to fix",
+    "conflict": "git conflict with main — author must resolve; /pr-conflict-fix",
     "wait-upstream": "STUCK: an NVIDIA job is blocked on an upstream fix",
     "out-of-scope": "nothing to do — red is outside NVIDIA scope",
 }
@@ -299,6 +299,7 @@ def ci_cell(s: dict) -> str:
 
 VERDICT_CLASS = {"Pass": "ok", "Running": "warn", "Fail": "bad", "—": "dim"}
 ACTION_COLOR = {
+    "Solve conflict": "bad",
     "Merge main": "bad",
     "Code fix": "bad",
     "Re-run failed CI": "warn",

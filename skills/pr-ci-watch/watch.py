@@ -156,6 +156,10 @@ def tw(iso: str | None) -> str:
 
 def ci_verdict(s: dict) -> str:
     """Current in-scope CI state, not our internal bookkeeping."""
+    # A conflicting branch is a failure in its own right: CI cannot complete, so
+    # say Fail rather than showing an empty verdict because no tally was taken.
+    if s.get("mergeable") == "CONFLICTING":
+        return "Fail"
     t = s.get("tally") or {}
     if not s.get("last_sweep") or not t:
         return "—"
@@ -179,7 +183,14 @@ def ci_action(s: dict) -> str:
     """What needs doing about it."""
     action = s.get("last_action")
     verdict = ci_verdict(s)
-    if s.get("mergeable") == "CONFLICTING" or action == "merge-main":
+    # Two different problems that must not share a label:
+    #   Solve conflict -> the branch has git conflicts with main; the author has
+    #                     to resolve them before CI can even finish.
+    #   Merge main     -> no conflict; main simply already contains the fix for
+    #                     a CI failure and the PR is behind.
+    if s.get("mergeable") == "CONFLICTING":
+        return "Solve conflict"
+    if action == "merge-main":
         return "Merge main"
     if action == "code-fix":
         return "Code fix"
