@@ -260,12 +260,34 @@ def job_links(g: dict, names: list, limit: int = 4) -> str:
     return ", ".join(out)
 
 
+def last_failure_block(s: dict, prefix: str = "Last failure") -> str:
+    """What actually broke, from the most recent sweep that saw a real failure.
+
+    Live checks go back to "only aggregation gates are red" as soon as a re-run
+    starts, and `gate only, not re-runnable` says nothing about what broke. This
+    keeps the useful part on screen.
+    """
+    lf = s.get("last_real_failure") or {}
+    if not lf or lf.get("sha") != s.get("head_sha"):
+        return ""  # a new push invalidates it
+    rows = []
+    for wf, g in (lf.get("groups") or {}).items():
+        names = (g.get("jobs") or []) + (g.get("watcher_jobs") or [])
+        if names:
+            rows.append(f'<div>{esc(wf)}: {job_links(g, names)}</div>')
+    if not rows:
+        return ""
+    return (f'<div class="dim" style="margin-top:4px;"><b>{prefix}</b> '
+            f'{esc(tw(lf.get("at")))}:</div>' + "".join(rows))
+
+
 def ci_cell(s: dict) -> str:
     groups = s.get("failed_groups") or {}
     if s.get("last_action") == "green":
-        return '<span class="ok">clean</span>'
+        return ('<span class="ok">clean</span>'
+                + last_failure_block(s, "Previously failed"))
     if not groups:
-        return '<span class="dim">&mdash;</span>'
+        return '<span class="dim">&mdash;</span>' + last_failure_block(s)
     out = []
     # After a re-run the stored failure list describes the run we *replaced*.
     # Showing it as if it were current is what made this column unreadable.
@@ -279,9 +301,21 @@ def ci_cell(s: dict) -> str:
             f'<div class="warn"><b>stale</b> &mdash; state from before the '
             f'{esc(tw(last_rerun))} re-run. Hit <b>Refresh now</b>.</div>'
         )
+    gates = [wf for wf, g in groups.items() if g.get("gate_only")]
+    if gates and len(gates) == len(groups):
+        # Nothing real is red right now. Say what that means, then show the last
+        # real failure so the column still answers "what broke?".
+        block = last_failure_block(s)
+        out.append(
+            '<div class="dim">no NVIDIA job is failing; the red is aggregation '
+            "gates mirroring out-of-scope vendor workflows</div>"
+            if not block else
+            '<div class="dim">no NVIDIA job is failing right now &mdash; only '
+            "aggregation gates</div>"
+        )
+        out.append(block)
     for wf, g in groups.items():
         if g.get("gate_only"):
-            out.append(f'<div class="dim">{esc(wf)}: gate only, not re-runnable</div>')
             continue
         if g.get("repeat_after_rerun"):
             out.append(

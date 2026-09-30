@@ -548,6 +548,20 @@ def cmd_sweep(a) -> None:
             continue
 
         real = {w: g for w, g in groups.items() if not g["gate_only"]}
+        if real:
+            # Remember the last genuinely failing jobs. Once a re-run is in
+            # flight the live checks often show nothing but red aggregation
+            # gates, and "gate only" tells you nothing about what actually
+            # broke — this is what the dashboard falls back to.
+            s["last_real_failure"] = {
+                "at": now(),
+                "sha": sha,
+                "groups": {
+                    w: {"jobs": g["jobs"], "watcher_jobs": g["watcher_jobs"],
+                        "job_links": g.get("job_links", {}), "run_id": g["run_id"]}
+                    for w, g in real.items()
+                },
+            }
         print(f"#{pr}  {len(groups)} in-scope workflow(s) red "
               f"({len(real)} with a real failing job)")
         for w, g in groups.items():

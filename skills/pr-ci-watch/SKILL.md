@@ -108,6 +108,12 @@ real failure is in a skipped job or an out-of-scope vendor workflow, and
 re-running an aggregation gate cannot turn it green. `apply-verdict` refuses to
 re-run those unless you pass `--force-gates`.
 
+Because a gate-only red says nothing about *what broke*, every sweep that sees a
+real failure stores it as `last_real_failure` (jobs + their log URLs, scoped to
+the head SHA). The dashboard falls back to that whenever the live checks show
+only gates — which is the normal state once a re-run is in flight — so the
+column always answers "what failed?" instead of printing an unactionable label.
+
 ### Phase B — triage (you, via `/ci-analysis`)
 
 For each PR the sweep flagged, run `/ci-analysis <pr url>`, read its **Root
