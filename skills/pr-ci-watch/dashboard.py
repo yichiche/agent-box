@@ -29,7 +29,8 @@ from watch import (  # noqa: E402
     PRIORITIES,
     STATE,
     WATCHLIST,
-    ci_token,
+    ci_action,
+    ci_verdict,
     load,
     monitoring_enabled,
     now,
@@ -38,6 +39,7 @@ from watch import (  # noqa: E402
     report_text,
     save,
     set_monitoring,
+    tw,
 )
 
 REFRESH_SECONDS = 60
@@ -244,6 +246,21 @@ def merge_cell(s: dict) -> str:
     return f'<span class="pill warn">{esc(str(m).lower())}</span>'
 
 
+def job_links(g: dict, names: list, limit: int = 4) -> str:
+    """Link straight to the failing jobs — the point of the column is to get you
+    to the log in one click, not to name a workflow you then have to go find."""
+    links = g.get("job_links") or {}
+    out = []
+    for n in names[:limit]:
+        short = n.split(" / ")[-1]
+        url = links.get(n)
+        out.append(f'<a href="{esc(url)}" target="_blank">{esc(short)}</a>'
+                   if url else esc(short))
+    if len(names) > limit:
+        out.append(f'<span class="dim">+{len(names) - limit} more</span>')
+    return ", ".join(out)
+
+
 def ci_cell(s: dict) -> str:
     groups = s.get("failed_groups") or {}
     if s.get("last_action") == "green":
@@ -260,39 +277,63 @@ def ci_cell(s: dict) -> str:
     )
     if last_rerun and last_rerun > (s.get("last_sweep") or ""):
         out.append(
-            f'<div class="warn"><b>stale</b> &mdash; this is the state <i>before</i> '
-            f'the {esc(last_rerun[11:19])} re-run. Hit <b>Refresh now</b> for '
-            f"current status.</div>"
+            f'<div class="warn"><b>stale</b> &mdash; state from before the '
+            f'{esc(tw(last_rerun))} re-run. Hit <b>Refresh now</b>.</div>'
         )
     for wf, g in groups.items():
         if g.get("gate_only"):
-            out.append(f'<div class="mono warn">{esc(wf)} <span class="dim">'
-                       f"(gate only &mdash; not re-runnable)</span></div>")
-        else:
-            out.append(f'<div class="mono bad">{esc(wf)} <span class="dim">'
-                       f'({len(g.get("jobs", []))} failed)</span></div>')
+            out.append(f'<div class="dim">{esc(wf)}: gate only, not re-runnable</div>')
+            continue
+        if g.get("watcher_jobs"):
+            out.append(
+                f'<div class="warn">{esc(wf)}: watcher died &mdash; '
+                f'{job_links(g, g["watcher_jobs"])}</div>'
+            )
+        if g.get("jobs"):
+            out.append(
+                f'<div class="bad"><b>{esc(wf)}</b> ({len(g["jobs"])} failed):<br>'
+                f'{job_links(g, g["jobs"])}</div>'
+            )
     return "".join(out)
 
 
-def rerun_cell(s: dict) -> str:
+VERDICT_CLASS = {"Pass": "ok", "Running": "warn", "Fail": "bad", "—": "dim"}
+ACTION_COLOR = {
+    "Merge main": "bad",
+    "Code fix": "bad",
+    "Re-run failed CI": "warn",
+    "Triage": "warn",
+    "Wait upstream": "warn",
+    "Pending": "dim",
+    "-": "dim",
+}
+
+
+def verdict_cell(s: dict) -> str:
+    """Current CI state: Running / Pass / Fail."""
+    v = ci_verdict(s)
+    t = s.get("tally") or {}
+    bits = [f"{n} {k}" for k, n in
+            (("pass", t.get("pass", 0)), ("fail", t.get("fail", 0)),
+             ("running", t.get("pending", 0))) if n]
+    detail = f'<div class="dim">{esc(", ".join(bits))}</div>' if bits else ""
+    return f'<span class="pill {VERDICT_CLASS.get(v, "dim")}">{esc(v)}</span>{detail}'
+
+
+def action_cell(s: dict) -> str:
+    """What to do about it — and proof of what was already done."""
+    a = ci_action(s)
+    out = [f'<span class="pill {ACTION_COLOR.get(a, "dim")}">{esc(a)}</span>']
     sha = s.get("head_sha", "")
-    rows = []
     for wf, rec in (s.get("reruns") or {}).items():
         if rec.get("sha") != sha:
             continue  # budget resets on a new push; stale rows are noise
-        n = rec.get("count", 0)
-        cls = "bad" if n >= MAX_RERUNS else "warn"
-        at = (rec.get("at") or "")[11:19]  # HH:MM:SS
-        rows.append(
-            f'<div class="mono {cls}">{esc(wf)} {n}/{MAX_RERUNS}</div>'
-            f'<div class="dim">re-run sent {esc(at)} UTC</div>'
-        )
-    return "".join(rows) or '<span class="dim">never</span>'
-
-
-def verdict_cell(s: dict, action: str) -> str:
-    """Short status token only. Every explanation lives in the detail column."""
-    return f'<span class="pill {ACTION_CLASS.get(action, "dim")}">{esc(action)}</span>'
+        out.append(f'<div class="dim">{esc(wf)} re-run {rec.get("count", 0)}'
+                   f'/{MAX_RERUNS} &middot; {esc(tw(rec.get("at")))}</div>')
+    if a == "Re-run failed CI" and not (s.get("reruns") or {}):
+        out.append('<div class="dim">queued — GitHub refused while the run was '
+                   "still going; next sweep retries</div>")
+    return "".join(out)
 
 
 def notify_cell(s: dict) -> str:
@@ -303,30 +344,26 @@ def notify_cell(s: dict) -> str:
     if s.get("conflict_comment_sha") != s.get("head_sha"):
         return ('<div class="bad"><b>NOT notified yet</b> — the author has not '
                 "been told about this conflict.</div>")
-    at = (s.get("conflict_comment_at") or "")[11:16]
     url = s.get("conflict_comment_url", "")
     link = f' &middot; <a href="{esc(url)}" target="_blank">see comment</a>' if url else ""
     return (f'<div class="ok"><b>Notified</b> @{esc(s.get("author"))} '
-            f"{esc(at)} UTC{link}</div>")
+            f"{esc(tw(s.get('conflict_comment_at')))}{link}</div>")
 
 
-def detail_cell(pr: str, s: dict, meta: dict) -> str:
-    """What is going on, in words: the auto verdict reason plus your own note."""
+def detail_cell(s: dict) -> str:
+    """Why, in words. No input field — this column is read-only now."""
     out = []
     n = notify_cell(s)
     if n:
         out.append(n)
     hint = ACTION_HINT.get(s.get("last_action", ""), "")
     if hint:
-        out.append(f'<div><b>{esc(hint)}</b></div>')
+        out.append(f"<div>{esc(hint)}</div>")
     # Wrap, never truncate: cutting the reason mid-word ("…OOM on a 32GB GPU;
     # un") is worse than showing no reason at all.
     if s.get("last_verdict"):
-        at = (s.get("verdict_at") or "")[11:16]
-        out.append(f'<div class="dim reason">{esc(s["last_verdict"])}'
-                   f'<span class="dim"> ({esc(at)} UTC)</span></div>')
-    out.append(note_cell(pr, meta))
-    return "".join(out)
+        out.append(f'<div class="dim reason">{esc(s["last_verdict"])}</div>')
+    return "".join(out) or '<span class="dim">&mdash;</span>'
 
 
 def prio_cell(pr: str, meta: dict) -> str:
@@ -341,22 +378,13 @@ def prio_cell(pr: str, meta: dict) -> str:
     )
 
 
-def note_cell(pr: str, meta: dict) -> str:
-    return (
-        f'<form method="post" action="/api/note">'
-        f'<input type="hidden" name="pr" value="{esc(pr)}">'
-        f'<input class="note" type="text" name="note" value="{esc(meta.get("note", ""))}" '
-        f'placeholder="~5% P90 E2E improvement at TP4 conc4 agent mode"></form>'
-    )
-
-
 def render_table(wl: dict, st: dict) -> str:
     if not wl:
         return EMPTY
     head = (
         "<tr><th>Pri</th><th>PR</th><th>Track</th><th>Merge</th><th>Red NVIDIA CI</th>"
-        "<th>Verdict</th><th>Re-runs</th><th>What's going on / note</th>"
-        "<th>Last swept</th><th></th></tr>"
+        "<th>Verdict</th><th>Action</th><th>Why</th>"
+        "<th>Last swept (TW)</th><th></th></tr>"
     )
     rows = []
     for pr, meta in sorted(wl.items(), key=lambda kv: (priority_of(kv[1]), int(kv[0]))):
@@ -364,7 +392,6 @@ def render_table(wl: dict, st: dict) -> str:
         track = meta.get("track", "regular")
         other = "regular" if track == "high" else "high"
         url = s.get("url") or f"https://github.com/{meta.get('repo', '')}/pull/{pr}"
-        action = s.get("last_action", "—")
         rows.append(
             "<tr>"
             f"<td>{prio_cell(pr, meta)}</td>"
@@ -379,10 +406,10 @@ def render_table(wl: dict, st: dict) -> str:
             f"</button></form></td>"
             f"<td>{merge_cell(s)}</td>"
             f"<td>{ci_cell(s)}</td>"
-            f'<td>{verdict_cell(s, action)}</td>'
-            f"<td>{rerun_cell(s)}</td>"
-            f"<td>{detail_cell(pr, s, meta)}</td>"
-            f'<td class="mono dim">{esc(s.get("last_sweep", "never"))}</td>'
+            f"<td>{verdict_cell(s)}</td>"
+            f"<td>{action_cell(s)}</td>"
+            f"<td>{detail_cell(s)}</td>"
+            f'<td class="mono dim">{esc(tw(s.get("last_sweep")))}</td>'
             f'<td><form class="inline" method="post" action="/api/remove">'
             f'<input type="hidden" name="pr" value="{esc(pr)}">'
             f'<button class="linkish" title="stop watching">remove</button>'

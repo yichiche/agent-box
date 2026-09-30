@@ -144,6 +144,57 @@ def ci_token(s: dict) -> str:
     return CI_TOKEN.get(action, action)
 
 
+TAIPEI = timezone(timedelta(hours=8))  # Asia/Taipei — no DST, so a fixed offset
+                                       # is exact and needs no tzdata package.
+
+
+def tw(iso: str | None) -> str:
+    """UTC ISO string -> Taiwan local, e.g. '09/30 23:50'."""
+    t = parse_ts(iso)
+    return t.astimezone(TAIPEI).strftime("%m/%d %H:%M") if t else "never"
+
+
+def ci_verdict(s: dict) -> str:
+    """Current in-scope CI state, not our internal bookkeeping."""
+    t = s.get("tally") or {}
+    if not s.get("last_sweep") or not t:
+        return "—"
+    # A red aggregation gate on its own is not a failure — it mirrors jobs that
+    # are still running, or a vendor workflow we ignore. Only a real (or
+    # watcher) job failure makes the verdict Fail while work is still in flight.
+    real_fail = any(
+        g.get("jobs") or g.get("watcher_jobs")
+        for g in (s.get("failed_groups") or {}).values()
+    )
+    if real_fail:
+        return "Fail"
+    if t.get("pending"):
+        return "Running"
+    if t.get("fail"):
+        return "Fail"  # nothing left running and gates are still red
+    return "Pass" if t.get("pass") else "—"
+
+
+def ci_action(s: dict) -> str:
+    """What needs doing about it."""
+    action = s.get("last_action")
+    verdict = ci_verdict(s)
+    if s.get("mergeable") == "CONFLICTING" or action == "merge-main":
+        return "Merge main"
+    if action == "code-fix":
+        return "Code fix"
+    if action == "re-run":
+        return "Re-run failed CI"
+    if action == "awaiting-triage":
+        return "Triage"
+    if action == "wait-upstream":
+        return "Wait upstream"
+    if verdict == "Running":
+        # CI is still going and nothing has failed yet — waiting, not idle.
+        return "Pending"
+    return "-"
+
+
 def report_text(wl: dict, st: dict) -> str:
     """The paste-into-Teams block.
 
@@ -157,7 +208,9 @@ def report_text(wl: dict, st: dict) -> str:
         s = st.get(pr, {})
         title = s.get("title") or "(not swept yet — title unknown)"
         lines.append(f"<{priority_of(meta)}><{ci_token(s)}><PR{pr}>{title}")
-        note = (meta.get("note") or "").strip()
+        # Line 2 falls back to the triage reason now that the dashboard no
+        # longer has a note field; `watch.py set --note` still overrides it.
+        note = (meta.get("note") or s.get("last_verdict") or "").strip()
         if note:
             lines.append(note)
     return "\n".join(lines)
@@ -338,6 +391,10 @@ def failed_in_scope(pr: str, repo: str) -> tuple[dict, dict]:
             g["gate_jobs"].append(name)
         else:
             g["jobs"].append(name)
+        # Keep the per-job URL so the dashboard can link straight to the failing
+        # job instead of making you hunt for it in the Checks tab.
+        if c.get("link"):
+            g.setdefault("job_links", {})[name] = c["link"]
         if not g["run_id"]:
             g["run_id"] = run_id_of(c.get("link", ""))
     for g in groups.values():
@@ -452,6 +509,7 @@ def cmd_sweep(a) -> None:
         # 2. in-scope CI
         groups, tally = failed_in_scope(pr, repo)
         row["tally"] = tally
+        s["tally"] = tally  # drives the Running / Pass / Fail column
         if not groups:
             print(f"#{pr}  in-scope CI clean ({tally['pass']} pass, {tally['pending']} pending)")
             s["last_action"] = "green"
