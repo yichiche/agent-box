@@ -6,8 +6,9 @@ else. It makes no `gh` calls and cannot re-run a workflow or post a comment.
 Every outward-facing action stays in `watch.py sweep`, which runs under a Claude
 turn — so the web layer never needs credentials and has no blast radius.
 
-Binds dual-stack loopback (AF_INET6 with IPV6_V6ONLY off) so 127.0.0.1 and ::1
-both answer. Never 0.0.0.0.
+The one control that *does* bite immediately is the ON/OFF switch: it writes
+`_config.enabled`, which every sweep (including a cron-fired one) checks before
+doing anything. Pausing therefore works from the browser with no Claude turn.
 """
 
 from __future__ import annotations
@@ -21,14 +22,28 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from watch import DATA_DIR, MAX_RERUNS, STATE, WATCHLIST, load, now, parse_pr, save  # noqa: E402
+from watch import (  # noqa: E402
+    DATA_DIR,
+    MAX_RERUNS,
+    PRIORITIES,
+    STATE,
+    WATCHLIST,
+    ci_token,
+    load,
+    monitoring_enabled,
+    now,
+    parse_pr,
+    priority_of,
+    report_text,
+    save,
+    set_monitoring,
+)
 
 REFRESH_SECONDS = 60
 
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>pr-ci-watch</title>
-<meta http-equiv="refresh" content="{refresh}">
 <style>
   :root {{
     --bg:#0f1115; --panel:#171a21; --line:#272b34; --fg:#e6e8ee; --dim:#9aa1b1;
@@ -41,24 +56,31 @@ PAGE = """<!doctype html>
   * {{ box-sizing:border-box; }}
   body {{ margin:0; padding:24px; background:var(--bg); color:var(--fg);
     font:14px/1.5 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif; }}
-  h1 {{ font-size:18px; margin:0 0 2px; }}
-  .sub {{ color:var(--dim); font-size:12px; margin-bottom:18px; }}
+  h1 {{ font-size:18px; margin:0; }}
+  h2 {{ font-size:13px; margin:0 0 10px; color:var(--dim);
+    text-transform:uppercase; letter-spacing:.04em; }}
+  .sub {{ color:var(--dim); font-size:12px; }}
   .panel {{ background:var(--panel); border:1px solid var(--line);
     border-radius:8px; padding:14px 16px; margin-bottom:18px; }}
+  .bar {{ display:flex; gap:14px; align-items:center; flex-wrap:wrap;
+    margin-bottom:18px; }}
+  .grow {{ flex:1; }}
   form.add {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
-  input[type=text] {{ flex:1; min-width:320px; padding:8px 10px; border-radius:6px;
+  input[type=text] {{ flex:1; min-width:280px; padding:8px 10px; border-radius:6px;
     border:1px solid var(--line); background:var(--bg); color:var(--fg); font:inherit; }}
   select, button {{ padding:8px 12px; border-radius:6px; border:1px solid var(--line);
     background:var(--bg); color:var(--fg); font:inherit; cursor:pointer; }}
   button.primary {{ background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }}
+  button.on {{ background:var(--ok); border-color:var(--ok); color:#fff; font-weight:700; }}
+  button.off {{ background:var(--bad); border-color:var(--bad); color:#fff; font-weight:700; }}
   table {{ width:100%; border-collapse:collapse; }}
   th {{ text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.04em;
-    color:var(--dim); font-weight:600; padding:0 10px 8px; border-bottom:1px solid var(--line); }}
-  td {{ padding:10px; border-bottom:1px solid var(--line); vertical-align:top; }}
+    color:var(--dim); font-weight:600; padding:0 8px 8px; border-bottom:1px solid var(--line); }}
+  td {{ padding:9px 8px; border-bottom:1px solid var(--line); vertical-align:top; }}
   tr:last-child td {{ border-bottom:none; }}
   a {{ color:var(--accent); text-decoration:none; }}
   a:hover {{ text-decoration:underline; }}
-  .title {{ display:block; max-width:34ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+  .title {{ display:block; max-width:32ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
   .dim {{ color:var(--dim); font-size:12px; }}
   .pill {{ display:inline-block; padding:1px 8px; border-radius:99px; font-size:11px;
     font-weight:600; border:1px solid currentColor; }}
@@ -69,23 +91,84 @@ PAGE = """<!doctype html>
   .linkish {{ background:none; border:none; color:var(--dim); padding:0 4px;
     font:inherit; font-size:12px; cursor:pointer; }}
   .linkish:hover {{ color:var(--bad); text-decoration:underline; }}
+  .note {{ width:100%; min-width:160px; padding:5px 7px; border-radius:5px;
+    border:1px solid var(--line); background:var(--bg); color:var(--fg);
+    font:inherit; font-size:12px; }}
+  textarea#report {{ width:100%; height:190px; padding:11px; border-radius:6px;
+    border:1px solid var(--line); background:var(--bg); color:var(--fg);
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px;
+    line-height:1.6; resize:vertical; }}
+  .banner {{ padding:9px 13px; border-radius:6px; font-size:13px;
+    border:1px solid currentColor; margin-bottom:14px; }}
 </style></head><body>
-<h1>pr-ci-watch</h1>
-<div class="sub">{repo} &middot; NVIDIA CI only &middot; auto-refresh {refresh}s &middot; {generated}</div>
+
+<div class="bar">
+  <div>
+    <h1>pr-ci-watch</h1>
+    <div class="sub">{repo} &middot; NVIDIA CI only &middot; {generated}</div>
+  </div>
+  <div class="grow"></div>
+  <form class="inline" method="post" action="/api/monitoring">
+    <input type="hidden" name="on" value="{toggle_to}">
+    <button class="{toggle_class}" type="submit">{toggle_label}</button>
+  </form>
+  <span class="sub">{arm_line}</span>
+</div>
+
+{banner}
 
 <div class="panel"><form class="add" method="post" action="/api/add">
   <input type="text" name="ref" placeholder="Paste a PR link or number — https://github.com/{repo}/pull/41870" autofocus>
   <select name="track">
-    <option value="regular">regular &middot; daily sweep</option>
+    <option value="regular">regular &middot; daily</option>
     <option value="high">high &middot; every 2h</option>
+  </select>
+  <select name="priority">
+    <option value="">priority: auto</option>
+    {prio_options}
   </select>
   <button class="primary" type="submit">Watch</button>
 </form></div>
 
 <div class="panel">{table}</div>
+
+<div class="panel">
+  <h2>Status block &mdash; paste into Teams / standup</h2>
+  <textarea id="report" readonly>{report}</textarea>
+  <div style="margin-top:10px; display:flex; gap:10px; align-items:center;">
+    <button class="primary" type="button" onclick="copyReport(this)">Copy</button>
+    <span class="sub">Edit the second line of each entry in the <b>Note</b>
+      column above. <span class="mono">&lt;CI …&gt;</span> comes from the last sweep.</span>
+  </div>
+</div>
+
 <div class="sub">Re-runs and conflict comments only happen during a sweep
-(<span class="mono">/pr-ci-watch sweep</span>). This page just edits the watchlist.
-Data: <span class="mono">{data}</span></div>
+(<span class="mono">/pr-ci-watch sweep</span>). This page edits the watchlist and
+the ON/OFF switch. Data: <span class="mono">{data}</span></div>
+
+<script>
+  function copyReport(btn) {{
+    const t = document.getElementById('report');
+    t.select();
+    navigator.clipboard.writeText(t.value).then(
+      () => {{ btn.textContent = 'Copied'; setTimeout(() => btn.textContent = 'Copy', 1400); }},
+      () => {{ document.execCommand('copy'); btn.textContent = 'Copied'; }}
+    );
+  }}
+  // Refresh on a timer, but never while a field is focused — otherwise a note
+  // being typed gets wiped mid-edit.
+  setInterval(() => {{
+    if (!document.querySelector('input:focus, textarea:focus, select:focus')) location.reload();
+  }}, {refresh}000);
+  // Submit a note on blur or Enter so there is no per-row save button.
+  document.addEventListener('DOMContentLoaded', () => {{
+    document.querySelectorAll('input.note').forEach(el => {{
+      const initial = el.value;
+      el.addEventListener('blur', () => {{ if (el.value !== initial) el.form.submit(); }});
+      el.addEventListener('keydown', e => {{ if (e.key === 'Enter') {{ e.preventDefault(); el.form.submit(); }} }});
+    }});
+  }});
+</script>
 </body></html>
 """
 
@@ -112,7 +195,7 @@ def merge_cell(s: dict) -> str:
         return '<span class="pill bad">conflict</span>'
     if m == "MERGEABLE":
         return '<span class="pill ok">clean</span>'
-    return f'<span class="pill warn">{esc(m.lower())}</span>'
+    return f'<span class="pill warn">{esc(str(m).lower())}</span>'
 
 
 def ci_cell(s: dict) -> str:
@@ -120,20 +203,16 @@ def ci_cell(s: dict) -> str:
     if s.get("last_action") == "green":
         return '<span class="ok">clean</span>'
     if not groups:
-        return '<span class="dim">—</span>'
-    parts = []
+        return '<span class="dim">&mdash;</span>'
+    out = []
     for wf, g in groups.items():
         if g.get("gate_only"):
-            parts.append(
-                f'<div class="mono warn">{esc(wf)} <span class="dim">'
-                f"(gate only &mdash; not re-runnable)</span></div>"
-            )
+            out.append(f'<div class="mono warn">{esc(wf)} <span class="dim">'
+                       f"(gate only &mdash; not re-runnable)</span></div>")
         else:
-            parts.append(
-                f'<div class="mono bad">{esc(wf)} <span class="dim">'
-                f'({len(g.get("jobs", []))} failed)</span></div>'
-            )
-    return "".join(parts)
+            out.append(f'<div class="mono bad">{esc(wf)} <span class="dim">'
+                       f'({len(g.get("jobs", []))} failed)</span></div>')
+    return "".join(out)
 
 
 def rerun_cell(s: dict) -> str:
@@ -145,27 +224,48 @@ def rerun_cell(s: dict) -> str:
         n = rec.get("count", 0)
         cls = "bad" if n >= MAX_RERUNS else "warn"
         rows.append(f'<div class="mono {cls}">{esc(wf)} {n}/{MAX_RERUNS}</div>')
-    return "".join(rows) or '<span class="dim">—</span>'
+    return "".join(rows) or '<span class="dim">&mdash;</span>'
+
+
+def prio_cell(pr: str, meta: dict) -> str:
+    opts = "".join(
+        f'<option value="{p}"{" selected" if priority_of(meta) == p else ""}>{p}</option>'
+        for p in PRIORITIES
+    )
+    return (
+        f'<form class="inline" method="post" action="/api/priority">'
+        f'<input type="hidden" name="pr" value="{esc(pr)}">'
+        f'<select name="priority" onchange="this.form.submit()">{opts}</select></form>'
+    )
+
+
+def note_cell(pr: str, meta: dict) -> str:
+    return (
+        f'<form method="post" action="/api/note">'
+        f'<input type="hidden" name="pr" value="{esc(pr)}">'
+        f'<input class="note" type="text" name="note" value="{esc(meta.get("note", ""))}" '
+        f'placeholder="~5% P90 E2E improvement at TP4 conc4 agent mode"></form>'
+    )
 
 
 def render_table(wl: dict, st: dict) -> str:
     if not wl:
         return EMPTY
     head = (
-        "<tr><th>PR</th><th>Track</th><th>Merge</th><th>Red NVIDIA CI</th>"
-        "<th>Verdict</th><th>Re-runs</th><th>Last swept</th><th></th></tr>"
+        "<tr><th>Pri</th><th>PR</th><th>Track</th><th>Merge</th><th>Red NVIDIA CI</th>"
+        "<th>Verdict</th><th>Re-runs</th><th>Note (line 2 of the report)</th>"
+        "<th>Last swept</th><th></th></tr>"
     )
     rows = []
-    for pr, meta in sorted(wl.items(), key=lambda kv: int(kv[0])):
+    for pr, meta in sorted(wl.items(), key=lambda kv: (priority_of(kv[1]), int(kv[0]))):
         s = st.get(pr, {})
         track = meta.get("track", "regular")
         other = "regular" if track == "high" else "high"
         url = s.get("url") or f"https://github.com/{meta.get('repo', '')}/pull/{pr}"
         action = s.get("last_action", "—")
-        cls = ACTION_CLASS.get(action, "dim")
-        verdict = s.get("last_verdict", "")
         rows.append(
-            f"<tr>"
+            "<tr>"
+            f"<td>{prio_cell(pr, meta)}</td>"
             f'<td><a href="{esc(url)}" target="_blank"><b>#{esc(pr)}</b></a>'
             f'<span class="title dim" title="{esc(s.get("title"))}">{esc(s.get("title"))}</span>'
             f'<span class="dim">{"@" + esc(s.get("author")) if s.get("author") else ""}</span></td>'
@@ -177,9 +277,10 @@ def render_table(wl: dict, st: dict) -> str:
             f"</button></form></td>"
             f"<td>{merge_cell(s)}</td>"
             f"<td>{ci_cell(s)}</td>"
-            f'<td><span class="{cls}">{esc(action)}</span>'
-            f'<div class="dim">{esc(verdict[:90])}</div></td>'
+            f'<td><span class="{ACTION_CLASS.get(action, "dim")}">{esc(action)}</span>'
+            f'<div class="dim">{esc(s.get("last_verdict", "")[:70])}</div></td>'
             f"<td>{rerun_cell(s)}</td>"
+            f"<td>{note_cell(pr, meta)}</td>"
             f'<td class="mono dim">{esc(s.get("last_sweep", "never"))}</td>'
             f'<td><form class="inline" method="post" action="/api/remove">'
             f'<input type="hidden" name="pr" value="{esc(pr)}">'
@@ -187,6 +288,39 @@ def render_table(wl: dict, st: dict) -> str:
             f"</form></td></tr>"
         )
     return f"<table>{head}{''.join(rows)}</table>"
+
+
+def render_banner(st: dict, enabled: bool) -> str:
+    """Say plainly what the switch does and does not cover."""
+    if not enabled:
+        since = st.get("_config", {}).get("toggled_at", "?")
+        return (
+            f'<div class="banner bad">Monitoring is <b>PAUSED</b> since {esc(since)}. '
+            f"Scheduled sweeps still fire but exit immediately &mdash; no re-runs, "
+            f"no conflict comments.</div>"
+        )
+    if not st.get("_arm", {}).get("armed_at"):
+        return (
+            '<div class="banner warn">Monitoring is ON, but the schedule is '
+            "<b>not armed</b>, so nothing sweeps on its own yet. Run "
+            '<span class="mono">/pr-ci-watch arm</span> in Claude once &mdash; '
+            "registering cron needs a Claude turn, so this page cannot do it.</div>"
+        )
+    return ""
+
+
+def arm_line(st: dict) -> str:
+    from datetime import datetime, timezone
+
+    from watch import parse_ts
+
+    armed = parse_ts(st.get("_arm", {}).get("armed_at"))
+    if not armed:
+        return "schedule: not armed"
+    days = (datetime.now(timezone.utc) - armed).days
+    tail = " — expires in 7d, re-arm" if days >= 6 else ""
+    # "recorded" not "armed": this process cannot see Claude's scheduler.
+    return f"schedule: recorded armed {days}d ago{tail}"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -204,21 +338,39 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
-        wl, st = load(WATCHLIST, {}), load(STATE, {})
-        st = {k: v for k, v in st.items() if not k.startswith("_")}
+        wl, raw_st = load(WATCHLIST, {}), load(STATE, {})
+        st = {k: v for k, v in raw_st.items() if not k.startswith("_")}
+        if self.path.startswith("/api/report"):
+            self._send(200, report_text(wl, st).encode(), "text/plain; charset=utf-8")
+            return
         if self.path.startswith("/api/state"):
             self._send(
                 200,
-                json.dumps({"watchlist": wl, "state": st}, indent=2).encode(),
+                json.dumps(
+                    {
+                        "watchlist": wl,
+                        "state": st,
+                        "enabled": monitoring_enabled(raw_st),
+                    },
+                    indent=2,
+                ).encode(),
                 "application/json",
             )
             return
+        enabled = monitoring_enabled(raw_st)
         page = PAGE.format(
             refresh=REFRESH_SECONDS,
             repo=html.escape(self.repo),
             generated=now(),
             data=html.escape(str(DATA_DIR)),
             table=render_table(wl, st),
+            report=html.escape(report_text(wl, st)),
+            banner=render_banner(raw_st, enabled),
+            arm_line=html.escape(arm_line(raw_st)),
+            toggle_to="0" if enabled else "1",
+            toggle_class="on" if enabled else "off",
+            toggle_label="Monitoring ON" if enabled else "Monitoring PAUSED",
+            prio_options="".join(f'<option value="{p}">{p}</option>' for p in PRIORITIES),
         )
         self._send(200, page.encode(), "text/html; charset=utf-8")
 
@@ -227,31 +379,48 @@ class Handler(BaseHTTPRequestHandler):
 
         n = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(n).decode()
-        return {k: v[0] for k, v in parse_qs(raw).items()}
+        return {k: v[0] for k, v in parse_qs(raw, keep_blank_values=True).items()}
 
     def do_POST(self) -> None:
         form = self._form()
-        wl = load(WATCHLIST, {})
         try:
-            if self.path == "/api/add":
-                pr = parse_pr(form.get("ref", ""))
-                prev = wl.get(pr, {})
-                wl[pr] = {
-                    "track": form.get("track", "regular"),
-                    "added": prev.get("added", now()),
-                    "note": prev.get("note", ""),
-                    "repo": self.repo,
-                }
-            elif self.path == "/api/track":
-                pr = parse_pr(form.get("pr", ""))
-                if pr in wl:
-                    wl[pr]["track"] = form.get("track", "regular")
-            elif self.path == "/api/remove":
-                wl.pop(parse_pr(form.get("pr", "")), None)
+            if self.path == "/api/monitoring":
+                st = load(STATE, {})
+                set_monitoring(st, form.get("on") == "1")
+                save(STATE, st)
             else:
-                self._send(404, b"no such endpoint", "text/plain")
-                return
-            save(WATCHLIST, wl)
+                wl = load(WATCHLIST, {})
+                if self.path == "/api/add":
+                    pr = parse_pr(form.get("ref", ""))
+                    prev = wl.get(pr, {})
+                    wl[pr] = {
+                        "track": form.get("track", "regular"),
+                        "added": prev.get("added", now()),
+                        "note": prev.get("note", ""),
+                        "repo": self.repo,
+                    }
+                    if form.get("priority") in PRIORITIES:
+                        wl[pr]["priority"] = form["priority"]
+                    elif prev.get("priority"):
+                        wl[pr]["priority"] = prev["priority"]
+                elif self.path == "/api/track":
+                    pr = parse_pr(form.get("pr", ""))
+                    if pr in wl:
+                        wl[pr]["track"] = form.get("track", "regular")
+                elif self.path == "/api/priority":
+                    pr = parse_pr(form.get("pr", ""))
+                    if pr in wl and form.get("priority") in PRIORITIES:
+                        wl[pr]["priority"] = form["priority"]
+                elif self.path == "/api/note":
+                    pr = parse_pr(form.get("pr", ""))
+                    if pr in wl:
+                        wl[pr]["note"] = form.get("note", "").strip()
+                elif self.path == "/api/remove":
+                    wl.pop(parse_pr(form.get("pr", "")), None)
+                else:
+                    self._send(404, b"no such endpoint", "text/plain")
+                    return
+                save(WATCHLIST, wl)
         except SystemExit:
             # parse_pr calls die() on garbage input; a bad paste should not 500.
             self._send(400, b"could not read a PR number out of that input",

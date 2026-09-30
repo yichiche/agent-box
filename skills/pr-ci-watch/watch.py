@@ -56,6 +56,22 @@ MAX_RERUNS = 2  # per (PR, head SHA, workflow)
 SWEEP_DEDUP_MINUTES = 30
 ACTIONS = ("re-run", "code-fix", "merge-main", "wait-upstream")
 
+PRIORITIES = ("P0", "P1", "P2")
+# Reporting label, not the sweep cadence. Defaults off the track so you only
+# override when a P-level and a cadence genuinely disagree.
+TRACK_PRIORITY = {"high": "P0", "regular": "P1"}
+
+# Short status token for the report line, e.g. <CI clear>.
+CI_TOKEN = {
+    "green": "CI clear",
+    "conflict": "conflict",
+    "awaiting-triage": "CI red",
+    "re-run": "CI rerun",
+    "code-fix": "CI fail",
+    "merge-main": "merge main",
+    "wait-upstream": "blocked",
+}
+
 AGENT_BOX = Path(__file__).resolve().parents[2]
 HOST_HOME = Path(os.environ.get("AGENT_BOX_HOST_HOME", AGENT_BOX.parent))
 DATA_DIR = Path(
@@ -99,6 +115,45 @@ def save(path: Path, obj) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(obj, indent=2, sort_keys=True) + "\n")
     tmp.replace(path)  # atomic; the dashboard reads these files concurrently
+
+
+def monitoring_enabled(st: dict) -> bool:
+    return bool(st.get("_config", {}).get("enabled", True))
+
+
+def set_monitoring(st: dict, on: bool) -> None:
+    st.setdefault("_config", {})["enabled"] = on
+    st["_config"]["toggled_at"] = now()
+
+
+def priority_of(meta: dict) -> str:
+    return meta.get("priority") or TRACK_PRIORITY.get(meta.get("track", "regular"), "P1")
+
+
+def ci_token(s: dict) -> str:
+    action = s.get("last_action")
+    if not action:
+        return "CI ?"
+    return CI_TOKEN.get(action, action)
+
+
+def report_text(wl: dict, st: dict) -> str:
+    """The paste-into-Teams block.
+
+    <P0><CI clear><PR39987>[AMD] Tune Qwen3.5 TP4 GDN recurrent launch on gfx950
+    ~5% P90 E2E improvement at TP4 conc4 agent mode
+    """
+    lines = []
+    for pr, meta in sorted(
+        wl.items(), key=lambda kv: (priority_of(kv[1]), int(kv[0]))
+    ):
+        s = st.get(pr, {})
+        title = s.get("title") or "(not swept yet — title unknown)"
+        lines.append(f"<{priority_of(meta)}><{ci_token(s)}><PR{pr}>{title}")
+        note = (meta.get("note") or "").strip()
+        if note:
+            lines.append(note)
+    return "\n".join(lines)
 
 
 def die(msg: str):
@@ -163,7 +218,9 @@ def cmd_add(a) -> None:
             "note": a.note or prev.get("note", ""),
             "repo": a.repo,
         }
-        added.append(f"#{pr} [{track}]")
+        if a.priority or prev.get("priority"):
+            wl[pr]["priority"] = a.priority or prev["priority"]
+        added.append(f"#{pr} [{track}/{priority_of(wl[pr])}]")
     save(WATCHLIST, wl)
     print("watching: " + ", ".join(added))
     log_line(f"add {' '.join(added)}")
@@ -271,6 +328,14 @@ def failed_in_scope(pr: str, repo: str) -> tuple[dict, dict]:
 def cmd_sweep(a) -> None:
     wl = load(WATCHLIST, {})
     st = load(STATE, {})
+    if not monitoring_enabled(st) and not a.pr:
+        # The dashboard's OFF switch. Honoured here rather than by unregistering
+        # cron, so pausing works instantly from the browser/phone with no Claude
+        # turn — and a scheduled sweep that fires while paused is a clean no-op.
+        toggled = st.get("_config", {}).get("toggled_at", "?")
+        print(f"monitoring is PAUSED (since {toggled}) — no sweep. "
+              f"Resume on the dashboard or with `watch.py resume`.")
+        return
     if a.pr:
         targets = {parse_pr(p): wl.get(parse_pr(p), {"track": "high", "repo": a.repo})
                    for p in a.pr}
@@ -503,11 +568,50 @@ def cmd_arm_status(a) -> None:
     age = datetime.now(timezone.utc) - armed
     days = age.days
     warn = "  <-- Claude cron jobs expire after 7 days; RE-ARM NOW" if days >= 6 else ""
-    print(f"cron armed {meta['armed_at']} ({days}d {age.seconds // 3600}h ago){warn}")
+    # Bookkeeping only — this script cannot see Claude's scheduler, so the word
+    # "recorded" is load-bearing. CronList in Claude is the source of truth.
+    print(f"cron: recorded as armed {meta['armed_at']} "
+          f"({days}d {age.seconds // 3600}h ago){warn}")
     print(f"  jobs: {meta.get('jobs', '?')}")
 
 
+def cmd_toggle(a) -> None:
+    st = load(STATE, {})
+    on = a.cmd == "resume"
+    set_monitoring(st, on)
+    save(STATE, st)
+    print(f"monitoring {'RESUMED' if on else 'PAUSED'} at {now()}")
+    log_line(f"monitoring {'resumed' if on else 'paused'}")
+
+
+def cmd_report(a) -> None:
+    wl, st = load(WATCHLIST, {}), load(STATE, {})
+    if not wl:
+        print("(watchlist is empty)")
+        return
+    print(report_text(wl, st))
+
+
+def cmd_set(a) -> None:
+    """Edit the two reporting fields: priority and the one-line note."""
+    wl = load(WATCHLIST, {})
+    pr = parse_pr(a.pr)
+    if pr not in wl:
+        die(f"#{pr} is not on the watchlist")
+    if a.priority:
+        if a.priority not in PRIORITIES:
+            die(f"--priority must be one of {', '.join(PRIORITIES)}")
+        wl[pr]["priority"] = a.priority
+    if a.note is not None:
+        wl[pr]["note"] = a.note
+    save(WATCHLIST, wl)
+    print(f"#{pr}: priority={priority_of(wl[pr])} note={wl[pr].get('note', '')!r}")
+
+
 def cmd_status(a) -> None:
+    st = load(STATE, {})
+    on = monitoring_enabled(st)
+    print(f"monitoring: {'ON' if on else 'PAUSED'}")
     cmd_arm_status(argparse.Namespace(record=None))
     print()
     cmd_list(argparse.Namespace(json=False))
@@ -527,6 +631,8 @@ def main() -> None:
     s.add_argument("refs", nargs="+")
     s.add_argument("--high", action="store_true", help="high-priority track (2h)")
     s.add_argument("--note", default="")
+    s.add_argument("--priority", choices=list(PRIORITIES),
+                   help="report label; defaults to P0 for --high, else P1")
     s.set_defaults(func=cmd_add)
 
     s = sub.add_parser("remove", help="stop watching PR(s)")
@@ -553,8 +659,24 @@ def main() -> None:
                    help="also re-run workflows whose only failures are rollup gates")
     s.set_defaults(func=cmd_apply_verdict)
 
-    s = sub.add_parser("arm-status", help="when were the cron jobs armed?")
-    s.add_argument("--record", help="record that cron was just armed (describe the jobs)")
+    s = sub.add_parser("report", help="print the <P0><CI clear><PR…> status block")
+    s.set_defaults(func=cmd_report)
+
+    s = sub.add_parser("set", help="set a PR's report priority / note")
+    s.add_argument("pr")
+    s.add_argument("--priority", choices=list(PRIORITIES))
+    s.add_argument("--note")
+    s.set_defaults(func=cmd_set)
+
+    for name, help_ in (("pause", "stop all sweeps"), ("resume", "re-enable sweeps")):
+        s = sub.add_parser(name, help=help_)
+        s.set_defaults(func=cmd_toggle)
+
+    s = sub.add_parser("arm-status", help="when were the cron jobs recorded as armed?")
+    s.add_argument("--record",
+                   help="INTERNAL: only call this in the same turn as a successful "
+                        "CronCreate, or the dashboard will claim a schedule that "
+                        "does not exist")
     s.set_defaults(func=cmd_arm_status)
 
     s = sub.add_parser("status", help="arm status + watchlist")
