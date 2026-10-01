@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import socket
 import subprocess
 import sys
@@ -53,6 +54,11 @@ REFRESH_SECONDS = 60
 # /ci-analysis) needs a Claude turn — ask for `/pr-ci-watch sweep now`.
 SWEEP = {"running": False, "started": "", "finished": "", "output": "", "rc": None}
 SWEEP_LOCK = threading.Lock()
+
+# Result of the last outward-facing click, shown back to the user. A button that
+# silently does nothing is worse than no button: you cannot tell "already sent"
+# from "broken".
+NOTICE = {"at": "", "ok": False, "text": ""}
 
 
 def run_refresh() -> None:
@@ -184,27 +190,55 @@ PAGE = """<!doctype html>
 the ON/OFF switch. Data: <span class="mono">{data}</span></div>
 
 <script>
+  function flash(btn, msg) {{
+    const old = btn.dataset.label || btn.textContent;
+    btn.dataset.label = old;
+    btn.textContent = msg;
+    setTimeout(() => {{ btn.textContent = btn.dataset.label; }}, 1600);
+  }}
+  // execCommand works on plain http; navigator.clipboard does not exist at all
+  // outside a secure context, so it must never be touched without a guard.
+  function execCopy(text, btn) {{
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    let ok = false;
+    try {{ ok = document.execCommand('copy'); }} catch (e) {{}}
+    document.body.removeChild(ta);
+    if (ok) {{ flash(btn, 'Copied'); return; }}
+    // Last resort: reveal the plain-text source so it can be copied by hand
+    // rather than leaving the button looking dead.
+    const src = document.getElementById('reportsrc');
+    if (src) {{
+      src.style.cssText = 'position:static;width:100%;height:170px';
+      src.focus(); src.select();
+    }}
+    flash(btn, 'Press Ctrl+C');
+  }}
+  function plainCopy(text, btn) {{
+    if (window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {{
+      navigator.clipboard.writeText(text).then(
+        () => flash(btn, 'Copied'), () => execCopy(text, btn));
+    }} else {{ execCopy(text, btn); }}
+  }}
   function copyEl(id, btn) {{
-    const t = document.getElementById(id);
-    t.select();
-    navigator.clipboard.writeText(t.value).then(
-      () => {{ btn.textContent = 'Copied'; setTimeout(() => btn.textContent = 'Copy', 1400); }},
-      () => {{ document.execCommand('copy'); btn.textContent = 'Copied'; }}
-    );
+    const el = document.getElementById(id);
+    plainCopy(el.value !== undefined ? el.value : el.textContent, btn);
   }}
   function copyReport(btn) {{
-    const html = document.getElementById('report').innerHTML;
     const text = document.getElementById('reportsrc').value;
-    const done = () => {{ btn.textContent = 'Copied';
-                          setTimeout(() => btn.textContent = 'Copy', 1400); }};
+    const html = document.getElementById('report').innerHTML;
     // text/html keeps <PRnnnnn> a hyperlink in Teams; text/plain is the
     // fallback for anywhere that strips markup.
-    if (window.ClipboardItem && navigator.clipboard.write) {{
+    if (window.isSecureContext && window.ClipboardItem
+        && navigator.clipboard && navigator.clipboard.write) {{
       navigator.clipboard.write([new ClipboardItem({{
         'text/html': new Blob([html], {{type: 'text/html'}}),
         'text/plain': new Blob([text], {{type: 'text/plain'}}),
-      }})]).then(done, () => copyEl('reportsrc', btn));
-    }} else {{ copyEl('reportsrc', btn); }}
+      }})]).then(() => flash(btn, 'Copied'), () => plainCopy(text, btn));
+    }} else {{ plainCopy(text, btn); }}
   }}
   // Refresh on a timer, but never while a field is focused — otherwise a note
   // being typed gets wiped mid-edit.
@@ -593,6 +627,19 @@ def render_banner(st: dict, enabled: bool) -> str:
     return ""
 
 
+def render_notice() -> str:
+    if not NOTICE["at"]:
+        return ""
+    cls = "ok" if NOTICE["ok"] else "bad"
+    label = "Sent" if NOTICE["ok"] else "Not sent"
+    body = esc(NOTICE["text"])
+    # Linkify the comment URL the command prints on success.
+    body = re.sub(r"(https://\S+)", r'<a href="\1" target="_blank">\1</a>', body)
+    return (f'<div class="banner {cls}"><b>{label}</b> &middot; '
+            f'{esc(tw(NOTICE["at"]))}<br>'
+            f'<span class="mono">{body}</span></div>')
+
+
 def render_refresh_status() -> str:
     with SWEEP_LOCK:
         s = dict(SWEEP)
@@ -704,7 +751,7 @@ class Handler(BaseHTTPRequestHandler):
             table=render_table(wl, st),
             report=html.escape(report_text(wl, st)),
             report_html=report_html(wl, st),
-            banner=render_banner(raw_st, enabled),
+            banner=render_notice() + render_banner(raw_st, enabled),
             arm_line=html.escape(arm_line(raw_st)),
             toggle_to="0" if enabled else "1",
             toggle_class="on" if enabled else "off",
@@ -729,10 +776,21 @@ class Handler(BaseHTTPRequestHandler):
                 # same guarded code path as the sweep (one comment per head
                 # SHA) rather than posting anything itself.
                 here = Path(__file__).resolve().parent
-                subprocess.run(
+                p = subprocess.run(
                     [sys.executable, str(here / "watch.py"), "notify",
                      "--pr", pr, "--apply"],
                     capture_output=True, text=True, timeout=180, cwd=str(here),
+                )
+                msg = (p.stdout or "").strip() or (p.stderr or "").strip()
+                NOTICE.update(at=now(), ok=(p.returncode == 0),
+                              text=msg or f"notify #{pr}: no output")
+                # The refusal reasons are all "state moved on" (conflict already
+                # resolved, already notified), so re-read this PR before the
+                # page redraws or the button lingers on stale state.
+                subprocess.run(
+                    [sys.executable, str(here / "watch.py"), "sweep",
+                     "--pr", pr],
+                    capture_output=True, text=True, timeout=300, cwd=str(here),
                 )
             elif self.path == "/api/refresh":
                 with SWEEP_LOCK:

@@ -246,11 +246,17 @@ or `41870`.
 |---|---|---|
 | `Monitoring ON/OFF` | Writes `_config.enabled`; every sweep, including a cron-fired one, exits immediately when off | no — takes effect instantly |
 | `Refresh now` | Runs `sweep --track all --force` **without `--apply`** in a subprocess: re-reads merge state and red NVIDIA CI for every PR. Comments nothing, re-runs nothing | no |
-| `Notify author` | Runs `watch.py notify --pr N --apply` — posts the conflict notice for that PR now instead of waiting for the next sweep. Shown **only** when the PR is conflicting and not yet notified for this head SHA; asks for confirmation first | no |
+| `Notify author` | Runs `watch.py notify --pr N --apply` — posts the conflict notice for that PR now instead of waiting for the next sweep. Shown **only** when the PR is conflicting and not yet notified for this head SHA; asks for confirmation first. The result (sent, with the comment URL — or why not) comes back as a banner, and the PR is re-swept so a button standing on stale state disappears | no |
 | `▲ / ▼` | Nudges a row within its sort bucket. Manual order is a tiebreaker only — it cannot drag a row across the Pass / priority / conflict boundaries, because that would silently snap back | no |
 | Track dropdown | Sets `regular` or `high` explicitly, both directions | no |
 | `Copy` (triage panel) | Copies `/pr-ci-watch triage <prs>` to paste into Claude | yes, to run it |
 | `Copy` (status block) | Copies the `<P0><CI clear><PR…>` report as **rich text + plain text**, so `<PR41133>` stays a hyperlink when pasted into Teams | no |
+
+Both `Copy` buttons degrade: rich clipboard → `navigator.clipboard.writeText`
+→ `document.execCommand` → revealing the plain-text box with the content
+selected. `navigator.clipboard` **does not exist outside a secure context**, so
+reaching `localhost` by IP rather than through a port forward leaves only the
+last two rungs; touching it unguarded throws and the button appears dead.
 
 `Refresh now` is deliberately read-only. Deciding **re-run vs merge main vs real
 bug** means reading job logs — that is `/ci-analysis`, which needs a Claude turn,
