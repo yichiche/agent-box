@@ -203,7 +203,7 @@ still be unmergeable because of the tenth.
 
 A gate marks something that is **a crash, a silent wrong answer, or a claim
 nobody can check**. A PR with an open gate is not "higher risk"; it is
-unreviewable until the gate is answered. There are only three, so that the word
+unreviewable until the gate is answered. There are only four, so that the word
 keeps its force:
 
 | Gate | Why it cannot be traded away |
@@ -211,6 +211,7 @@ keeps its force:
 | **Guard choice** | code importing AITER gated by `is_hip()` alone crashes on an AMD box without AITER. Not a style preference — a crash |
 | **Evidence** | a numerics change with no accuracy number can only be believed, not reviewed |
 | **Interface churn** | a rewritten shared signature must have every caller updated **in the same PR**, or main breaks for someone else |
+| **Correctness** | a `CRITICAL` from [`/sglang-pr-review`](../sglang-pr-review/SKILL.md) is wrong model output — it gets fixed, not weighed |
 
 ### 2. Risk points — these add up
 
@@ -289,6 +290,70 @@ actionable — the author should know exactly what unblocks the PR.
 > help get a community reviewer on it.
 
 ---
+
+## Pairing with `/sglang-pr-review`
+
+The two skills answer different questions and neither answers the other's:
+
+| | `/pr-merge-triage` | `/sglang-pr-review` |
+|---|---|---|
+| asks | **how expensive is this to land?** | **is this correct?** |
+| reads | the diff's *shape* — paths, guards, size, flags | the diff's *content* — weight maps, scales, forward variants |
+| costs | ~1 minute, one `gh` call | a real review pass |
+| can approve a PR | **no** | no — but it can block one |
+
+So: **triage first, review second, then fold the review back in.**
+
+```bash
+python3 triage.py 41870                     # 1. cheap: is it even worth reviewing as-is?
+#    → SPLIT FIRST?  stop here, ask for the split. Reviewing the whole is wasted work.
+#    → otherwise, go read it:
+/sglang-pr-review 41870 > /tmp/review.md    # 2. the correctness pass
+python3 triage.py 41870 --review /tmp/review.md   # 3. final verdict, findings folded in
+```
+
+`--review` parses the report's **Risk & Scope** table and its severity bullets
+(`[bug] CRITICAL — path:line — …`). It counts both and takes the larger per
+severity, since the table normally restates the bullets. No report to hand?
+`--critical 1 --high 0 --medium 2` does the same by hand.
+
+### How findings map onto the verdict
+
+| Severity in the review | Effect on triage |
+|---|---|
+| `CRITICAL` | **Correctness gate opens → BLOCKED ON AUTHOR**, at any score. No number of green rows offsets it |
+| `High` | +3 risk points each (capped at +6) — can push a band up, cannot block on its own |
+| `Medium` | +1 each (capped at +3) — fix now or file as follow-ups |
+| `Low` | 0 — note it in the review, do not hold the PR for it |
+
+Worked example, using a real **Risk & Scope** table:
+
+```
+| Critical | Fused quant 開啟時，out_proj / o_proj 在 Quark per-channel 上 assert。 |
+| Low      | 其餘 shape、M 超出表、非 gfx950、非 aiter 仍走 gemm_a8w8_bpreshuffle。 |
+```
+
+```
+| - [ ] | Correctness **GATE** | FAIL | 0 | 1 CRITICAL finding(s) from /sglang-pr-review |
+| | **Total** | | **2** | band: LOW |
+
+**Verdict: BLOCKED ON AUTHOR** — open gate(s): Correctness
+```
+
+**2 points, band LOW, and still blocked** — which is the whole point of keeping
+gates and points apart. The PR is structurally cheap (AMD-only, additive, has
+numbers); it is blocked because it computes the wrong thing in one configuration.
+Note also what the `Low` row buys: nothing. "Everything else still falls back to
+`gemm_a8w8_bpreshuffle`" bounds the blast radius of the Critical — it does not
+excuse it.
+
+### Why triage alone never says "merge"
+
+With no `--review` supplied, the best verdict available is
+**`TRIAGE CLEAR — NEEDS CORRECTNESS REVIEW`**, and every other verdict carries
+`· correctness not reviewed yet`. Cheap-to-land and correct are different
+properties, and a scorecard that conflates them is worse than no scorecard —
+it launders a shape check into an approval.
 
 ## Related skills
 

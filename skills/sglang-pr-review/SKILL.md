@@ -168,9 +168,25 @@ Key patterns:
 **approve** | **comment** | **request-changes** — rationale + numbered action items
 ```
 
+**Keep the Risk & Scope rows labelled exactly `Critical` / `High` / `Medium` /
+`Low`, and keep the severity word in the findings bullets.** Those two shapes
+are what [`/pr-merge-triage`](../pr-merge-triage/SKILL.md) parses when the
+findings are folded back into the merge verdict:
+
+```bash
+/sglang-pr-review 41870 > /tmp/review.md
+python3 ~/agent-box/skills/pr-merge-triage/triage.py 41870 --review /tmp/review.md
+```
+
+A single `Critical` opens that skill's **Correctness gate** and blocks the merge
+at any risk score — so a row labelled `Critical` is a real decision, not an
+emphasis. A finding that bounds the blast radius of a Critical (`everything else
+still falls back to the old kernel`) belongs in the `Low` row; it does not
+downgrade the Critical.
+
 ### Severity Guidelines
 
-- **CRITICAL**: Produces wrong model outputs silently (e.g., dropped scale, missing weight, lost expert). Always `request-changes`.
+- **CRITICAL**: Produces wrong model outputs silently (e.g., dropped scale, missing weight, lost expert). Always `request-changes`, and always a merge blocker.
 - **High**: Can crash or degrade under specific configurations (e.g., dtype mismatch on fallback, DeepEP + fusion interaction). Likely `request-changes`.
 - **Medium**: Edge cases, fragile patterns, missing tests. Can be `comment` with action items.
 - **Low**: Style, docs, minor cleanup. `comment` or `approve`.
@@ -178,6 +194,7 @@ Key patterns:
 ## Additional Resources
 
 - For detailed analysis patterns by change type, see [references/analysis-patterns.md](references/analysis-patterns.md)
+- [`/pr-merge-triage`](../pr-merge-triage/SKILL.md) — run it **before** this skill to see whether the PR should be split first (reviewing a PR that needs splitting is wasted work), and **after** to turn these findings into a merge verdict
 - CI red on the PR you are reviewing? That is [`/ci-analysis`](../ci-analysis/SKILL.md), not this skill — attributing a failure to the PR is a separate procedure
 - Reviewing a kernel change for *performance* rather than correctness? Pair with
   [`/kernel-profile-triage`](../kernel-profile-triage/SKILL.md) and [`/validate-pr`](../validate-pr/SKILL.md)

@@ -222,8 +222,42 @@ GATES = {
                 "only believed",
     "Interface churn": "a rewritten shared signature must have every caller "
                        "updated in the same PR",
+    "Correctness": "a CRITICAL finding from /sglang-pr-review produces wrong "
+                   "model output — it must be fixed, not weighed",
 }
 BANDS = ((3, "LOW"), (7, "MEDIUM"), (12, "HIGH"))
+
+# Severity lines in /sglang-pr-review output, in both the shapes it emits: the
+# findings bullets (`[bug] CRITICAL — path:line — …`) and the Risk & Scope table
+# (`| Critical | … |`). The table usually restates the bullets, so counting both
+# and taking the larger per severity avoids double-counting without losing a
+# finding that only appears in one of them.
+SEV_BULLET = re.compile(r"^\s*[-*]\s*`?\[\w+\]\s*(CRITICAL|HIGH|MEDIUM|LOW)\b", re.I)
+SEV_TABLE = re.compile(r"^\s*\|\s*(Critical|High|Medium|Low)\s*\|", re.I)
+DECISION = re.compile(r"\b(approve|comment|request-changes)\b", re.I)
+
+
+def parse_review(text: str) -> dict:
+    """Severity counts from a /sglang-pr-review report."""
+    bullets, table = Counter(), Counter()
+    decision = ""
+    for line in text.splitlines():
+        if m := SEV_BULLET.match(line):
+            bullets[m.group(1).upper()] += 1
+        elif m := SEV_TABLE.match(line):
+            table[m.group(1).upper()] += 1
+        if line.lower().lstrip().startswith(("### decision", "**decision",
+                                             "decision:")):
+            if d := DECISION.search(line):
+                decision = d.group(1).lower()
+        elif not decision and "decision" in line.lower():
+            if d := DECISION.search(line):
+                decision = d.group(1).lower()
+    counts = {s: max(bullets[s], table[s])
+              for s in ("CRITICAL", "HIGH", "MEDIUM", "LOW")}
+    counts["decision"] = decision
+    counts["source"] = "parsed"
+    return counts
 
 
 def band(points: int) -> str:
@@ -376,6 +410,34 @@ def rows(a: dict) -> list[dict]:
     else:
         row("Tests", WARN, "no test file in the diff",
             "AMD-only tests belong in test/registered/amd/", 2)
+
+    # 10. Correctness — GATE, and the only row this script cannot derive. It is
+    # fed from /sglang-pr-review: that skill finds the bugs, this one decides
+    # what they mean for merging. Absent a review, the row stays `?` and the
+    # verdict refuses to say "merge" — triage measures cost to land, never
+    # correctness.
+    rv = a.get("review")
+    if not rv:
+        row("Correctness", UNK, "no /sglang-pr-review findings supplied",
+            "run `/sglang-pr-review <pr>` and pass it back with --review")
+    elif rv["CRITICAL"]:
+        row("Correctness", BAD,
+            f"{rv['CRITICAL']} CRITICAL finding(s) from /sglang-pr-review",
+            "must be fixed before merge — a CRITICAL is wrong model output, "
+            "not a risk to weigh", 0, gate=True)
+    else:
+        pts = min(3 * rv["HIGH"], 6) + min(rv["MEDIUM"], 3)
+        ev = (f"no CRITICAL; {rv['HIGH']} high, {rv['MEDIUM']} medium, "
+              f"{rv['LOW']} low")
+        if rv["HIGH"]:
+            row("Correctness", WARN, ev,
+                "High findings crash or degrade under specific configurations "
+                "— resolve or get the author's rationale on record", pts)
+        elif pts:
+            row("Correctness", WARN, ev,
+                "medium findings: fix now or file them as follow-ups", pts)
+        else:
+            row("Correctness", OK, ev)
     return out
 
 
@@ -395,14 +457,26 @@ def verdict(a: dict, rs: list[dict]) -> dict:
         name, why = "NEEDS COMMUNITY REVIEWER", (
             f"{points} risk points ({b}), but it changes code every vendor "
             f"inherits — an AMD-side review cannot land it")
+    elif not a.get("review"):
+        # Cheap-to-land is not the same as correct. Saying "merge" off the diff
+        # shape alone is exactly the mistake this pairing exists to prevent.
+        name, why = "TRIAGE CLEAR — NEEDS CORRECTNESS REVIEW", (
+            f"{points} risk points ({b}), no open gate — cheap to land, but "
+            f"nothing has read it for bugs yet: run /sglang-pr-review")
     elif b == "LOW":
         name, why = "LOW RISK — MERGE", (f"{points} risk points, no open gate, "
-                                         f"AMD-side review is enough")
+                                         f"no CRITICAL finding — AMD-side "
+                                         f"review is enough")
     else:
         name, why = f"{b} RISK — REVIEW", (f"{points} risk points; read the "
                                            f"flagged rows before approving")
+    # Whatever else the verdict says, never let "nobody has read this for bugs"
+    # fall off the end of the sentence.
+    if not a.get("review") and name != "TRIAGE CLEAR — NEEDS CORRECTNESS REVIEW":
+        why += " · correctness not reviewed yet — run /sglang-pr-review"
     return {"name": name, "why": why, "points": points, "band": b,
-            "open_gates": open_gates, "needs_community": needs_community}
+            "open_gates": open_gates, "needs_community": needs_community,
+            "reviewed": bool(a.get("review"))}
 
 
 def main() -> None:
@@ -410,10 +484,26 @@ def main() -> None:
     ap.add_argument("pr")
     ap.add_argument("--repo", default="sgl-project/sglang")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--review", metavar="PATH",
+                    help="/sglang-pr-review report to fold in ('-' for stdin)")
+    ap.add_argument("--critical", type=int, default=None,
+                    help="severity counts by hand, instead of --review")
+    ap.add_argument("--high", type=int, default=0)
+    ap.add_argument("--medium", type=int, default=0)
+    ap.add_argument("--low", type=int, default=0)
     a = ap.parse_args()
     pr = re.sub(r"\D", "", a.pr.split("/")[-1]) or a.pr
 
+    review = None
+    if a.review:
+        text = sys.stdin.read() if a.review == "-" else open(a.review).read()
+        review = parse_review(text)
+    elif a.critical is not None:
+        review = {"CRITICAL": a.critical, "HIGH": a.high, "MEDIUM": a.medium,
+                  "LOW": a.low, "decision": "", "source": "manual"}
+
     data = analyse(pr, a.repo)
+    data["review"] = review
     rs = rows(data)
     v = verdict(data, rs)
 
