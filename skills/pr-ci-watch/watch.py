@@ -312,6 +312,13 @@ def ci_verdict(s: dict) -> str:
     # claim we have not earned. The Merge column carries `draft` instead.
     if s.get("is_draft"):
         return "\u2014"
+    # A blocking gate means a whole in-scope workflow never ran a single test.
+    # The remaining counts are admin checks, and `Pass` off those is a claim
+    # nobody earned — #41982 read `Pass` beside "4 pass, 4 fail" while both
+    # NVIDIA workflows sat un-started at the gate. Unknown, not green.
+    if any(d.get("blocking", d.get("reason") in GATE_BLOCKING)
+           for d in (s.get("gated") or {}).values()):
+        return "\u2014"
     # A conflicting branch is a failure in its own right: CI cannot complete, so
     # say Fail rather than showing an empty verdict because no tally was taken.
     if s.get("mergeable") == "CONFLICTING":

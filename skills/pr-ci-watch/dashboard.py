@@ -541,6 +541,14 @@ def merge_cell(s: dict) -> str:
     # that still has something true to say about a PR we do not check.
     if s.get("is_draft"):
         return '<span class="pill draft">draft</span>'
+    # `clean` is true (no git conflict) but on its own it reads as ready to
+    # land, which is wrong when the required CI never started. Shown only for a
+    # genuinely blocking gate, so ordinary rows keep the clean/conflict split
+    # this column exists for rather than every row turning amber.
+    if any(d.get("blocking", d.get("reason") in GATE_BLOCKING)
+           for d in (s.get("gated") or {}).values()):
+        return ('<span class="pill warn" title="no git conflict, but required '
+                'CI never ran">gate blocked</span>')
     m = s.get("mergeable", "?")
     if m == "CONFLICTING":
         return '<span class="pill bad">conflict</span>'

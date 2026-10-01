@@ -238,6 +238,15 @@ attempt on a gate that will reject it again.
 `PR Test Extra`, and treating its red gate as a problem would put a permanent
 false alarm on most of the watchlist.
 
+**A blocking gate also takes over the Merge and Verdict columns.** `clean` is
+true (there is no git conflict) but on its own reads as ready to land, and
+`Pass` off the handful of admin checks that survive a blocked gate is a verdict
+nobody earned — #41982 showed `clean` / `Pass` beside "4 pass, 4 fail" while
+both NVIDIA workflows sat un-started. A blocking gate now renders Merge as
+`gate blocked` and Verdict as a dash. Only a *blocking* gate does this, so
+ordinary rows keep the clean/conflict split the column exists for instead of
+every row turning amber over an opt-in workflow.
+
 **Every gate reason is still shown, including the non-blocking ones.** It is
 not enough to decide a red is harmless — the fail count stays on the row either
 way, and a count you cannot account for reads as two broken tests. A blocked
