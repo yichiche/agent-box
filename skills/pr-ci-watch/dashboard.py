@@ -36,6 +36,7 @@ from watch import (  # noqa: E402
     parse_pr,
     priority_of,
     report_text,
+    row_order,
     log_line,
     save,
     set_monitoring,
@@ -445,13 +446,7 @@ def render_table(wl: dict, st: dict) -> str:
         "<th>Last swept (TW)</th><th></th></tr>"
     )
     rows = []
-    # Pass first — those are the ones you can go merge — then P0 → P2, then PR.
-    def order(kv):
-        pr, meta = kv
-        return (0 if ci_verdict(st.get(pr, {})) == "Pass" else 1,
-                priority_of(meta), int(pr))
-
-    for pr, meta in sorted(wl.items(), key=order):
+    for pr, meta in sorted(wl.items(), key=row_order(st)):
         s = st.get(pr, {})
         track = meta.get("track", "regular")
         other = "regular" if track == "high" else "high"

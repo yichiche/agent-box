@@ -228,6 +228,17 @@ def ci_action(s: dict) -> str:
     return "-"
 
 
+def row_order(st: dict):
+    """Display order, shared by the dashboard table and the report block so the
+    two can never drift: Pass first (those are the ones you can go merge), then
+    P0 -> P2, then PR number."""
+    def key(kv):
+        pr, meta = kv
+        return (0 if ci_verdict(st.get(pr, {})) == "Pass" else 1,
+                priority_of(meta), int(pr))
+    return key
+
+
 def report_text(wl: dict, st: dict) -> str:
     """The paste-into-Teams block.
 
@@ -235,9 +246,7 @@ def report_text(wl: dict, st: dict) -> str:
     ~5% P90 E2E improvement at TP4 conc4 agent mode
     """
     lines = []
-    for pr, meta in sorted(
-        wl.items(), key=lambda kv: (priority_of(kv[1]), int(kv[0]))
-    ):
+    for pr, meta in sorted(wl.items(), key=row_order(st)):
         s = st.get(pr, {})
         title = s.get("title") or "(not swept yet — title unknown)"
         lines.append(f"<{priority_of(meta)}><{ci_token(s)}><PR{pr}>{title}")
