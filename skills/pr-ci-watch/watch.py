@@ -124,14 +124,13 @@ SWEEP_DEDUP_MINUTES = 30
 ACTIONS = ("re-run", "code-fix", "merge-main", "wait-upstream", "out-of-scope")
 
 PRIORITIES = ("P0", "P1", "P2")
-# `draft` is a holding track, not a cadence: a draft PR is still being written,
-# so its CI is the author's scratchpad and its code is not final. Sweeping one
-# would re-run CI the author never asked for and triage failures they already
-# know about, so the sweep records the PR and stops there.
-TRACKS = ("regular", "high", "draft")
+# A track is a sweep cadence, and nothing else. Draft-ness is a live property of
+# the PR, read fresh every sweep — filing it as a track meant the watchlist held
+# a second, staler copy of a fact GitHub already answers authoritatively.
+TRACKS = ("regular", "high")
 # Reporting label, not the sweep cadence. Defaults off the track so you only
 # override when a P-level and a cadence genuinely disagree.
-TRACK_PRIORITY = {"high": "P0", "regular": "P1", "draft": "P2"}
+TRACK_PRIORITY = {"high": "P0", "regular": "P1"}
 
 # Short status token for the report line, e.g. <CI clear>.
 # Actions that say more than the raw CI state, so they win over it in the
@@ -559,18 +558,6 @@ def gate_reason(link: str) -> tuple[str, str, bool] | None:
     return found
 
 
-def on_hold(meta: dict) -> bool:
-    """`hold` means: keep watching, change nothing.
-
-    A sweep still snapshots a held PR and still shows its CI state, but makes
-    no outward move on it — no re-run, no conflict comment to its author. This
-    exists because the auto-resolved cases (watcher-only, rate-limit,
-    stale-draft) act with no human in the loop, and "do not touch this one"
-    had no way to be expressed.
-    """
-    return bool((meta or {}).get("hold"))
-
-
 def in_scope(workflow: str) -> bool:
     w = workflow or ""
     return not (VENDOR_RE.search(w) or ADMIN_RE.match(w) or EXTRA_SKIP_RE.search(w))
@@ -581,7 +568,7 @@ def in_scope(workflow: str) -> bool:
 
 def cmd_add(a) -> None:
     wl = load(WATCHLIST, {})
-    track = "draft" if getattr(a, "draft", False) else "high" if a.high else "regular"
+    track = "high" if a.high else "regular"
     added = []
     for ref in a.refs:
         pr = parse_pr(ref)
@@ -600,37 +587,6 @@ def cmd_add(a) -> None:
     save(WATCHLIST, wl)
     print("watching: " + ", ".join(added))
     log_line(f"add {' '.join(added)}")
-
-
-def cmd_hold(a) -> None:
-    wl = load(WATCHLIST, {})
-    st = load(STATE, {})
-    for ref in a.refs:
-        pr = parse_pr(ref)
-        if pr not in wl:
-            print(f"#{pr} is not on the watchlist")
-            continue
-        if a.off:
-            wl[pr].pop("hold", None)
-            st.get(pr, {}).pop("held", None)
-            print(f"#{pr} released — sweeps may act on it again")
-            log_line(f"#{pr} hold released")
-        else:
-            wl[pr]["hold"] = a.reason or True
-            # Drop a pending decision too. Leaving `re-run` on a held PR means
-            # the moment it is released the next sweep acts on a judgement made
-            # before the hold, which is not what holding it asked for.
-            s = st.setdefault(pr, {})
-            if s.get("last_action") == "re-run" and not (s.get("reruns") or {}):
-                s["last_action"] = "held"
-                s["last_verdict"] = "on hold — pending re-run decision dropped"
-                s["verdict_at"] = now()
-            s["held"] = True
-            print(f"#{pr} on hold — still watched, never acted on"
-                  + (f" ({a.reason})" if a.reason else ""))
-            log_line(f"#{pr} hold set{(': ' + a.reason) if a.reason else ''}")
-    save(WATCHLIST, wl)
-    save(STATE, st)
 
 
 def cmd_remove(a) -> None:
@@ -661,8 +617,7 @@ def cmd_list(a) -> None:
     for pr, meta in sorted(wl.items(), key=lambda kv: int(kv[0])):
         s = st.get(pr, {})
         print(
-            f"{'#' + pr:>7}  {(meta['track'] + ('*' if on_hold(meta) else '')):<8} "
-            f"{s.get('mergeable', '?'):<12} "
+            f"{'#' + pr:>7}  {meta['track']:<8} {s.get('mergeable', '?'):<12} "
             f"{s.get('last_action', '-'):<13} {s.get('last_sweep', '-'):<21} "
             f"{(s.get('title') or '')[:60]}"
         )
@@ -871,27 +826,15 @@ def cmd_sweep(a) -> None:
         # The PR stays on the watchlist and keeps being snapshotted, so the
         # sweep that follows it being marked Ready picks it straight back up.
         if snap.get("isDraft"):
-            if meta.get("track") != "draft":
-                meta["prev_track"] = meta.get("track", "regular")
-                meta["track"] = "draft"
-                if a.apply and pr in wl:
-                    wl[pr].update(track="draft", prev_track=meta["prev_track"])
             s["last_action"] = "draft"
             s["last_verdict"] = "draft PR — CI and code not checked until it is marked Ready for review"
             s["verdict_at"] = now()
             s["tally"] = {}  # a draft's red gates are not a CI verdict
-            print(f"#{pr}  DRAFT — not checking CI or code "
-                  f"(track=draft; returns to '{meta.get('prev_track', 'regular')}' when ready)")
+            print(f"#{pr}  DRAFT — not checking CI or code until it is "
+                  f"marked Ready for review")
             row["outcome"] = "draft"
             report.append(row)
             continue
-        if meta.get("track") == "draft":
-            back = meta.get("prev_track", "regular")
-            print(f"#{pr}  no longer a draft — returning to the '{back}' track")
-            if a.apply and pr in wl:
-                wl[pr]["track"] = back
-                wl[pr].pop("prev_track", None)
-            meta["track"] = back
 
         # Missing `run-ci` on an OPEN, non-draft PR. Checked against the PR's
         # labels right now, not against whichever gate step happened to fail
@@ -902,11 +845,14 @@ def cmd_sweep(a) -> None:
         needs_run_ci = RUN_CI_LABEL not in labels
         s["needs_run_ci"] = needs_run_ci
         if needs_run_ci:
-            if on_hold(meta):
-                print(f"#{pr}  missing `{RUN_CI_LABEL}` — not adding it, PR is on hold")
-            elif a.apply:
-                rc, _, err = gh_try(["pr", "edit", pr, "--repo", repo,
-                                     "--add-label", RUN_CI_LABEL])
+            if a.apply:
+                # REST, not `gh pr edit`: that path resolves projectCards over
+                # GraphQL, which now hard-errors on the Projects-classic sunset
+                # and fails the whole edit even though we only want a label.
+                rc, _, err = gh_try([
+                    "api", f"repos/{repo}/issues/{pr}/labels",
+                    "-f", f"labels[]={RUN_CI_LABEL}",
+                ])
                 if rc == 0:
                     s["run_ci_added_at"] = now()
                     s["needs_run_ci"] = needs_run_ci = False
@@ -919,17 +865,6 @@ def cmd_sweep(a) -> None:
                           f"{err.splitlines()[-1] if err else 'failed'}")
             else:
                 print(f"#{pr}  missing `{RUN_CI_LABEL}` — would add it (pass --apply)")
-
-        if on_hold(meta):
-            # Deliberately after the snapshot: a held PR should still show
-            # current merge state and CI counts, it just must not be acted on.
-            s["held"] = True
-            print(f"#{pr}  HELD — snapshotting only; no re-run, no conflict notice"
-                  + (f" ({meta['hold']})" if isinstance(meta.get("hold"), str) else ""))
-            row["outcome"] = "held"
-            report.append(row)
-            continue
-        s.pop("held", None)
 
         # 1. conflict, once per head SHA
         if snap.get("mergeable") == "UNKNOWN":
@@ -1004,6 +939,16 @@ def cmd_sweep(a) -> None:
                 g["gate_rerunnable"] = True
                 g["gate_hint"] = ("CI ran while this was a draft; it is Ready for "
                                   "review now, so a re-run gets past the gate")
+        # A recorded gate reason describes the run that already happened. If the
+        # label is missing *now*, that is what a re-run would hit next, so say
+        # so rather than repeating a draft gate the PR has already outgrown.
+        if needs_run_ci:
+            for g in groups.values():
+                if g.get("gate_reason") in GATE_BLOCKING:
+                    g["gate_reason"] = "missing-run-ci"
+                    g["gate_rerunnable"] = False
+                    g["gate_hint"] = (f"missing the `{RUN_CI_LABEL}` label — the "
+                                      f"whole NVIDIA suite refuses to start without it")
         print(f"#{pr}  {len(groups)} in-scope workflow(s) red "
               f"({len(real)} with a real failing job)")
         for w, g in groups.items():
@@ -1066,16 +1011,6 @@ def cmd_sweep(a) -> None:
             for w, g in groups.items() if g.get("gate_reason")
         }
         s["gated"] = all_gates
-        # A recorded gate reason describes the run that already happened. If the
-        # label is missing *now*, that is what a re-run would hit next, so say
-        # so rather than repeating a draft gate the PR has already outgrown.
-        if needs_run_ci:
-            for d in all_gates.values():
-                if d["blocking"]:
-                    d["reason"] = "missing-run-ci"
-                    d["rerunnable"] = False
-                    d["hint"] = (f"missing the `{RUN_CI_LABEL}` label — the whole "
-                                 f"NVIDIA suite refuses to start without it")
         gated = {w: d for w, d in all_gates.items() if d["blocking"]}
         if gated:
             print(f"        !! BLOCKED AT THE GATE: "
@@ -1229,8 +1164,8 @@ def cmd_apply_verdict(a) -> None:
     s["verdict_fingerprint"] = failure_fingerprint(s.get("failed_groups") or {})
     # Kept apart from `last_action` on purpose. `last_action` is scratch — any
     # sweep may overwrite it with `awaiting-triage` — so holding the verdict off
-    # it loses the decision the moment one sweep re-opens triage, and the hold
-    # can then never restore it. This is the durable record of what was judged.
+    # it loses the decision the moment one sweep re-opens triage, and nothing
+    # can then restore it. This is the durable record of what was judged.
     s["verdict_action"] = a.action
 
     if a.action != "re-run":
@@ -1246,10 +1181,6 @@ def cmd_apply_verdict(a) -> None:
         save(STATE, st)
         log_line(f"#{pr} verdict={a.action} :: {a.summary}")
         return
-
-    if on_hold(load(WATCHLIST, {}).get(pr, {})):
-        die(f"#{pr} is on hold — nothing will be re-run. "
-            f"Release it first: watch.py hold {pr} --off")
 
     groups = s.get("failed_groups") or {}
     if not groups:
@@ -1441,19 +1372,11 @@ def main() -> None:
     s = sub.add_parser("add", help="add PR(s) by URL or number")
     s.add_argument("refs", nargs="+")
     s.add_argument("--high", action="store_true", help="high-priority track (2h)")
-    s.add_argument("--draft", action="store_true",
-                   help="draft track: watched, but CI and code are not checked")
     s.add_argument("--note", default="")
     s.add_argument("--priority", choices=list(PRIORITIES),
                    help="report label; defaults to P0 for --high, else P1")
     s.add_argument("--group", default="", help="tab to file it under, e.g. a model name")
     s.set_defaults(func=cmd_add)
-
-    s = sub.add_parser("hold", help="keep watching PR(s) but never act on them")
-    s.add_argument("refs", nargs="+")
-    s.add_argument("--off", action="store_true", help="release the hold")
-    s.add_argument("--reason", default="", help="why, shown on the dashboard")
-    s.set_defaults(func=cmd_hold)
 
     s = sub.add_parser("remove", help="stop watching PR(s)")
     s.add_argument("refs", nargs="+")

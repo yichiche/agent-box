@@ -29,7 +29,7 @@ Read `_shared/repo-config.md` for the `GH_TOKEN=""` rule. Repo is
 /pr-ci-watch add <pr url|number>… [--high] [--note "..."]
 /pr-ci-watch remove <pr url|number>…
 /pr-ci-watch list | status
-/pr-ci-watch sweep [--track high|regular|draft|all] [--pr N…] [--apply] [--force]
+/pr-ci-watch sweep [--track high|regular|all] [--pr N…] [--apply] [--force]
 /pr-ci-watch triage <pr>…   # /ci-analysis + apply-verdict for PRs already swept
 /pr-ci-watch report         # the <P0><CI clear><PR…> status block
 /pr-ci-watch pause | resume # kill switch; a paused sweep is a no-op
@@ -179,27 +179,25 @@ conflict case (below); otherwise classifies in-scope failed checks into
 A PR swept in the last 30 minutes is skipped (so the daily track does not redo a
 high sweep that just ran). `--force` or `--pr N` overrides.
 
-### The `draft` track — watched, but not checked
+### Drafts are skipped
 
 A draft PR is still being written: its CI is the author's own scratchpad and its
 code is not up for review. The sweep snapshots a draft and **stops there** — no
-conflict notice, no CI triage, no re-run on the author's behalf. `pr-gate.yml`
+conflict notice, no CI triage, no re-run, no `run-ci` label. `pr-gate.yml`
 agrees: it fails `Block draft PR` outright, so a watched draft would otherwise
 show up as a mysterious all-red gate with nothing behind it.
 
-The track moves itself. When a watched PR is a draft the sweep sets
-`track: draft` and remembers the one it came from in `prev_track`; the first
-sweep after it is marked Ready puts it straight back. You can also set it by
-hand (`add --draft`, or the dropdown) — the sweep will correct it either way,
-because the PR's own draft flag is the source of truth, not the watchlist.
+This is read live from the PR on every sweep, not stored. Draft-ness is a fact
+GitHub answers authoritatively and that changes without telling us, so the
+watchlist deliberately keeps no second copy of it — a track is a sweep cadence
+(`regular`, `high`) and nothing else.
 
 A draft row says so in the **Merge** column — a filled `draft` pill, which
 takes precedence over `clean`/`conflict`, because `clean` on a draft invites you
 to read the row as ready to land. **Verdict** and **Action** both show a dash:
 we do not read a draft's checks, so any verdict would be a claim we have not
 earned, and nothing is being asked of anyone on account of its CI. Status is a
-single dim line — no tally, no failure block. Red gates that were never a
-verdict do not belong in a CI column.
+single dim line — no tally, no failure block.
 
 The dash on Action holds even for a conflicting draft: a draft's conflicts are
 the author's to find in their own time, which is the same reason the sweep does
@@ -251,9 +249,7 @@ never even evaluated — yet that label is what actually blocks it today. A live
 `missing-run-ci` therefore overrides a stale gate reason, since it is what a
 re-run would hit next.
 
-Two exemptions: a **draft** is skipped entirely (we leave drafts alone), and a
-**held** PR is reported but not labelled — `hold` means no outward action, and
-labelling someone else's PR is an outward action.
+Drafts are exempt: we leave them alone entirely.
 
 **A blocking gate also takes over the Merge and Verdict columns.** `clean` is
 true (there is no git conflict) but on its own reads as ready to land, and
@@ -272,25 +268,6 @@ way, and a count you cannot account for reads as two broken tests. A blocked
 gate renders red (**CI never started**, plus what unblocks it); a harmless one
 renders dim (*not a failure · `PR Test Extra` is opt-in…*), both annotated with
 how many of the fails they cover, so the numbers always add up.
-
-### `hold` — watched, never acted on
-
-The auto-resolved cases below act with no human in the loop, which is right
-until it is not: "leave this one alone" previously had no way to be said except
-removing the PR, which also loses its history. A held PR is still snapshotted
-every sweep and still shows its merge state, CI counts and gate reasons — the
-sweep simply makes no outward move on it: **no re-run, no conflict comment**.
-
-```
-python3 watch.py hold 41982 --reason "author is mid-rewrite"
-python3 watch.py hold 41982 --off
-```
-
-`apply-verdict` refuses outright on a held PR rather than quietly doing nothing.
-Setting a hold also drops a pending `re-run` decision that was never applied —
-otherwise releasing the hold would immediately act on a judgement made before
-you asked it to stop. `list` marks held PRs with `*` after the track; the
-dashboard puts a `hold` toggle under the track dropdown.
 
 ### Two failures the sweep resolves without a triage pass
 
@@ -346,7 +323,7 @@ re-opens triage (nobody has judged it); a new push does too, via the head SHA.
 The judged action lives in `verdict_action`, separate from `last_action`.
 `last_action` is scratch that any sweep may overwrite with `awaiting-triage`, so
 holding the verdict off it loses the decision the moment one sweep re-opens
-triage — and the hold can then never put it back.
+triage — and nothing can then put it back.
 
 ### Phase B — triage (the agent, via `/ci-analysis`)
 
@@ -697,9 +674,9 @@ already know the sweep *is* a Claude turn.
 - **`mergeable: UNKNOWN`** means GitHub is still computing — the script re-queries
   once after 15s. If it is *still* unknown, the conflict check is deferred to the
   next sweep (CI checks are evaluated as normal); it is never treated as clean.
-- **Draft PRs stay on the list** on the `draft` track — snapshotted every sweep
-  so the move back happens by itself, but never triaged or re-run. CI on a draft
-  is the author's scratchpad and is often intentionally red.
+- **Draft PRs stay on the list** and keep their track — snapshotted every
+  sweep, but never triaged, labelled or re-run. CI on a draft is the author's
+  scratchpad and is often intentionally red.
 - **"4 pass, 4 fail" can mean CI never ran.** When a `pr-gate` blocks a
   workflow, every job under it is *skipped*, so the counts collapse to a handful
   of admin checks and look like a small test failure. Always read the gate
