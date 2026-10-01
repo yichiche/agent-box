@@ -228,6 +228,9 @@ or `41870`.
 |---|---|---|
 | `Monitoring ON/OFF` | Writes `_config.enabled`; every sweep, including a cron-fired one, exits immediately when off | no — takes effect instantly |
 | `Refresh now` | Runs `sweep --track all --force` **without `--apply`** in a subprocess: re-reads merge state and red NVIDIA CI for every PR. Comments nothing, re-runs nothing | no |
+| `Notify author` | Runs `watch.py notify --pr N --apply` — posts the conflict notice for that PR now instead of waiting for the next sweep. Shown **only** when the PR is conflicting and not yet notified for this head SHA; asks for confirmation first | no |
+| `▲ / ▼` | Nudges a row within its sort bucket. Manual order is a tiebreaker only — it cannot drag a row across the Pass / priority / conflict boundaries, because that would silently snap back | no |
+| Track dropdown | Sets `regular` or `high` explicitly, both directions | no |
 | `Copy` (triage panel) | Copies `/pr-ci-watch triage <prs>` to paste into Claude | yes, to run it |
 | `Copy` (status block) | Copies the `<P0><CI clear><PR…>` report as **rich text + plain text**, so `<PR41133>` stays a hyperlink when pasted into Teams | no |
 
@@ -239,8 +242,9 @@ so no button can do it. Registering cron likewise needs a Claude turn.
 first run or re-run) / `Fail`. A red *aggregation gate* never makes it `Fail`: a
 gate is not a job, it is mirroring a vendor workflow this tool excludes, so
 calling that Fail would report someone else's failure as this PR's NVIDIA
-result. Rows are ordered **Pass first** (those are the ones you can go merge),
-then P0 → P2, then PR number. **Action** is what to do — `CI re-run` (one is in flight),
+result. Rows are ordered **Pass first** (those are the ones you can go merge), then
+P0 → P2, then **conflicts last within each priority** (nothing can progress on
+them until the author rebases), then your manual `▲/▼` order, then PR number. **Action** is what to do — `CI re-run` (one is in flight),
 `Solve conflict`, `Merge main`, `Code fix`, `Triage`, `Wait upstream`, or `-`.
 **Status** carries the job counts (`34 pass, 2 fail, 10 running`), the conflict
 notice proof, and the triage reason; it flags the counts as stale when they

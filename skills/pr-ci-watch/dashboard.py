@@ -415,16 +415,19 @@ def notify_cell(s: dict) -> str:
         return ""
     if s.get("conflict_comment_sha") != s.get("head_sha"):
         return ('<div class="bad"><b>NOT notified yet</b> — the author has not '
-                "been told about this conflict.</div>")
+                "been told about this conflict.</div>")  # button added by caller
     url = s.get("conflict_comment_url", "")
     link = f' &middot; <a href="{esc(url)}" target="_blank">see comment</a>' if url else ""
     return (f'<div class="ok"><b>Notified</b> @{esc(s.get("author"))} '
             f"{esc(tw(s.get('conflict_comment_at')))}{link}</div>")
 
 
-def status_cell(s: dict) -> str:
-    """Where CI actually stands, in numbers then words. Read-only."""
+def status_cell(pr: str, s: dict) -> str:
+    """Where CI actually stands, in numbers then words."""
     out = []
+    b = notify_button(pr, s)
+    if b:
+        out.append(b)
     t = tally_line(s)
     if t:
         out.append(t)
@@ -439,6 +442,45 @@ def status_cell(s: dict) -> str:
     if s.get("last_verdict"):
         out.append(f'<div class="dim reason">{esc(s["last_verdict"])}</div>')
     return "".join(out) or '<span class="dim">&mdash;</span>'
+
+
+def track_cell(pr: str, track: str) -> str:
+    """A dropdown, not a toggle button: you asked to set a track explicitly
+    after tagging, and a one-way flip makes the current value ambiguous."""
+    opts = "".join(
+        f'<option value="{t}"{" selected" if track == t else ""}>{t}</option>'
+        for t in ("regular", "high")
+    )
+    return (f'<form class="inline" method="post" action="/api/track">'
+            f'<input type="hidden" name="pr" value="{esc(pr)}">'
+            f'<select name="track" onchange="this.form.submit()">{opts}</select>'
+            f"</form>")
+
+
+def move_cell(pr: str) -> str:
+    return (
+        f'<form class="inline" method="post" action="/api/move">'
+        f'<input type="hidden" name="pr" value="{esc(pr)}">'
+        f'<button class="linkish" name="dir" value="up" title="move up">&#9650;</button>'
+        f'<button class="linkish" name="dir" value="down" title="move down">&#9660;</button>'
+        f"</form>"
+    )
+
+
+def notify_button(pr: str, s: dict) -> str:
+    """Only offered when there is actually an unsent notice to send."""
+    if s.get("mergeable") != "CONFLICTING":
+        return ""
+    if s.get("conflict_comment_sha") == s.get("head_sha"):
+        return ""
+    return (
+        f'<form class="inline" method="post" action="/api/notify">'
+        f'<input type="hidden" name="pr" value="{esc(pr)}">'
+        f'<button class="primary" type="submit" '
+        f'onclick="return confirm(\'Post the conflict notice on PR {esc(pr)}? '
+        f'This comments on the author\\\'s PR.\')">Notify author</button>'
+        f"</form>"
+    )
 
 
 def prio_cell(pr: str, meta: dict) -> str:
@@ -469,12 +511,39 @@ def report_html(wl: dict, st: dict) -> str:
     return "".join(out) or '<div class="dim">(watchlist is empty)</div>'
 
 
+def move_row(wl: dict, st: dict, pr: str, direction: str) -> None:
+    """Swap this PR with its neighbour *inside the same sort bucket*.
+
+    Manual order is only a tiebreaker: Pass-first, priority and conflict-last
+    still decide the buckets, so a row cannot be dragged across them. Moving
+    across a bucket would silently snap back, which reads as a broken button.
+    """
+    if pr not in wl:
+        return
+    key = row_order(st)
+    ordered = sorted(wl.items(), key=key)
+    idx = next((i for i, (p, _) in enumerate(ordered) if p == pr), None)
+    if idx is None:
+        return
+    nbr = idx - 1 if direction == "up" else idx + 1
+    if not 0 <= nbr < len(ordered):
+        return
+    # Same bucket == same sort key ignoring the manual order and PR number.
+    if key(ordered[idx])[:3] != key(ordered[nbr])[:3]:
+        return
+    # Normalise to dense ranks first; stored orders may all be 0 initially.
+    for rank, (p, meta) in enumerate(ordered):
+        meta["order"] = rank
+    wl[pr]["order"], wl[ordered[nbr][0]]["order"] = (
+        wl[ordered[nbr][0]]["order"], wl[pr]["order"])
+
+
 def render_table(wl: dict, st: dict) -> str:
     if not wl:
         return EMPTY
     head = (
         "<tr><th>Pri</th><th>PR</th><th>Track</th><th>Merge</th><th>Red NVIDIA CI</th>"
-        "<th>Verdict</th><th>Action</th><th>Status</th>"
+        "<th></th><th>Verdict</th><th>Action</th><th>Status</th>"
         "<th>Last swept (TW)</th><th></th></tr>"
     )
     rows = []
@@ -489,17 +558,13 @@ def render_table(wl: dict, st: dict) -> str:
             f'<td><a href="{esc(url)}" target="_blank"><b>#{esc(pr)}</b></a>'
             f'<span class="title dim" title="{esc(s.get("title"))}">{esc(s.get("title"))}</span>'
             f'<span class="dim">{"@" + esc(s.get("author")) if s.get("author") else ""}</span></td>'
-            f'<td><form class="inline" method="post" action="/api/track">'
-            f'<input type="hidden" name="pr" value="{esc(pr)}">'
-            f'<input type="hidden" name="track" value="{other}">'
-            f'<button class="linkish" title="switch to {other}">'
-            f'<span class="pill {"bad" if track == "high" else "dim"}">{esc(track)}</span>'
-            f"</button></form></td>"
+            f"<td>{track_cell(pr, track)}</td>"
             f"<td>{merge_cell(s)}</td>"
             f"<td>{ci_cell(s)}</td>"
+            f"<td>{move_cell(pr)}</td>"
             f"<td>{verdict_cell(s)}</td>"
             f"<td>{action_cell(s)}</td>"
-            f"<td>{status_cell(s)}</td>"
+            f"<td>{status_cell(pr, s)}</td>"
             f'<td class="mono dim">{esc(tw(s.get("last_sweep")))}</td>'
             f'<td><form class="inline" method="post" action="/api/remove">'
             f'<input type="hidden" name="pr" value="{esc(pr)}">'
@@ -658,7 +723,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         form = self._form()
         try:
-            if self.path == "/api/refresh":
+            if self.path == "/api/notify":
+                pr = parse_pr(form.get("pr", ""))
+                # The one outward-facing button on this page, so it runs the
+                # same guarded code path as the sweep (one comment per head
+                # SHA) rather than posting anything itself.
+                here = Path(__file__).resolve().parent
+                subprocess.run(
+                    [sys.executable, str(here / "watch.py"), "notify",
+                     "--pr", pr, "--apply"],
+                    capture_output=True, text=True, timeout=180, cwd=str(here),
+                )
+            elif self.path == "/api/refresh":
                 with SWEEP_LOCK:
                     if not SWEEP["running"]:
                         SWEEP.update(running=True, started=now(), finished="",
@@ -697,6 +773,9 @@ class Handler(BaseHTTPRequestHandler):
                     pr = parse_pr(form.get("pr", ""))
                     if pr in wl:
                         wl[pr]["note"] = form.get("note", "").strip()
+                elif self.path == "/api/move":
+                    move_row(wl, load(STATE, {}), parse_pr(form.get("pr", "")),
+                             form.get("dir", "up"))
                 elif self.path == "/api/remove":
                     pr = parse_pr(form.get("pr", ""))
                     if wl.pop(pr, None) is not None:

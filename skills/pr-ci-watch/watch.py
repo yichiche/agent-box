@@ -234,11 +234,21 @@ def ci_action(s: dict) -> str:
 def row_order(st: dict):
     """Display order, shared by the dashboard table and the report block so the
     two can never drift: Pass first (those are the ones you can go merge), then
-    P0 -> P2, then PR number."""
+    P0 -> P2, conflicts last within a priority, then your manual order, then
+    PR number."""
     def key(kv):
         pr, meta = kv
-        return (0 if ci_verdict(st.get(pr, {})) == "Pass" else 1,
-                priority_of(meta), int(pr))
+        s = st.get(pr, {})
+        return (
+            0 if ci_verdict(s) == "Pass" else 1,
+            priority_of(meta),
+            # Conflicts sink to the bottom of their priority: nothing can
+            # progress on them until the author rebases, so they are the least
+            # useful thing to read first.
+            1 if s.get("mergeable") == "CONFLICTING" else 0,
+            meta.get("order", 0),  # manual nudge, only within the same bucket
+            int(pr),
+        )
     return key
 
 
@@ -896,6 +906,49 @@ def cmd_arm_status(a) -> None:
     print(f"  jobs: {meta.get('jobs', '?')}")
 
 
+def cmd_notify(a) -> None:
+    """Post the conflict notice for one PR, on demand.
+
+    Same idempotency as the sweep: one comment per head SHA, never a repeat.
+    Exists so the dashboard can offer an explicit "notify now" button instead of
+    making you wait for the next scheduled sweep.
+    """
+    pr = parse_pr(a.pr)
+    st = load(STATE, {})
+    wl = load(WATCHLIST, {})
+    repo = (wl.get(pr) or {}).get("repo") or a.repo
+    snap = pr_snapshot(pr, repo)
+    s = st.setdefault(pr, {})
+    sha = snap.get("headRefOid", "")
+    author = (snap.get("author") or {}).get("login", "")
+
+    if snap.get("state") != "OPEN":
+        die(f"#{pr} is {snap.get('state')}, not OPEN")
+    if snap.get("mergeable") != "CONFLICTING":
+        die(f"#{pr} is {snap.get('mergeable')} — nothing to notify about")
+    if not author:
+        die(f"#{pr} has no author login to notify")
+    if s.get("conflict_comment_sha") == sha:
+        print(f"#{pr}  already notified @{author} for {sha[:8]} — not repeating")
+        print(f"       {s.get('conflict_comment_url', '')}")
+        return
+
+    body = conflict_comment(author, sha, snap.get("headRefName", "?"))
+    if not a.apply:
+        print(f"#{pr}  would comment to @{author}:\n{body}")
+        return
+    out = gh(["pr", "comment", pr, "--repo", repo, "--body", body])
+    url = next((ln.strip() for ln in out.splitlines()
+                if ln.strip().startswith("http")), "")
+    s.update(conflict_comment_sha=sha, conflict_comment_url=url,
+             conflict_comment_at=now(), mergeable="CONFLICTING",
+             head_sha=sha, author=author, title=snap.get("title", ""),
+             url=snap.get("url", ""), last_action="conflict")
+    save(STATE, st)
+    log_line(f"#{pr} conflict comment posted on demand for {sha[:8]} -> @{author} {url}")
+    print(f"#{pr}  commented to @{author}  {url}")
+
+
 def cmd_toggle(a) -> None:
     st = load(STATE, {})
     on = a.cmd == "resume"
@@ -979,6 +1032,11 @@ def main() -> None:
     s.add_argument("--force-gates", action="store_true",
                    help="also re-run workflows whose only failures are rollup gates")
     s.set_defaults(func=cmd_apply_verdict)
+
+    s = sub.add_parser("notify", help="post the conflict notice for one PR now")
+    s.add_argument("--pr", required=True)
+    s.add_argument("--apply", action="store_true")
+    s.set_defaults(func=cmd_notify)
 
     s = sub.add_parser("report", help="print the <P0><CI clear><PR…> status block")
     s.set_defaults(func=cmd_report)
