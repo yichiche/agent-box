@@ -142,6 +142,25 @@ def set_monitoring(st: dict, on: bool) -> None:
     st["_config"]["toggled_at"] = now()
 
 
+UNGROUPED = "Ungrouped"
+
+
+def group_of(meta: dict) -> str:
+    """Free-text bucket you assign, e.g. a model name or 'debug'."""
+    return (meta.get("group") or "").strip() or UNGROUPED
+
+
+def all_groups(wl: dict) -> list[str]:
+    """Every group in use, Ungrouped last so it never heads the tab bar."""
+    seen = {group_of(m) for m in wl.values()}
+    named = sorted(g for g in seen if g != UNGROUPED)
+    return named + ([UNGROUPED] if UNGROUPED in seen else [])
+
+
+def in_group(meta: dict, group: str | None) -> bool:
+    return not group or group_of(meta) == group
+
+
 def priority_of(meta: dict) -> str:
     return meta.get("priority") or TRACK_PRIORITY.get(meta.get("track", "regular"), "P1")
 
@@ -258,14 +277,17 @@ def row_order(st: dict):
     return key
 
 
-def report_entries(wl: dict, st: dict) -> list[dict]:
+def report_entries(wl: dict, st: dict, group: str | None = None) -> list[dict]:
     """Structured rows behind the status block, so the plain-text and the
     hyperlinked HTML renderings cannot disagree."""
     out = []
     for pr, meta in sorted(wl.items(), key=row_order(st)):
+        if not in_group(meta, group):
+            continue
         s = st.get(pr, {})
         out.append({
             "pri": priority_of(meta),
+            "group": group_of(meta),
             "token": ci_token(s),
             "pr": pr,
             "url": s.get("url") or
@@ -279,14 +301,14 @@ def report_entries(wl: dict, st: dict) -> list[dict]:
     return out
 
 
-def report_text(wl: dict, st: dict) -> str:
+def report_text(wl: dict, st: dict, group: str | None = None) -> str:
     """The paste-into-Teams block.
 
     <P0><CI clear><PR39987>[AMD] Tune Qwen3.5 TP4 GDN recurrent launch on gfx950
     ~5% P90 E2E improvement at TP4 conc4 agent mode
     """
     lines = []
-    for e in report_entries(wl, st):
+    for e in report_entries(wl, st, group):
         # Markdown bullets: Teams turns "- " into a real bullet, and two spaces
         # of indent into a nested one, so the plain-text flavour still reads as
         # a list wherever the rich one does not survive the paste.
@@ -397,6 +419,8 @@ def cmd_add(a) -> None:
         }
         if a.priority or prev.get("priority"):
             wl[pr]["priority"] = a.priority or prev["priority"]
+        if a.group or prev.get("group"):
+            wl[pr]["group"] = (a.group or prev.get("group", "")).strip()
         added.append(f"#{pr} [{track}/{priority_of(wl[pr])}]")
     save(WATCHLIST, wl)
     print("watching: " + ", ".join(added))
@@ -978,7 +1002,7 @@ def cmd_report(a) -> None:
     if not wl:
         print("(watchlist is empty)")
         return
-    print(report_text(wl, st))
+    print(report_text(wl, st, getattr(a, "group", None)))
 
 
 def cmd_set(a) -> None:
@@ -993,8 +1017,11 @@ def cmd_set(a) -> None:
         wl[pr]["priority"] = a.priority
     if a.note is not None:
         wl[pr]["note"] = a.note
+    if a.group is not None:
+        wl[pr]["group"] = a.group.strip()
     save(WATCHLIST, wl)
-    print(f"#{pr}: priority={priority_of(wl[pr])} note={wl[pr].get('note', '')!r}")
+    print(f"#{pr}: priority={priority_of(wl[pr])} group={group_of(wl[pr])!r} "
+          f"note={wl[pr].get('note', '')!r}")
 
 
 def cmd_status(a) -> None:
@@ -1022,6 +1049,7 @@ def main() -> None:
     s.add_argument("--note", default="")
     s.add_argument("--priority", choices=list(PRIORITIES),
                    help="report label; defaults to P0 for --high, else P1")
+    s.add_argument("--group", default="", help="tab to file it under, e.g. a model name")
     s.set_defaults(func=cmd_add)
 
     s = sub.add_parser("remove", help="stop watching PR(s)")
@@ -1054,12 +1082,14 @@ def main() -> None:
     s.set_defaults(func=cmd_notify)
 
     s = sub.add_parser("report", help="print the <P0><CI clear><PR…> status block")
+    s.add_argument("--group", help="only this tab")
     s.set_defaults(func=cmd_report)
 
     s = sub.add_parser("set", help="set a PR's report priority / note")
     s.add_argument("pr")
     s.add_argument("--priority", choices=list(PRIORITIES))
     s.add_argument("--note")
+    s.add_argument("--group", help='tab to file it under ("" clears it)')
     s.set_defaults(func=cmd_set)
 
     for name, help_ in (("pause", "stop all sweeps"), ("resume", "re-enable sweeps")):

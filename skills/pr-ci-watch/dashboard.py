@@ -17,6 +17,7 @@ import html
 import json
 import re
 import socket
+from urllib.parse import quote, urlparse, parse_qs
 import subprocess
 import sys
 import threading
@@ -36,6 +37,10 @@ from watch import (  # noqa: E402
     now,
     parse_pr,
     priority_of,
+    UNGROUPED,
+    all_groups,
+    group_of,
+    in_group,
     report_entries,
     report_text,
     row_order,
@@ -133,6 +138,15 @@ PAGE = """<!doctype html>
   /* Nothing behind the status block: it is text to be read and copied, and
      any fill only competes with what it sits in. */
   .panel.plain {{ background:transparent; }}
+  .tabs {{ display:flex; gap:2px; flex-wrap:wrap; margin-bottom:-1px; }}
+  .tab {{ padding:7px 14px; border:1px solid var(--line); border-bottom:none;
+    border-radius:7px 7px 0 0; background:var(--bg); color:var(--dim);
+    font-size:13px; text-decoration:none; }}
+  .tab:hover {{ color:var(--fg); text-decoration:none; }}
+  .tab.on {{ background:var(--panel); color:var(--fg); font-weight:600;
+    border-color:var(--line); }}
+  .panel.tabbed {{ border-radius:0 7px 7px 7px; }}
+  .grp {{ min-width:92px; }}
   .reportblock {{ width:100%; max-height:300px; overflow:auto; padding:2px 0;
     background:transparent; border:none;
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px;
@@ -180,7 +194,8 @@ PAGE = """<!doctype html>
   <button class="primary" type="submit">Watch</button>
 </form></div>
 
-<div class="panel">{table}</div>
+{tabs}
+<div class="panel tabbed">{table}</div>
 
 <div class="panel plain">
   <h2>Status block &mdash; paste into Teams / standup</h2>
@@ -255,7 +270,7 @@ the ON/OFF switch. Data: <span class="mono">{data}</span></div>
   }}, {refresh}000);
   // Submit a note on blur or Enter so there is no per-row save button.
   document.addEventListener('DOMContentLoaded', () => {{
-    document.querySelectorAll('input.note').forEach(el => {{
+    document.querySelectorAll('input.note, input.grp').forEach(el => {{
       const initial = el.value;
       el.addEventListener('blur', () => {{ if (el.value !== initial) el.form.submit(); }});
       el.addEventListener('keydown', e => {{ if (e.key === 'Enter') {{ e.preventDefault(); el.form.submit(); }} }});
@@ -537,12 +552,12 @@ def prio_cell(pr: str, meta: dict) -> str:
     )
 
 
-def report_html(wl: dict, st: dict) -> str:
+def report_html(wl: dict, st: dict, group: str | None = None) -> str:
     """Same block, but <PRnnnnn> is a real link. Copying this as rich text keeps
     the hyperlink when it lands in Teams; the plain-text flavour is copied
     alongside for anywhere that strips HTML."""
     out = []
-    for e in report_entries(wl, st):
+    for e in report_entries(wl, st, group):
         # A real nested <ul> so a rich paste lands in Teams as a proper list.
         note = (f'<ul><li>{esc(e["note"])}</li></ul>' if e["note"] else "")
         out.append(
@@ -581,15 +596,44 @@ def move_row(wl: dict, st: dict, pr: str, direction: str) -> None:
         wl[ordered[nbr][0]]["order"], wl[pr]["order"])
 
 
+def render_tabs(wl: dict, active: str | None) -> str:
+    groups = all_groups(wl)
+    if not groups or groups == [UNGROUPED]:
+        return ""  # one bucket is not a tab bar
+    def tab(label, key, n):
+        on = " on" if (key or None) == (active or None) else ""
+        href = f"/?tab={quote(key)}" if key else "/"
+        return (f'<a class="tab{on}" href="{esc(href)}">{esc(label)}'
+                f'<span class="dim"> {n}</span></a>')
+    out = [tab("All", "", len(wl))]
+    for g in groups:
+        out.append(tab(g, g, sum(1 for m in wl.values() if group_of(m) == g)))
+    return f'<div class="tabs">{"".join(out)}</div>'
+
+
+def group_cell(pr: str, meta: dict, groups: list[str]) -> str:
+    """Free text with a datalist: pick an existing tab or type a new one."""
+    cur = meta.get("group", "")
+    opts = "".join(f'<option value="{esc(g)}">' for g in groups if g != UNGROUPED)
+    return (
+        f'<form method="post" action="/api/group">'
+        f'<input type="hidden" name="pr" value="{esc(pr)}">'
+        f'<input class="note grp" type="text" name="group" value="{esc(cur)}" '
+        f'list="grouplist" placeholder="{esc(UNGROUPED)}"></form>'
+        f'<datalist id="grouplist">{opts}</datalist>'
+    )
+
+
 def render_table(wl: dict, st: dict) -> str:
     if not wl:
         return EMPTY
     head = (
-        "<tr><th>Pri</th><th>PR</th><th>Track</th><th>Merge</th><th>Red NVIDIA CI</th>"
+        "<tr><th>Pri</th><th>PR</th><th>Group</th><th>Track</th><th>Merge</th><th>Red NVIDIA CI</th>"
         "<th></th><th>Verdict</th><th>Action</th><th>Status</th>"
         "<th>Last swept (TW)</th><th></th></tr>"
     )
     rows = []
+    groups = all_groups(wl)
     for pr, meta in sorted(wl.items(), key=row_order(st)):
         s = st.get(pr, {})
         track = meta.get("track", "regular")
@@ -601,6 +645,7 @@ def render_table(wl: dict, st: dict) -> str:
             f'<td><a href="{esc(url)}" target="_blank"><b>#{esc(pr)}</b></a>'
             f'<span class="title dim" title="{esc(s.get("title"))}">{esc(s.get("title"))}</span>'
             f'<span class="dim">{"@" + esc(s.get("author")) if s.get("author") else ""}</span></td>'
+            f"<td>{group_cell(pr, meta, groups)}</td>"
             f"<td>{track_cell(pr, track)}</td>"
             f"<td>{merge_cell(s)}</td>"
             f"<td>{ci_cell(s)}</td>"
@@ -743,6 +788,12 @@ class Handler(BaseHTTPRequestHandler):
                 "application/json",
             )
             return
+        tab = (parse_qs(urlparse(self.path).query).get("tab") or [""])[0]
+        # A tab that no longer exists (last PR moved out) falls back to All
+        # rather than showing an empty table with no way back.
+        if tab and tab not in all_groups(wl):
+            tab = ""
+        shown = {k: v for k, v in wl.items() if in_group(v, tab or None)}
         enabled = monitoring_enabled(raw_st)
         with SWEEP_LOCK:
             running = SWEEP["running"]
@@ -753,13 +804,14 @@ class Handler(BaseHTTPRequestHandler):
             refresh_label="Refreshing…" if running else "Refresh now",
             refresh_disabled="disabled" if running else "",
             refresh_status=render_refresh_status(),
-            triage_panel=render_triage_panel(wl, st),
+            triage_panel=render_triage_panel(shown, st),
             repo=html.escape(self.repo),
             generated=now(),
             data=html.escape(str(DATA_DIR)),
-            table=render_table(wl, st),
-            report=html.escape(report_text(wl, st)),
-            report_html=report_html(wl, st),
+            table=render_table(shown, st),
+            tabs=render_tabs(wl, tab),
+            report=html.escape(report_text(wl, st, tab or None)),
+            report_html=report_html(wl, st, tab or None),
             banner=render_notice() + render_banner(raw_st, enabled),
             arm_line=html.escape(arm_line(raw_st)),
             toggle_to="0" if enabled else "1",
@@ -840,6 +892,10 @@ class Handler(BaseHTTPRequestHandler):
                     pr = parse_pr(form.get("pr", ""))
                     if pr in wl:
                         wl[pr]["note"] = form.get("note", "").strip()
+                elif self.path == "/api/group":
+                    pr = parse_pr(form.get("pr", ""))
+                    if pr in wl:
+                        wl[pr]["group"] = form.get("group", "").strip()
                 elif self.path == "/api/move":
                     move_row(wl, load(STATE, {}), parse_pr(form.get("pr", "")),
                              form.get("dir", "up"))

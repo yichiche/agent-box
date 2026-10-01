@@ -74,6 +74,27 @@ Everything runs through `watch.py` in this directory. **No mutation happens
 without `--apply`** — a bare `sweep` prints exactly what it would do and touches
 nothing outward-facing.
 
+## Tabs
+
+Each PR carries a free-text `group` — a model name, `debug`, whatever you want
+to manage separately. The dashboard shows one tab per group (plus **All**), and
+the tab filters the table, the triage panel **and the status block**, so you can
+paste a standup entry for one workstream without editing it by hand.
+
+Set a group by typing in the **Group** column (a datalist offers the ones
+already in use, and a new name creates the tab), or from the CLI:
+
+```bash
+python3 watch.py set 41133 --group "Qwen3.5 MoE"
+python3 watch.py add 41870 --high --group debug
+python3 watch.py report --group GDN     # just that tab
+python3 watch.py set 41133 --group ""   # back to Ungrouped
+```
+
+`Ungrouped` is always listed last so it never heads the tab bar, and a tab whose
+last PR moved out falls back to **All** instead of leaving you on an empty table
+with no way back.
+
 ## What counts as "NVIDIA CI"
 
 Scope is decided **per workflow**, not per job name, using the `workflow` field
