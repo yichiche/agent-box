@@ -26,6 +26,12 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# This file is invoked by absolute path from cron and from the dashboard, so its
+# own directory is not guaranteed to be on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import perf  # noqa: E402
+
 REPO_DEFAULT = "sgl-project/sglang"
 
 # --- scope -----------------------------------------------------------------
@@ -265,9 +271,10 @@ def report_entries(wl: dict, st: dict) -> list[dict]:
             "url": s.get("url") or
                    f"https://github.com/{meta.get('repo', REPO_DEFAULT)}/pull/{pr}",
             "title": s.get("title") or "(not swept yet — title unknown)",
-            # Line 2 falls back to the triage reason now that the dashboard no
-            # longer has a note field; `watch.py set --note` still overrides it.
-            "note": (meta.get("note") or s.get("last_verdict") or "").strip(),
+            # Line 2 is the PR's own performance claim, pulled from its body.
+            # `watch.py set --note` overrides it when the extraction is poor or
+            # the headline is something the tables do not capture.
+            "note": (meta.get("note") or s.get("perf") or "").strip(),
         })
     return out
 
@@ -441,8 +448,12 @@ def conflict_comment(author: str, sha: str, branch: str) -> str:
 
 
 def pr_snapshot(pr: str, repo: str) -> dict:
+    # `body` rides along on the call we already make — the perf claim is
+    # extracted from it here and only the one-line result is stored, so
+    # state.json does not grow a copy of every PR description.
     fields = (
-        "state,mergeable,mergeStateStatus,headRefOid,headRefName,author,title,url,isDraft"
+        "state,mergeable,mergeStateStatus,headRefOid,headRefName,author,title,"
+        "url,isDraft,body"
     )
     data = json.loads(gh(["pr", "view", pr, "--repo", repo, "--json", fields]))
     if data.get("mergeable") == "UNKNOWN":
@@ -582,6 +593,7 @@ def cmd_sweep(a) -> None:
             merge_state=snap.get("mergeStateStatus", "?"),
             state=snap.get("state", "?"),
             is_draft=snap.get("isDraft", False),
+            perf=perf.extract(snap.get("body") or "") or s.get("perf", ""),
             last_sweep=now(),
         )
         if a.apply:

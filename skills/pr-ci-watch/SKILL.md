@@ -37,6 +37,24 @@ Read `_shared/repo-config.md` for the `GH_TOKEN=""` rule. Repo is
 /pr-ci-watch arm            # register the two cron tracks
 ```
 
+Line 2 of each entry is the PR's **own performance claim**, extracted from its
+body by `perf.py` — not the CI triage reason. It reads the markdown result
+tables two ways: metric-in-first-cell (`| TPOT median | 2.60 | 2.48 | -4.6% |`)
+and metric-in-header (`| … | Δ TTFT | … | Δ |`, where a bare Δ column inherits
+the metric to its left). Only *signed* percentages count as deltas — an unsigned
+one beside them is a standard error. Across several benchmark tables it reports
+the **median**, preferring rows the PR marks `median`/`p50`, so a multi-shape
+sweep is not cherry-picked.
+
+Which metrics: **TPOT and TTFT when the PR states both**, otherwise up to two of
+TPOT / TTFT / E2E / total throughput. Direction is per metric — `-4.6% TPOT` is
+an improvement, `-2.9% throughput` is a regression. Reciprocal restatements
+(`Interactivity (1 / TPOT)`) and accuracy tables are excluded; counting the
+former would report one result as both an improvement and a regression.
+
+Override a poor extraction with `watch.py set <pr> --note "..."`; check one
+without a sweep via `python3 perf.py <pr>`.
+
 The report token comes from the same `ci_verdict` the table shows (`CI clear` /
 `CI running` / `CI red`), with `code-fix`, `merge-main` and `wait-upstream`
 overriding it because they say more than the raw state. Row order is shared via
