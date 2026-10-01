@@ -1,6 +1,6 @@
 ---
 name: pr-merge-triage
-description: How I review a PR into sgl-project/sglang from the AMD side, plus a script that takes a PR number and prints a filled-in checklist — blast radius, is_hip/use_aiter guards, new flags, new-feature vs bug-fix, AMD-only vs shared bug, new kernel vs kernel upgrade — ending in a merge-ease verdict. Use when the user says '/pr-merge-triage', asks 'is this PR easy to merge', 'how hard is this to land upstream', 'review guidelines', or wants a shareable write-up of the review bar.
+description: How I review a PR into sgl-project/sglang from the AMD side, plus a script that takes a PR number and prints a filled-in checklist — affected scope, is_hip/use_aiter guards, new flags, new-feature vs bug-fix, AMD-only vs shared bug, new kernel vs kernel upgrade — ending in a merge-ease verdict. Use when the user says '/pr-merge-triage', asks 'is this PR easy to merge', 'how hard is this to land upstream', 'review guidelines', or wants a shareable write-up of the review bar.
 category: deliver
 ---
 
@@ -22,28 +22,70 @@ bug in shared code costs everybody and gets reverted.
 
 ---
 
-## Quick start
+## Procedure — all three steps, every time
+
+Running the script is step 1 of 3, not the whole skill. The `Critical risk` row
+is a **gate the script cannot answer by itself**, so a triage that stops after
+step 1 always ends `BLOCKED ON AUTHOR — Critical risk not assessed`. That is by
+design; it is not a result to report. Do not hand the user a table with that row
+open — go and close it.
 
 ```bash
+# 1. shape: is it even worth reviewing as-is?
 python3 ~/agent-box/skills/pr-merge-triage/triage.py 41870
-python3 ~/agent-box/skills/pr-merge-triage/triage.py https://github.com/sgl-project/sglang/pull/41870
-python3 ~/agent-box/skills/pr-merge-triage/triage.py 41870 --json   # for scripting
+#    → SPLIT FIRST?  stop here and ask for the split. Reviewing the whole is wasted work.
+#    → anything else: continue. Do not stop to report.
+
+# 2. correctness: run /sglang-pr-review on the same PR, in this same turn, and
+#    write its report out. (Follow ../sglang-pr-review/SKILL.md — it is a
+#    procedure you perform, not a command you shell out to.)
+#    Save the findings to a file, e.g. /tmp/review-41870.md
+
+# 3. fold it back in and report THIS output, not step 1's:
+python3 ~/agent-box/skills/pr-merge-triage/triage.py 41870 --review /tmp/review-41870.md
 ```
 
-Output is a markdown checklist you can paste straight into a review, plus a
-verdict and a numbered "ask the author" list:
+Skip step 2 only when the user explicitly asked for the shape check alone
+("just the checklist", "don't review it yet"). Otherwise it is not optional:
+cheap-to-land and correct are different properties, and reporting the first as
+if it settled the second is the failure this skill exists to prevent.
+
+Other invocations:
+
+```bash
+python3 triage.py https://github.com/sgl-project/sglang/pull/41870   # URL works too
+python3 triage.py 41870 --critical 0 --high 1 --medium 2            # counts by hand
+python3 triage.py 41870 --json                                      # for scripting
+```
+
+Output is two parts.
+
+The table is the merge bar. Every row has to pass.
 
 ```
-| | Check | Verdict | Risk | Evidence |
-|---|---|---|---|---|
-| - [ ] | Blast radius | CHECK | +1 | shared files, additive only: arg_groups/choices.py, … |
-| - [x] | AMD guard | PASS | 0 | n/a — no existing shared behaviour rewritten |
-| - [ ] | Guard choice **GATE** | CHECK | 0 | imports aiter; no is_hip/use_aiter token added |
-…
-| | **Total** | | **2** | band: LOW (LOW ≤3, MEDIUM ≤7, HIGH ≤12, SPLIT >12) |
-
-**Verdict: BLOCKED ON AUTHOR** — open gate(s): Guard choice
+| | Check | Verdict | Evidence |
+|---|---|---|---|
+| - [x] | Affected Scope | PASS | 2 file(s), all AMD-only paths |
+| - [x] | AMD guard | PASS | is_hip — `_is_hip = is_hip()` in foo.py |
+| - [ ] | Guard choice **GATE** | CHECK | imports aiter; no is_hip/use_aiter token added |
+| - [x] | Tests | PASS | 1 test file(s) touched |
 ```
+
+Then a `/sglang-pr-review` table. A Critical there blocks the merge.
+
+```
+| Risk | Detail |
+|---|---|
+| Critical | not run — `/sglang-pr-review` has not read this diff |
+| High | — |
+| Medium | — |
+| Low | — |
+```
+
+Under that, a risk picture. These bullets answer the questions a reviewer
+needs in order to see the risk quickly. They are not extra gates, and they
+do not have to be empty for the PR to land: new feature or existing bug,
+AMD-only or both platforms, new kernel or an upgrade, flags and globals.
 
 It reads the PR with `gh` (prefixed `GH_TOKEN=""`, per `_shared/repo-config.md`)
 and needs nothing else — no checkout, no build.
@@ -102,6 +144,7 @@ Which guard to use:
 |---|---|
 | `is_hip()` / `_is_hip` | the kernel or path works on **all AMD GPUs** |
 | `_use_aiter` (`get_bool_env_var("SGLANG_USE_AITER") and is_hip()`) | the code **imports from the AITER library** — `is_hip()` alone will run it on an AMD box that has no AITER installed, and crash |
+| `is_gfx95_supported()` / gfx950 / MI355 | the path is **that GPU only**. Name it; do not treat it as `is_hip` |
 
 The established idiom is a module-level constant, evaluated once:
 
@@ -129,21 +172,29 @@ reviewable in a sitting.
 
 ## The classification: what the checklist asks
 
-Ten axes. `triage.py` answers them from the diff; the ones it cannot decide are
-marked and listed below.
+The table is the hard bar. Every row has to pass before the PR can merge.
+`triage.py` fills it from the diff.
 
 | # | Axis | Why it matters |
 |---|---|---|
-| 1 | **Blast radius** — AMD-only paths / new files / existing shared files / hot common code | decides whether you need a community reviewer |
-| 2 | **AMD guard** — is every *rewritten* hunk in shared code under `is_hip`/`use_aiter`? | an unguarded rewrite changes NVIDIA behaviour by accident |
+| 1 | **Affected Scope** — AMD-only paths / new files / existing shared files / hot common code | decides whether you need a community reviewer |
+| 2 | **AMD guard** — cite the guard with a line from the diff: `is_hip`, `use_aiter`, or a device check (MI355 / gfx950, …). If none of those appear, name the AMD path that contains the change | an unguarded rewrite changes NVIDIA behaviour by accident |
 | 3 | **Guard choice** — `is_hip` vs `use_aiter` | wrong one = crash on AMD boxes without AITER |
-| 4 | **New flags** — new env vars, and their defaults | guideline 1; default-off AMD capability is the common smell |
-| 5 | **New globals** in shared files | global state is the hardest thing to unpick later |
-| 6 | **Interface churn** — signatures rewritten in shared code | guideline 2; every caller is a risk |
-| 7 | **Kernel** — new kernel vs upgrade of an existing one | new ⇒ needs reference test + benchmark + fallback; upgrade ⇒ needs before/after on the same shapes |
-| 8 | **Size** — lines and number of areas touched | guideline 4; the split trigger |
-| 9 | **Evidence** — accuracy and perf numbers in the body | a numerics change with no GSM8K is unreviewable |
-| 10 | **Tests** — is a test file in the diff? | AMD-only tests belong in `test/registered/amd/` |
+| 4 | **Tests** — is a test file in the diff? | AMD-only tests belong in `test/registered/amd/` |
+
+The `/sglang-pr-review` table sits under that. A Critical is a gate. High,
+Medium, and Low are findings, not a failed row.
+
+Everything else is the risk picture, printed as bullets. It answers the
+questions that tell a reviewer how the PR sits, and it does not have to pass:
+
+| Question | What the bullet says |
+|---|---|
+| New feature, or a fix for a live bug? | from the title when it says so; otherwise the reviewer decides |
+| AMD-only, or does the bug hit both platforms? | AMD path vs a shared rewrite |
+| New kernel, or an upgrade of an existing one? | kernel files in the diff, or neither |
+| Flags and globals | no new knob is the quiet case; a hardware default belongs on `is_hip` / `use_aiter` |
+| One concern? | line count and how many areas, so a PR that should be split says so |
 
 **Hot common code** (auto-escalates): `layers/linear.py`, `layers/layernorm.py`,
 `layers/activation.py`, `rotary_embedding.py`, `models/`, `managers/`,
@@ -209,24 +260,23 @@ keeps its force:
 | Gate | Why it cannot be traded away |
 |---|---|
 | **Guard choice** | code importing AITER gated by `is_hip()` alone crashes on an AMD box without AITER. Not a style preference — a crash |
-| **Evidence** | a numerics change with no accuracy number can only be believed, not reviewed |
-| **Interface churn** | a rewritten shared signature must have every caller updated **in the same PR**, or main breaks for someone else |
 | **Correctness** | a `CRITICAL` from [`/sglang-pr-review`](../sglang-pr-review/SKILL.md) is wrong model output — it gets fixed, not weighed |
+
+Flags, globals, interface changes, kernel kind, size, and evidence numbers are
+not gates. They show up in the risk picture so the reviewer can see them.
+A missing accuracy number or a rewritten signature is still something to say
+in the review; it does not, by itself, fail the table.
 
 ### 2. Risk points — these add up
 
 Everything else is a trade-off, scored 0–4:
 
+Only the hard table is scored. The risk-picture questions are not.
+
 | Axis | 0 | +1 | +2 | +3 | +4 |
 |---|---|---|---|---|---|
-| Blast radius | AMD-only paths | new file outside AMD path, **or shared files additive-only** | edits a shared file | | edits hot common code |
+| Affected Scope | AMD-only paths | new file outside AMD path, **or shared files additive-only** | edits a shared file | | edits hot common code |
 | AMD guard | all rewritten hunks guarded | guard not visible in hunk | | rewrites shared code unguarded | |
-| New flags | none | new, default-on | | new, default-off | |
-| New globals | none | | in shared code | | |
-| Interface churn | none | | | signature rewritten | |
-| Kernel | none touched | upgrade of existing | new kernel | | |
-| Size | ≤300 lines | ≤800 lines | | >800 or >3 areas | |
-| Evidence | numbers present | kernel without perf number | | | |
 | Tests | test file in diff | | none in diff | | |
 
 **Bands**: `LOW ≤3` · `MEDIUM ≤7` · `HIGH ≤12` · `SPLIT >12`
@@ -344,7 +394,7 @@ Worked example, using a real **Risk & Scope** table:
 gates and points apart. The PR is structurally cheap (AMD-only, additive, has
 numbers); it is blocked because it computes the wrong thing in one configuration.
 Note also what the `Low` row buys: nothing. "Everything else still falls back to
-`gemm_a8w8_bpreshuffle`" bounds the blast radius of the Critical — it does not
+`gemm_a8w8_bpreshuffle`" bounds the affected scope of the Critical — it does not
 excuse it.
 
 ### Why triage alone never says "merge"
