@@ -193,8 +193,17 @@ sweep after it is marked Ready puts it straight back. You can also set it by
 hand (`add --draft`, or the dropdown) — the sweep will correct it either way,
 because the PR's own draft flag is the source of truth, not the watchlist.
 
-A draft row renders as a single dim line and nothing else: no tally, no failure
-block. Red gates that were never a verdict do not belong in a CI column.
+A draft row says so in the **Merge** column — a filled `draft` pill, which
+takes precedence over `clean`/`conflict`, because `clean` on a draft invites you
+to read the row as ready to land. **Verdict** and **Action** both show a dash:
+we do not read a draft's checks, so any verdict would be a claim we have not
+earned, and nothing is being asked of anyone on account of its CI. Status is a
+single dim line — no tally, no failure block. Red gates that were never a
+verdict do not belong in a CI column.
+
+The dash on Action holds even for a conflicting draft: a draft's conflicts are
+the author's to find in their own time, which is the same reason the sweep does
+not comment on them.
 
 ### Why a gate said no
 

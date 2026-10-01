@@ -307,6 +307,11 @@ def verdict_still_covers(judged_fp: str, current_fp: str) -> bool:
 
 def ci_verdict(s: dict) -> str:
     """Current in-scope CI state, not our internal bookkeeping."""
+    # A draft has no CI verdict to give. Its checks are the author's scratchpad
+    # and we deliberately do not read them, so anything but "—" would be a
+    # claim we have not earned. The Merge column carries `draft` instead.
+    if s.get("is_draft"):
+        return "\u2014"
     # A conflicting branch is a failure in its own right: CI cannot complete, so
     # say Fail rather than showing an empty verdict because no tally was taken.
     if s.get("mergeable") == "CONFLICTING":
@@ -341,6 +346,11 @@ def ci_action(s: dict) -> str:
     #                     to resolve them before CI can even finish.
     #   Merge main     -> no conflict; main simply already contains the fix for
     #                     a CI failure and the PR is behind.
+    # Nothing is asked of us, or of the author, on account of CI: the PR is not
+    # finished being written. Said before the conflict branch on purpose — a
+    # draft's conflicts are the author's to discover in their own time.
+    if s.get("is_draft"):
+        return "-"
     if s.get("mergeable") == "CONFLICTING":
         return "Solve conflict"
     if action == "merge-main":

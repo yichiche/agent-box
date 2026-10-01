@@ -181,6 +181,10 @@ PAGE = """<!doctype html>
   .pill {{ display:inline-block; max-width:100%; padding:1px 6px; border-radius:99px;
     font-size:11px; font-weight:600; border:1px solid currentColor; }}
   .ok {{ color:var(--ok); }} .warn {{ color:var(--warn); }} .bad {{ color:var(--bad); }}
+  /* Filled rather than outlined: a draft row is otherwise all dim dashes, and
+     the one cell carrying information should be the one that reads first. */
+  .pill.draft {{ color:#fff; background:var(--dim); border-color:var(--dim);
+    font-weight:600; }}
   .mono {{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }}
   .empty {{ color:var(--dim); padding:28px; text-align:center; }}
   /* No ch cap any more: the column is sized by the colgroup, so capping the
@@ -532,6 +536,11 @@ def esc(x) -> str:
 
 
 def merge_cell(s: dict) -> str:
+    # Draft wins over the merge state. "clean" on a draft invites you to read
+    # the row as ready-to-land, and this column is the only place on the row
+    # that still has something true to say about a PR we do not check.
+    if s.get("is_draft"):
+        return '<span class="pill draft">draft</span>'
     m = s.get("mergeable", "?")
     if m == "CONFLICTING":
         return '<span class="pill bad">conflict</span>'
