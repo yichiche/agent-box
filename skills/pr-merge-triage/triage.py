@@ -534,6 +534,24 @@ def rows(a: dict) -> list[dict]:
     return out
 
 
+def apply_ack(a: dict, rs: list[dict]) -> None:
+    """Let the reviewer close a CHECK row they have read.
+
+    Only a CHECK — a FAIL is a defect, and `Critical risk` is the one row whose
+    whole purpose is that it cannot be waved through. Acking is recorded in the
+    evidence so the table never claims the script verified something a human
+    asserted.
+    """
+    for r in rs:
+        if r["check"].lower() not in a.get("ack", []):
+            continue
+        if r["check"] == "Critical risk" or r["verdict"] == BAD:
+            r["evidence"] += " · ack refused — this row cannot be waved through"
+            continue
+        r["verdict"], r["points"] = OK, 0
+        r["evidence"] += " · reviewer acked"
+
+
 def verdict(a: dict, rs: list[dict]) -> dict:
     open_gates = [r["check"] for r in rs if r["gate"] and r["verdict"] != OK]
     points = sum(r["points"] for r in rs if r.get("hard"))
@@ -575,6 +593,52 @@ def verdict(a: dict, rs: list[dict]) -> dict:
     return {"name": name, "why": why, "points": points, "band": b,
             "open_gates": open_gates, "needs_community": needs_community,
             "reviewed": bool(a.get("review"))}
+
+
+PASS_VERDICT = "LOW RISK — MERGE"
+
+
+def approval(a: dict, rs: list[dict], pr: str) -> str:
+    """One paragraph for the approving comment. Printed only on a clean pass.
+
+    Assembled from rows that already passed, so it cannot claim something the
+    table did not check: what the PR does, how far it reaches, what was
+    measured, and what the review found.
+    """
+    m, by = a["meta"], {r["check"]: r for r in rs}
+    s = [f"#{pr} {m['title'].split('] ')[-1].rstrip('.')} — "
+         f"+{m['additions']}/-{m['deletions']} across {m['changedFiles']} files."]
+
+    if a["common_files"] or a["additive_files"]:
+        shared = (a["common_files"] + a["additive_files"])[:2]
+        s.append("It reaches shared code only additively ("
+                 + ", ".join(p.rsplit("/", 1)[-1] for p in shared)
+                 + "), so nothing that already ships changes behaviour;")
+    else:
+        s.append("Every file it touches is on the AMD path, so no other vendor "
+                 "inherits the change;")
+    s.append(by["AMD guard"]["evidence"].rstrip(".") + ".")
+
+    quiet = []
+    if not a["new_envs"]:
+        quiet.append("no new env var")
+    if not a["new_globals"]:
+        quiet.append("no new global")
+    if not a["sig_changed"]:
+        quiet.append("no shared signature rewritten")
+    if quiet:
+        s.append("There is " + ", ".join(quiet) + ".")
+
+    rv = a.get("review") or {}
+    tail = (f" ({rv.get('HIGH', 0)} high, {rv.get('MEDIUM', 0)} medium, "
+            f"{rv.get('LOW', 0)} low — none blocking)"
+            if any(rv.get(k) for k in ("HIGH", "MEDIUM", "LOW")) else "")
+    s.append(f"/sglang-pr-review found no CRITICAL{tail}, "
+             + ("the PR body carries accuracy and perf numbers, "
+                if a["has_accuracy"] and a["has_perf"] else "")
+             + ("and a test lands in the diff."
+                if a["buckets"].get("test") else "and the bar is otherwise clean."))
+    return " ".join(s) + " LGTM."
 
 
 def risk_picture(a: dict, rs: list[dict]) -> list[tuple[str, str]]:
@@ -652,6 +716,10 @@ def main() -> None:
     ap.add_argument("--high", type=int, default=0)
     ap.add_argument("--medium", type=int, default=0)
     ap.add_argument("--low", type=int, default=0)
+    ap.add_argument("--ack", action="append", metavar="ROW",
+                    help="mark a CHECK row as read and accepted, e.g. "
+                         "--ack 'Affected Scope'. Refused on FAIL rows and on "
+                         "Critical risk — those are not yours to wave through")
     a = ap.parse_args()
     pr = re.sub(r"\D", "", a.pr.split("/")[-1]) or a.pr
 
@@ -666,7 +734,9 @@ def main() -> None:
 
     data = analyse(pr, a.repo)
     data["review"] = review
+    data["ack"] = [s.strip().lower() for s in (a.ack or [])]
     rs = rows(data)
+    apply_ack(data, rs)
     v = verdict(data, rs)
 
     if a.json:
@@ -701,6 +771,10 @@ def main() -> None:
     for title, body in risk_picture(data, rs):
         print(f"| | {title} | context | — | {body} |")
     print(f"\n**Verdict: {v['name']}** — {v['why']}\n")
+    if v["name"] == PASS_VERDICT:
+        # The only output that is meant to be pasted verbatim onto the PR.
+        print("### Approval comment\n")
+        print(approval(data, rs, pr) + "\n")
     if v["open_gates"]:
         print("### Gates (must be answered — nothing else buys these off)")
         for g in v["open_gates"]:

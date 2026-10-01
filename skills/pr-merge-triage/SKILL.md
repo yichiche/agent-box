@@ -50,6 +50,34 @@ Skip step 2 only when the user explicitly asked for the shape check alone
 cheap-to-land and correct are different properties, and reporting the first as
 if it settled the second is the failure this skill exists to prevent.
 
+## When it passes
+
+A verdict of **`LOW RISK — MERGE`** prints one more section: a single-paragraph
+**approval comment**, ending in `LGTM`, meant to be pasted onto the PR verbatim.
+It is assembled only from rows that actually passed — what the PR does, how far
+it reaches, which guard carries it, what was measured, what the review found —
+so it can never claim something the table did not check.
+
+Nothing else prints it. A PR with an open gate, an unacked `CHECK` row, or no
+correctness review does not get a paragraph, because there is nothing to say yet.
+
+### Closing a CHECK row you have read
+
+Some rows land on `CHECK` because the script cannot finish the judgement — the
+commonest is an additive touch to shared code, where the question is only
+"confirm nothing that ships changes behaviour". Once you have read it:
+
+```bash
+python3 triage.py 40872 --review /tmp/review-40872.md --ack "Affected Scope"
+```
+
+The row flips to PASS with `· reviewer acked` appended, so the table never
+claims the script verified what a human asserted.
+
+**`--ack` is refused on a `FAIL` row and on `Critical risk`, always.** A FAIL is
+a defect, and the Critical row's entire purpose is that it cannot be waved
+through — acking it would make the gate decorative.
+
 Other invocations:
 
 ```bash
