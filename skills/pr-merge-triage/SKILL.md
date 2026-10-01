@@ -179,7 +179,7 @@ The table is the hard bar. Every row has to pass before the PR can merge.
 |---|---|---|
 | 1 | **Affected Scope** — AMD-only paths / new files / existing shared files / hot common code | decides whether you need a community reviewer |
 | 2 | **AMD guard** — cite the guard with a line from the diff: `is_hip`, `use_aiter`, or a device check (MI355 / gfx950, …). If none of those appear, name the AMD path that contains the change | an unguarded rewrite changes NVIDIA behaviour by accident |
-| 3 | **Guard choice** — `is_hip` vs `use_aiter` | wrong one = crash on AMD boxes without AITER |
+| 3 | **Guard choice** — `is_hip` vs `use_aiter` | wrong one = crash on AMD boxes without AITER. Sits in the context rows unless it actually fires, since most PRs have nothing to choose |
 | 4 | **Tests** — is a test file in the diff? | AMD-only tests belong in `test/registered/amd/` |
 
 The `/sglang-pr-review` table sits under that. A Critical is a gate. High,
@@ -259,8 +259,8 @@ keeps its force:
 
 | Gate | Why it cannot be traded away |
 |---|---|
-| **Guard choice** | code importing AITER gated by `is_hip()` alone crashes on an AMD box without AITER. Not a style preference — a crash |
-| **Correctness** | a `CRITICAL` from [`/sglang-pr-review`](../sglang-pr-review/SKILL.md) is wrong model output — it gets fixed, not weighed |
+| **Guard choice** | code importing AITER gated by `is_hip()` alone crashes on an AMD box without AITER. Not a style preference — a crash. Only occupies a must-pass row when it fires; otherwise it reports as context |
+| **Critical risk** | a `CRITICAL` from [`/sglang-pr-review`](../sglang-pr-review/SKILL.md) is wrong model output — it gets fixed, not weighed |
 
 Flags, globals, interface changes, kernel kind, size, and evidence numbers are
 not gates. They show up in the risk picture so the reviewer can see them.
@@ -371,7 +371,7 @@ severity, since the table normally restates the bullets. No report to hand?
 
 | Severity in the review | Effect on triage |
 |---|---|
-| `CRITICAL` | **Correctness gate opens → BLOCKED ON AUTHOR**, at any score. No number of green rows offsets it |
+| `CRITICAL` | **Critical risk gate opens → BLOCKED ON AUTHOR**, at any score. No number of green rows offsets it |
 | `High` | +3 risk points each (capped at +6) — can push a band up, cannot block on its own |
 | `Medium` | +1 each (capped at +3) — fix now or file as follow-ups |
 | `Low` | 0 — note it in the review, do not hold the PR for it |
@@ -384,15 +384,17 @@ Worked example, using a real **Risk & Scope** table:
 ```
 
 ```
-| - [ ] | Correctness **GATE** | FAIL | 0 | 1 CRITICAL finding(s) from /sglang-pr-review |
-| | **Total** | | **2** | band: LOW |
+| - [x] | Affected Scope | yes | PASS | 4 file(s), all AMD-only paths |
+| - [ ] | Critical risk **GATE** | yes | FAIL | 1 CRITICAL — Fused quant 開啟時，out_proj / o_proj 在 Quark per-channel 上 assert。 |
+| | Other findings | context | PASS | 1 low: 其餘 shape、M 超出表、非 gfx950、非 aiter 仍走 gemm_a8w8_bpreshuffle。 |
 
-**Verdict: BLOCKED ON AUTHOR** — open gate(s): Correctness
+**Verdict: BLOCKED ON AUTHOR** — open gate(s): Critical risk
 ```
 
-**2 points, band LOW, and still blocked** — which is the whole point of keeping
-gates and points apart. The PR is structurally cheap (AMD-only, additive, has
-numbers); it is blocked because it computes the wrong thing in one configuration.
+**Every other row passes, and it is still blocked** — which is the whole point
+of keeping the gate separate from the rest. The PR is structurally cheap
+(AMD-only, additive, has numbers); it is blocked because it computes the wrong
+thing in one configuration.
 Note also what the `Low` row buys: nothing. "Everything else still falls back to
 `gemm_a8w8_bpreshuffle`" bounds the affected scope of the Critical — it does not
 excuse it.

@@ -397,13 +397,18 @@ def rows(a: dict) -> list[dict]:
         row("Guard choice", WARN, "imports aiter; no is_hip/use_aiter token added",
             "gate with `_use_aiter` — `is_hip()` alone runs this on an AMD box "
             "with no AITER installed", 0, gate=True)
+    # When it passes there was nothing to choose, so it is context, not a bar —
+    # a row that reads PASS on nearly every PR trains you to skim the table. It
+    # climbs back into the must-pass rows only in the branch above, where the
+    # wrong guard is a crash.
     elif a["uses_aiter"]:
-        row("Guard choice", OK, "imports aiter, guard tokens present")
+        row("Guard choice", OK, "imports aiter, guard tokens present", hard=False)
     elif a["uses_is_hip"]:
-        row("Guard choice", OK, "is_hip — works on all AMD GPUs")
+        row("Guard choice", OK, "is_hip — works on all AMD GPUs", hard=False)
     else:
         row("Guard choice", OK,
-            "no new aiter import; nothing to choose between is_hip and use_aiter")
+            "no new aiter import; nothing to choose between is_hip and use_aiter",
+            hard=False)
 
     # 4. Flags
     if a["new_envs"]:
@@ -690,7 +695,7 @@ def main() -> None:
     # risk_picture() already states flags, globals, kernel, size and evidence
     # in reviewer language; printing the raw rows too would say each twice.
     for r in rs:
-        if r.get("hard") or r["check"] != "Other findings":
+        if r.get("hard") or r["check"] not in ("Guard choice", "Other findings"):
             continue
         print(f"| | {r['check']} | context | {r['verdict']} | {r['evidence']} |")
     for title, body in risk_picture(data, rs):
