@@ -150,11 +150,19 @@ def group_of(meta: dict) -> str:
     return (meta.get("group") or "").strip() or UNGROUPED
 
 
-def all_groups(wl: dict) -> list[str]:
-    """Every group in use, Ungrouped last so it never heads the tab bar."""
+def all_groups(wl: dict, order: list[str] | None = None) -> list[str]:
+    """Every group in use, Ungrouped last so it never heads the tab bar.
+
+    `order` is the tab order dragged on the dashboard. It is a *preference*,
+    not the source of truth: names in it that no longer have a PR drop out, and
+    a group created since the last drag is appended alphabetically rather than
+    vanishing, so the bar can never end up missing a tab.
+    """
     seen = {group_of(m) for m in wl.values()}
-    named = sorted(g for g in seen if g != UNGROUPED)
-    return named + ([UNGROUPED] if UNGROUPED in seen else [])
+    named = {g for g in seen if g != UNGROUPED}
+    ranked = [g for g in (order or []) if g in named]
+    rest = sorted(named - set(ranked))
+    return ranked + rest + ([UNGROUPED] if UNGROUPED in seen else [])
 
 
 def in_group(meta: dict, group: str | None) -> bool:

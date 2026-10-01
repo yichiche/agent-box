@@ -81,8 +81,10 @@ to manage separately. The dashboard shows one tab per group (plus **All**), and
 the tab filters the table, the triage panel **and the status block**, so you can
 paste a standup entry for one workstream without editing it by hand.
 
-Set a group by typing in the **Group** column (a datalist offers the ones
-already in use, and a new name creates the tab), or from the CLI:
+Set a group by typing in the **Group** column — a plain text field, no
+dropdown; an existing name moves the PR to that tab, a new one creates it.
+(It had a datalist; the marker that adds costs real width in a column this
+narrow, and typing the name was the only thing it ever did.) Or from the CLI:
 
 ```bash
 python3 watch.py set 41133 --group "Qwen3.5 MoE"
@@ -90,6 +92,18 @@ python3 watch.py add 41870 --high --group debug
 python3 watch.py report --group GDN     # just that tab
 python3 watch.py set 41133 --group ""   # back to Ungrouped
 ```
+
+**Drag a tab to reorder it**, Chrome-style — grab it anywhere and drop it where
+you want; the tab moves as you drag, so the landing spot is visible before you
+let go. The order is saved to `state.json` under `_config.group_order`. There is
+no on-screen hint for this — the grab cursor on a tab is the affordance.
+
+**All** and **Ungrouped** are fixed ends of the bar and are not draggable, which
+is also what keeps a dragged tab inside the named range. The saved order is a
+preference, not the source of truth: `all_groups()` reconciles it with the
+groups that actually exist on every render, so a group deleted since the last
+drag drops out and a group created since is appended alphabetically rather than
+vanishing from the bar.
 
 `Ungrouped` is always listed last so it never heads the tab bar, and a tab whose
 last PR moved out falls back to **All** instead of leaving you on an empty table
@@ -258,9 +272,65 @@ Stdlib HTTP server, no dependencies, loopback only (both `127.0.0.1` and `::1`,
 so an editor port-forwarder that resolves `localhost` to IPv6 still works). The
 script prints the Remote-SSH / `ssh -L` instructions; `--stop` shuts it down.
 
-Columns: PR + title + author, track (click to flip), merge state, red NVIDIA
-workflows (gate-only marked as not re-runnable), last verdict + one-line
-summary, re-run count `×N`, last swept (Taiwan time). Auto-refreshes every 60s.
+Columns: Pri, PR + title + author, group, track, merge state, Verdict, Action,
+Status, last swept (Taiwan time). Auto-refreshes every 60s.
+
+**Status is the only prose column, and it is silent when nothing is wrong.**
+There used to be a separate `Red NVIDIA CI` column, but on a clean row it spent
+its width saying so — *"no NVIDIA job is failing; the red is aggregation gates
+mirroring out-of-scope vendor workflows"* on every passing PR. An empty cell
+says that already. What survived is the part that only exists when something
+broke (failing jobs with log links, the stale-after-re-run warning, the SAME
+failure after re-run warning), and it moved into Status beside the job counts.
+
+Two matching silences, same principle — don't restate `Pass`:
+
+- `green` and `out-of-scope` are in `QUIET_ACTIONS`: their `ACTION_HINT` and
+  stored `last_verdict` are both just long ways of saying "nothing to act on",
+  and the Action column already shows `-`, so Status prints neither. A passing
+  row is job counts and nothing else.
+- The **last failure** block is a *fallback*, shown only when the live list is
+  empty and the verdict is not `Pass`. That is the case it exists for — a
+  re-run is in flight, so live checks have dropped back to "only gates are
+  red". Beside a live failure list it would print the same jobs twice; on a
+  green PR it is history, not status.
+
+Column widths are pinned by a `<colgroup>` under `table-layout: fixed`. That is
+load-bearing, not cosmetic: with auto layout the knobs in Pri / Group / Track
+claim their intrinsic width first and squeeze **Status** into a
+two-words-per-line ribbon. The knobs are capped at the width of the control
+(`td.knob`, `select.mini`); Status gets 29%.
+
+**Prose wraps; form controls do not.** A tight column costs a sentence an extra
+line, but it makes a `<select>` clip its own label — `P0` losing its `0` — and
+makes a `<button>` overhang, because neither can shrink below its content. So
+the knob columns are sized for *label + native dropdown arrow*, the knob
+selects run a size smaller (`select.mini`: 11px, 2px side padding), and both
+the reorder handle (`⠿`) and the remove button (`×`) are glyphs rather than
+words. Widen a knob column before you widen a prose one.
+
+Four traps, each of which put a control's border across the next column:
+
+- **Every `<col>` is a percentage, summing to 100.** Mix `px` and `%` and the
+  browser rescales *everything* proportionally once the declared widths exceed
+  the table — the `px` columns get squeezed too, which is the overflow you were
+  trying to avoid. The floor is held by `table { min-width: 1150px }` plus
+  `overflow-x: auto` on the panel: below that width, scroll rather than crush.
+  1150px is where the narrowest knob column still fits its control; check that
+  before lowering it.
+- **A bare `input[type=text]` rule out-specifies `.grp` / `.note`.** An
+  attribute selector counts like a class, so `0-1-1` beats `0-1-0`. The add
+  box's `min-width: 280px` was therefore applying to the in-table Group field
+  and painting its border straight across Track and Merge. That rule is now
+  scoped `form.add input[type=text]`; keep it scoped.
+- **`.pill` needs `max-width: 100%`** or a long verdict word overhangs its cell.
+- **A `<button>` label is a hard width floor.** It neither wraps nor shrinks, so
+  the word "remove" in a 3% column simply overhangs. Use a glyph plus `title` +
+  `aria-label`.
+
+If you add a column, add a `<col>` and re-balance to 100 — and check the floor
+widths (`1250px × n%`) against what each control actually needs, not against
+what its text needs.
 
 **Quick add:** paste a PR link into the box at the top and pick a track. Accepts
 `https://github.com/sgl-project/sglang/pull/41870`, a `/files` deep link, `#41870`,
@@ -273,7 +343,7 @@ or `41870`.
 | `Monitoring ON/OFF` | Writes `_config.enabled`; every sweep, including a cron-fired one, exits immediately when off | no — takes effect instantly |
 | `Refresh now` | Runs `sweep --track all --force` **without `--apply`** in a subprocess: re-reads merge state and red NVIDIA CI for every PR. Comments nothing, re-runs nothing | no |
 | `Notify author` | Runs `watch.py notify --pr N --apply` — posts the conflict notice for that PR now instead of waiting for the next sweep. Shown **only** when the PR is conflicting and not yet notified for this head SHA; asks for confirmation first. The result (sent, with the comment URL — or why not) comes back as a banner, and the PR is re-swept so a button standing on stale state disappears | no |
-| `▲ / ▼` | Nudges a row within its sort bucket. Manual order is a tiebreaker only — it cannot drag a row across the Pass / priority / conflict boundaries, because that would silently snap back | no |
+| `⠿` grip | Drag a row by its grip to reorder it within its sort bucket. Manual order is a tiebreaker only, so a drop into another bucket is **refused** (the target row outlines in red) rather than accepted and sprung back on reload | no |
 | Track dropdown | Sets `regular` or `high` explicitly, both directions | no |
 | `Copy` (triage panel) | Copies `/pr-ci-watch triage <prs>` to paste into Claude | yes, to run it |
 | `Copy` (status block) | Copies the `<P0><CI clear><PR…>` report as **rich text + plain text**, so `<PR41133>` stays a hyperlink when pasted into Teams | no |
@@ -294,7 +364,7 @@ gate is not a job, it is mirroring a vendor workflow this tool excludes, so
 calling that Fail would report someone else's failure as this PR's NVIDIA
 result. Rows are ordered **Pass first** (those are the ones you can go merge), then
 P0 → P2, then **conflicts last within each priority** (nothing can progress on
-them until the author rebases), then your manual `▲/▼` order, then PR number. **Action** is what to do — `CI re-run` (one is in flight),
+them until the author rebases), then your manual drag order, then PR number. **Action** is what to do — `CI re-run` (one is in flight),
 `Solve conflict`, `Merge main`, `Code fix`, `Triage`, `Wait upstream`, or `-`.
 **Status** carries the job counts (`34 pass, 2 fail, 10 running`), the conflict
 notice proof, and the triage reason; it flags the counts as stale when they
@@ -350,7 +420,7 @@ python3 watch.py arm-status --record "high=23 */2 * * *, regular=17 9 * * *"
 | file | holds |
 |---|---|
 | `watchlist.json` | PR → track, added, note, repo |
-| `state.json` | per PR: head SHA, `conflict_comment_sha`, `reruns{workflow:{sha,count}}`, last verdict/action, last sweep |
+| `state.json` | per PR: head SHA, `conflict_comment_sha`, `reruns{workflow:{sha,count}}`, last verdict/action, last sweep. Plus `_config`: `enabled`, `group_order` (the dragged tab order) |
 | `sweeps/<ts>.json` | one record per sweep |
 | `sweep.log` | append-only audit of every mutation |
 

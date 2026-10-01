@@ -106,28 +106,61 @@ PAGE = """<!doctype html>
     margin-bottom:18px; }}
   .grow {{ flex:1; }}
   form.add {{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
-  input[type=text] {{ flex:1; min-width:280px; padding:8px 10px; border-radius:6px;
+  /* Scoped to the add box on purpose. As a bare `input[type=text]` rule this
+     out-specifies the `.grp`/`.note` classes (an attribute selector counts like
+     a class, so 0-1-1 beats 0-1-0) and forced the in-table Group field to
+     280px — which under table-layout:fixed overflows its 104px column and
+     paints its border straight across Track and Merge. */
+  form.add input[type=text] {{ flex:1; min-width:280px; padding:8px 10px; border-radius:6px;
     border:1px solid var(--line); background:var(--bg); color:var(--fg); font:inherit; }}
   select, button {{ padding:8px 12px; border-radius:6px; border:1px solid var(--line);
     background:var(--bg); color:var(--fg); font:inherit; cursor:pointer; }}
   button.primary {{ background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }}
   button.on {{ background:var(--ok); border-color:var(--ok); color:#fff; font-weight:700; }}
   button.off {{ background:var(--bad); border-color:var(--bad); color:#fff; font-weight:700; }}
-  table {{ width:100%; border-collapse:collapse; }}
+  /* Fixed layout is what stops a wide <select> in Group/Track from bullying
+     Status — the column that carries all the prose — into a two-words-per-line
+     ribbon. Widths come from the <colgroup>. */
+  table {{ width:100%; border-collapse:collapse; table-layout:fixed;
+    min-width:1150px; }}
+  /* A 12-column table has a floor; below it, scroll rather than crush the
+     knobs until their borders paint over the next column. */
+  .panel.tabbed {{ overflow-x:auto; }}
   th {{ text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.04em;
     color:var(--dim); font-weight:600; padding:0 8px 8px; border-bottom:1px solid var(--line); }}
-  td {{ padding:9px 8px; border-bottom:1px solid var(--line); vertical-align:top; }}
+  td {{ padding:9px 8px; border-bottom:1px solid var(--line); vertical-align:top;
+    overflow-wrap:anywhere; }}
+  /* The knob columns: as small as the control, not as wide as its default. */
+  td.knob {{ padding-left:4px; padding-right:4px; }}
+  /* width:100% needs a block containing block; .inline forms would collapse. */
+  td.knob form {{ display:block; }}
+  /* Text wraps when a column is tight; a <select> does not — it just clips its
+     own label ("P0" losing its 0). So the knob selects run a size smaller with
+     minimal side padding, and their columns are sized for label + native
+     dropdown arrow rather than for the text alone. */
+  select.mini {{ width:100%; padding:4px 2px; font-size:11px; }}
+  /* Drag handle. Only the grip starts a drag — a draggable <tr> would eat text
+     selection and turn every PR link into a drag. */
+  .grip {{ display:block; cursor:grab; color:var(--dim); user-select:none;
+    text-align:center; font-size:15px; line-height:1; padding-top:2px; }}
+  .grip:hover {{ color:var(--fg); }}
+  tr.dragging {{ opacity:.4; }}
+  tr.dragging .grip {{ cursor:grabbing; }}
+  /* The one row a drop is not allowed into: a different sort bucket. */
+  tr.nodrop {{ outline:1px dashed var(--bad); outline-offset:-1px; }}
   tr:last-child td {{ border-bottom:none; }}
   a {{ color:var(--accent); text-decoration:none; }}
   a:hover {{ text-decoration:underline; }}
-  .title {{ display:block; max-width:32ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+  .title {{ display:block; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
   .dim {{ color:var(--dim); font-size:12px; }}
-  .pill {{ display:inline-block; padding:1px 8px; border-radius:99px; font-size:11px;
-    font-weight:600; border:1px solid currentColor; }}
+  .pill {{ display:inline-block; max-width:100%; padding:1px 6px; border-radius:99px;
+    font-size:11px; font-weight:600; border:1px solid currentColor; }}
   .ok {{ color:var(--ok); }} .warn {{ color:var(--warn); }} .bad {{ color:var(--bad); }}
   .mono {{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }}
   .empty {{ color:var(--dim); padding:28px; text-align:center; }}
-  .reason {{ max-width:40ch; white-space:normal; word-break:break-word; margin-top:2px; }}
+  /* No ch cap any more: the column is sized by the colgroup, so capping the
+     text as well only re-introduces the narrow ribbon this was widened to fix. */
+  .reason {{ white-space:normal; word-break:break-word; margin-top:2px; }}
   .inline {{ display:inline; }}
   .linkish {{ background:none; border:none; color:var(--dim); padding:0 4px;
     font:inherit; font-size:12px; cursor:pointer; }}
@@ -138,15 +171,20 @@ PAGE = """<!doctype html>
   /* Nothing behind the status block: it is text to be read and copied, and
      any fill only competes with what it sits in. */
   .panel.plain {{ background:transparent; }}
-  .tabs {{ display:flex; gap:2px; flex-wrap:wrap; margin-bottom:-1px; }}
+  .tabs {{ display:flex; gap:2px; flex-wrap:wrap; margin-bottom:-1px;
+    align-items:flex-end; }}
   .tab {{ padding:7px 14px; border:1px solid var(--line); border-bottom:none;
     border-radius:7px 7px 0 0; background:var(--bg); color:var(--dim);
-    font-size:13px; text-decoration:none; }}
+    font-size:13px; text-decoration:none; user-select:none; }}
   .tab:hover {{ color:var(--fg); text-decoration:none; }}
   .tab.on {{ background:var(--panel); color:var(--fg); font-weight:600;
     border-color:var(--line); }}
+  /* Chrome-style reordering: grab anywhere on the tab. The ghost stays in the
+     bar while dragging so the drop position is visible before you let go. */
+  .tab[draggable="true"] {{ cursor:grab; }}
+  .tab.dragging {{ opacity:.45; cursor:grabbing; }}
   .panel.tabbed {{ border-radius:0 7px 7px 7px; }}
-  .grp {{ min-width:92px; }}
+  .grp {{ min-width:0; }}
   .reportblock {{ width:100%; max-height:300px; overflow:auto; padding:2px 0;
     background:transparent; border:none;
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px;
@@ -265,7 +303,9 @@ the ON/OFF switch. Data: <span class="mono">{data}</span></div>
   }}
   // Refresh on a timer, but never while a field is focused — otherwise a note
   // being typed gets wiped mid-edit.
+  // …or while a drag is in flight, which would drop the row mid-gesture.
   setInterval(() => {{
+    if (document.querySelector('.dragging')) return;
     if (!document.querySelector('input:focus, textarea:focus, select:focus')) location.reload();
   }}, {refresh}000);
   // Submit a note on blur or Enter so there is no per-row save button.
@@ -275,7 +315,108 @@ the ON/OFF switch. Data: <span class="mono">{data}</span></div>
       el.addEventListener('blur', () => {{ if (el.value !== initial) el.form.submit(); }});
       el.addEventListener('keydown', e => {{ if (e.key === 'Enter') {{ e.preventDefault(); el.form.submit(); }} }});
     }});
+    initTabDrag();
+    initRowDrag();
   }});
+
+  // Rows reorder by dragging their grip, same gesture as the tabs. The row
+  // moves in the DOM as you drag, so the landing spot is visible before you
+  // let go, and the order is persisted once on drop.
+  function initRowDrag() {{
+    const body = document.querySelector('#prtable tbody');
+    if (!body) return;
+    const rows = () => [...body.querySelectorAll('tr[data-pr]')];
+    let dragged = null, moved = false;
+    rows().forEach(tr => {{
+      const grip = tr.querySelector('.grip');
+      if (!grip) return;
+      // draggable is armed only while the grip is held: on the <tr> full-time
+      // it would swallow text selection and link clicks across the whole row.
+      grip.addEventListener('mousedown', () => {{ tr.draggable = true; }});
+      grip.addEventListener('mouseup', () => {{ tr.draggable = false; }});
+      tr.addEventListener('dragstart', e => {{
+        dragged = tr; moved = false;
+        tr.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        try {{ e.dataTransfer.setData('text/plain', tr.dataset.pr); }} catch (_) {{}}
+      }});
+      tr.addEventListener('dragend', () => {{
+        tr.classList.remove('dragging');
+        tr.draggable = false;
+        rows().forEach(r => r.classList.remove('nodrop'));
+        if (moved) saveRowOrder();
+        dragged = null;
+      }});
+      tr.addEventListener('dragover', e => {{
+        if (!dragged || dragged === tr) return;
+        // Pass-first / priority / conflict-last decide the buckets; manual
+        // order is only a tiebreaker inside one. Refusing the drop is honest —
+        // accepting it would just spring the row back on reload.
+        if (tr.dataset.bucket !== dragged.dataset.bucket) {{
+          tr.classList.add('nodrop');
+          return;
+        }}
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const r = tr.getBoundingClientRect();
+        const before = (e.clientY - r.top) < r.height / 2;
+        body.insertBefore(dragged, before ? tr : tr.nextSibling);
+        moved = true;
+      }});
+      tr.addEventListener('dragleave', () => tr.classList.remove('nodrop'));
+      tr.addEventListener('drop', e => e.preventDefault());
+    }});
+    function saveRowOrder() {{
+      document.getElementById('roworder').value =
+        rows().map(r => r.dataset.pr).join(',');
+      document.getElementById('roworderform').submit();
+    }}
+  }}
+
+  // Chrome-style tab reordering. The tab is moved in the DOM as you drag, so
+  // the drop position is visible before you let go; the order is persisted on
+  // drop, not on every move.
+  function initTabDrag() {{
+    const bar = document.getElementById('tabbar');
+    if (!bar) return;
+    const tabs = () => [...bar.querySelectorAll('.tab[draggable="true"]')];
+    let dragged = null, moved = false;
+    tabs().forEach(t => {{
+      t.addEventListener('dragstart', e => {{
+        dragged = t; moved = false;
+        t.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        // Firefox starts no drag at all unless some data is set.
+        try {{ e.dataTransfer.setData('text/plain', t.dataset.group); }} catch (_) {{}}
+      }});
+      t.addEventListener('dragend', () => {{
+        t.classList.remove('dragging');
+        // A click fires after a drag that ended where it started; suppressing
+        // it unconditionally would break plain tab switching, so only guard
+        // when the tab actually moved.
+        if (moved) {{ t.dataset.dragged = '1'; saveOrder(); }}
+        dragged = null;
+      }});
+      t.addEventListener('dragover', e => {{
+        if (!dragged || dragged === t) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const r = t.getBoundingClientRect();
+        const before = (e.clientX - r.left) < r.width / 2;
+        bar.insertBefore(dragged, before ? t : t.nextSibling);
+        moved = true;
+      }});
+      t.addEventListener('drop', e => e.preventDefault());
+      t.addEventListener('click', e => {{
+        if (t.dataset.dragged) {{ e.preventDefault(); delete t.dataset.dragged; }}
+      }});
+    }});
+    function saveOrder() {{
+      document.getElementById('grouporder').value =
+        tabs().map(t => t.dataset.group).join('\\n');
+      document.getElementById('grouporderform').submit();
+    }}
+  }}
 </script>
 </body></html>
 """
@@ -295,6 +436,11 @@ ACTION_CLASS = {
 
 # The whole point of the Verdict column: say what to DO, not just what happened.
 # This is the "just re-run it" vs "stuck, needs a merge" split.
+# Actions that mean "no NVIDIA failure to act on". Their hint and stored
+# verdict are both just long ways of saying so, and the Action column already
+# shows `-`, so Status stays blank instead of repeating it on every clean row.
+QUIET_ACTIONS = {"green", "out-of-scope"}
+
 ACTION_HINT = {
     "green": "nothing to do",
     "awaiting-triage": "QUEUED — nothing is running; waiting for a Claude turn",
@@ -356,16 +502,21 @@ def last_failure_block(s: dict, prefix: str = "Last failure") -> str:
             f'{esc(tw(lf.get("at")))}:</div>' + "".join(rows))
 
 
-def ci_cell(s: dict) -> str:
+def failure_block(s: dict) -> str:
+    """The failing NVIDIA jobs, and nothing else.
+
+    This used to be its own `Red NVIDIA CI` column, which spent most of its
+    width telling you that nothing was wrong — "no NVIDIA job is failing; the
+    red is aggregation gates…" on every clean row. An empty cell says that
+    already. What is left is the part that only exists when something is
+    actually broken, so it lives in Status with the rest of the evidence.
+    """
     groups = s.get("failed_groups") or {}
-    if s.get("last_action") == "green":
-        return ('<span class="ok">clean</span>'
-                + last_failure_block(s, "Previously failed"))
-    if not groups:
-        return '<span class="dim">&mdash;</span>' + last_failure_block(s)
+    if not groups or s.get("last_action") == "green":
+        return ""
     out = []
     # After a re-run the stored failure list describes the run we *replaced*.
-    # Showing it as if it were current is what made this column unreadable.
+    # Showing it as if it were current is what made this unreadable.
     last_rerun = max(
         (r.get("at", "") for r in (s.get("reruns") or {}).values()
          if r.get("sha") == s.get("head_sha")),
@@ -376,19 +527,6 @@ def ci_cell(s: dict) -> str:
             f'<div class="warn"><b>stale</b> &mdash; state from before the '
             f'{esc(tw(last_rerun))} re-run. Hit <b>Refresh now</b>.</div>'
         )
-    gates = [wf for wf, g in groups.items() if g.get("gate_only")]
-    if gates and len(gates) == len(groups):
-        # Nothing real is red right now. Say what that means, then show the last
-        # real failure so the column still answers "what broke?".
-        block = last_failure_block(s)
-        out.append(
-            '<div class="dim">no NVIDIA job is failing; the red is aggregation '
-            "gates mirroring out-of-scope vendor workflows</div>"
-            if not block else
-            '<div class="dim">no NVIDIA job is failing right now &mdash; only '
-            "aggregation gates</div>"
-        )
-        out.append(block)
     for wf, g in groups.items():
         if g.get("gate_only"):
             continue
@@ -480,7 +618,14 @@ def notify_cell(s: dict) -> str:
 
 
 def status_cell(pr: str, s: dict) -> str:
-    """Where CI actually stands, in numbers then words."""
+    """Where CI actually stands: counts, then what broke, then why.
+
+    Says nothing when nothing is wrong. `green` and `out-of-scope` both mean
+    "no NVIDIA failure to act on", and their stored hint and verdict only
+    restate that at length — on a Pass row the whole cell is the job counts.
+    """
+    action = s.get("last_action", "")
+    quiet = action in QUIET_ACTIONS
     out = []
     b = notify_button(pr, s)
     if b:
@@ -491,14 +636,23 @@ def status_cell(pr: str, s: dict) -> str:
     n = notify_cell(s)
     if n:
         out.append(n)
-    hint = ACTION_HINT.get(s.get("last_action", ""), "")
-    if hint:
-        out.append(f"<div>{esc(hint)}</div>")
-    # Wrap, never truncate: cutting the reason mid-word ("…OOM on a 32GB GPU;
-    # un") is worse than showing no reason at all.
-    if s.get("last_verdict"):
-        out.append(f'<div class="dim reason">{esc(s["last_verdict"])}</div>')
-    return "".join(out) or '<span class="dim">&mdash;</span>'
+    live = failure_block(s)
+    out.append(live)
+    # Only as a fallback. What broke last is worth keeping on screen while a
+    # re-run is in flight — live checks drop back to "only gates are red" the
+    # moment one starts — but printing it beside an identical live list just
+    # says the same thing twice. Once CI is green it is history, not status.
+    if not live and ci_verdict(s) != "Pass":
+        out.append(last_failure_block(s))
+    if not quiet:
+        hint = ACTION_HINT.get(action, "")
+        if hint:
+            out.append(f"<div>{esc(hint)}</div>")
+        # Wrap, never truncate: cutting the reason mid-word ("…OOM on a 32GB
+        # GPU; un") is worse than showing no reason at all.
+        if s.get("last_verdict"):
+            out.append(f'<div class="dim reason">{esc(s["last_verdict"])}</div>')
+    return "".join(out)
 
 
 def track_cell(pr: str, track: str) -> str:
@@ -510,18 +664,15 @@ def track_cell(pr: str, track: str) -> str:
     )
     return (f'<form class="inline" method="post" action="/api/track">'
             f'<input type="hidden" name="pr" value="{esc(pr)}">'
-            f'<select name="track" onchange="this.form.submit()">{opts}</select>'
+            f'<select class="mini" name="track" onchange="this.form.submit()">{opts}</select>'
             f"</form>")
 
 
-def move_cell(pr: str) -> str:
-    return (
-        f'<form class="inline" method="post" action="/api/move">'
-        f'<input type="hidden" name="pr" value="{esc(pr)}">'
-        f'<button class="linkish" name="dir" value="up" title="move up">&#9650;</button>'
-        f'<button class="linkish" name="dir" value="down" title="move down">&#9660;</button>'
-        f"</form>"
-    )
+def grip_cell() -> str:
+    """The drag handle. A handle rather than a draggable row: making the whole
+    row draggable costs you text selection and turns every link into a drag."""
+    return ('<span class="grip" title="drag to reorder" '
+            'aria-label="drag to reorder">&#x283F;</span>')
 
 
 def notify_button(pr: str, s: dict) -> str:
@@ -548,7 +699,7 @@ def prio_cell(pr: str, meta: dict) -> str:
     return (
         f'<form class="inline" method="post" action="/api/priority">'
         f'<input type="hidden" name="pr" value="{esc(pr)}">'
-        f'<select name="priority" onchange="this.form.submit()">{opts}</select></form>'
+        f'<select class="mini" name="priority" onchange="this.form.submit()">{opts}</select></form>'
     )
 
 
@@ -569,97 +720,146 @@ def report_html(wl: dict, st: dict, group: str | None = None) -> str:
             else '<div class="dim">(watchlist is empty)</div>')
 
 
-def move_row(wl: dict, st: dict, pr: str, direction: str) -> None:
-    """Swap this PR with its neighbour *inside the same sort bucket*.
+def bucket_of(st: dict, pr: str, meta: dict) -> str:
+    """The part of the sort a drag cannot cross.
 
     Manual order is only a tiebreaker: Pass-first, priority and conflict-last
-    still decide the buckets, so a row cannot be dragged across them. Moving
-    across a bucket would silently snap back, which reads as a broken button.
+    still decide the buckets, so a row dropped into another bucket would
+    silently snap back. The row carries this as `data-bucket` and the drag
+    refuses a drop when the two differ — a rejected drop is honest, a drop that
+    springs back reads as a bug.
     """
-    if pr not in wl:
-        return
-    key = row_order(st)
-    ordered = sorted(wl.items(), key=key)
-    idx = next((i for i, (p, _) in enumerate(ordered) if p == pr), None)
-    if idx is None:
-        return
-    nbr = idx - 1 if direction == "up" else idx + 1
-    if not 0 <= nbr < len(ordered):
-        return
-    # Same bucket == same sort key ignoring the manual order and PR number.
-    if key(ordered[idx])[:3] != key(ordered[nbr])[:3]:
+    return "|".join(str(x) for x in row_order(st)((pr, meta))[:3])
+
+
+def reorder_rows(wl: dict, st: dict, prs: list[str]) -> None:
+    """Apply a dragged sequence, permuting only the rows that were dragged.
+
+    The table may be filtered to one tab, so the submitted list is a subset.
+    Re-ranking it densely from zero would shove every hidden row to the end;
+    instead the dragged PRs are re-seated into the set of slots they already
+    occupied, which leaves everything else exactly where it was.
+    """
+    prs = [p for p in prs if p in wl]
+    if not prs:
         return
     # Normalise to dense ranks first; stored orders may all be 0 initially.
-    for rank, (p, meta) in enumerate(ordered):
+    for rank, (_, meta) in enumerate(sorted(wl.items(), key=row_order(st))):
         meta["order"] = rank
-    wl[pr]["order"], wl[ordered[nbr][0]]["order"] = (
-        wl[ordered[nbr][0]]["order"], wl[pr]["order"])
+    slots = sorted(wl[p]["order"] for p in prs)
+    for p, slot in zip(prs, slots):
+        wl[p]["order"] = slot
 
 
-def render_tabs(wl: dict, active: str | None) -> str:
-    groups = all_groups(wl)
+def render_tabs(wl: dict, active: str | None, order: list[str] | None = None) -> str:
+    groups = all_groups(wl, order)
     if not groups or groups == [UNGROUPED]:
         return ""  # one bucket is not a tab bar
-    def tab(label, key, n):
+
+    def tab(label, key, n, drag=False):
         on = " on" if (key or None) == (active or None) else ""
         href = f"/?tab={quote(key)}" if key else "/"
-        return (f'<a class="tab{on}" href="{esc(href)}">{esc(label)}'
+        # `All` and `Ungrouped` are fixed ends of the bar, so they are not
+        # draggable — and because nothing listens for a drag over them, a tab
+        # cannot be dropped outside the named range either.
+        d = f' draggable="true" data-group="{esc(key)}"' if drag else ""
+        return (f'<a class="tab{on}"{d} href="{esc(href)}">{esc(label)}'
                 f'<span class="dim"> {n}</span></a>')
+
+    count = lambda g: sum(1 for m in wl.values() if group_of(m) == g)
     out = [tab("All", "", len(wl))]
-    for g in groups:
-        out.append(tab(g, g, sum(1 for m in wl.values() if group_of(m) == g)))
-    return f'<div class="tabs">{"".join(out)}</div>'
+    named = [g for g in groups if g != UNGROUPED]
+    out += [tab(g, g, count(g), drag=True) for g in named]
+    if UNGROUPED in groups:
+        out.append(tab(UNGROUPED, UNGROUPED, count(UNGROUPED)))
+    return (
+        f'<div class="tabs" id="tabbar">{"".join(out)}</div>'
+        f'<form id="grouporderform" method="post" action="/api/group-order" '
+        f'style="display:none">'
+        f'<input type="hidden" id="grouporder" name="order" value="">'
+        f'<input type="hidden" name="tab" value="{esc(active or "")}"></form>'
+    )
 
 
-def group_cell(pr: str, meta: dict, groups: list[str]) -> str:
-    """Free text with a datalist: pick an existing tab or type a new one."""
+def group_cell(pr: str, meta: dict) -> str:
+    """Plain free text — no datalist. The dropdown marker it adds costs real
+    width in a column this narrow, and typing the name is the only thing it
+    ever did: an unknown name creates a tab either way."""
     cur = meta.get("group", "")
-    opts = "".join(f'<option value="{esc(g)}">' for g in groups if g != UNGROUPED)
     return (
         f'<form method="post" action="/api/group">'
         f'<input type="hidden" name="pr" value="{esc(pr)}">'
         f'<input class="note grp" type="text" name="group" value="{esc(cur)}" '
-        f'list="grouplist" placeholder="{esc(UNGROUPED)}"></form>'
-        f'<datalist id="grouplist">{opts}</datalist>'
+        f'placeholder="{esc(UNGROUPED)}"></form>'
     )
 
 
-def render_table(wl: dict, st: dict) -> str:
+def render_table(wl: dict, st: dict, tab: str = "") -> str:
     if not wl:
         return EMPTY
+    # Widths, not guesses: with table-layout:fixed these are what the browser
+    # uses, so the two prose columns keep their share no matter how long a
+    # group name someone types.
+    # All percentages, summing to 100. Mixing px and % here is a trap: when the
+    # declared widths exceed the table width the browser rescales *everything*
+    # proportionally, so the px columns get squeezed too and the knobs overflow
+    # again. The floor is held by `table { min-width }` instead.
+    cols = "".join(
+        f'<col style="width:{w}%">' for w in (
+            3,    # grip   — leftmost, where a drag handle is looked for
+            6,    # Pri    — a <select>; see note below
+            18,   # PR + title + author
+            7,    # Group
+            7,    # Track  — a <select>
+            7,    # Merge  — fits the `conflict` / `unknown` pill unwrapped
+            6,    # Verdict
+            9,    # Action
+            29,   # Status — all the prose now lives here
+            5,    # Swept  — wraps to date / time, both halves unbroken
+            3,    # remove — a glyph, not the word; see below
+        )
+    )
     head = (
-        "<tr><th>Pri</th><th>PR</th><th>Group</th><th>Track</th><th>Merge</th><th>Red NVIDIA CI</th>"
-        "<th></th><th>Verdict</th><th>Action</th><th>Status</th>"
-        "<th>Last swept (TW)</th><th></th></tr>"
+        "<tr><th></th><th>Pri</th><th>PR</th><th>Group</th><th>Track</th><th>Merge</th>"
+        "<th>Verdict</th><th>Action</th><th>Status</th>"
+        "<th>Swept (TW)</th><th></th></tr>"
     )
     rows = []
-    groups = all_groups(wl)
     for pr, meta in sorted(wl.items(), key=row_order(st)):
         s = st.get(pr, {})
         track = meta.get("track", "regular")
         other = "regular" if track == "high" else "high"
         url = s.get("url") or f"https://github.com/{meta.get('repo', '')}/pull/{pr}"
         rows.append(
-            "<tr>"
-            f"<td>{prio_cell(pr, meta)}</td>"
+            f'<tr data-pr="{esc(pr)}" data-bucket="{esc(bucket_of(st, pr, meta))}">'
+            f'<td class="knob">{grip_cell()}</td>'
+            f'<td class="knob">{prio_cell(pr, meta)}</td>'
             f'<td><a href="{esc(url)}" target="_blank"><b>#{esc(pr)}</b></a>'
             f'<span class="title dim" title="{esc(s.get("title"))}">{esc(s.get("title"))}</span>'
             f'<span class="dim">{"@" + esc(s.get("author")) if s.get("author") else ""}</span></td>'
-            f"<td>{group_cell(pr, meta, groups)}</td>"
-            f"<td>{track_cell(pr, track)}</td>"
+            f'<td class="knob">{group_cell(pr, meta)}</td>'
+            f'<td class="knob">{track_cell(pr, track)}</td>'
             f"<td>{merge_cell(s)}</td>"
-            f"<td>{ci_cell(s)}</td>"
-            f"<td>{move_cell(pr)}</td>"
             f"<td>{verdict_cell(s)}</td>"
             f"<td>{action_cell(s)}</td>"
             f"<td>{status_cell(pr, s)}</td>"
             f'<td class="mono dim">{esc(tw(s.get("last_sweep")))}</td>'
-            f'<td><form class="inline" method="post" action="/api/remove">'
+            # A glyph, not the word "remove": a <button> cannot wrap or shrink,
+            # so a 6-character label in a 3% column overhangs into nothing.
+            f'<td class="knob"><form class="inline" method="post" action="/api/remove">'
             f'<input type="hidden" name="pr" value="{esc(pr)}">'
-            f'<button class="linkish" title="stop watching">remove</button>'
+            f'<button class="linkish" title="stop watching #{esc(pr)}" '
+            f'aria-label="stop watching #{esc(pr)}">&times;</button>'
             f"</form></td></tr>"
         )
-    return f"<table>{head}{''.join(rows)}</table>"
+    return (
+        f'<table id="prtable"><colgroup>{cols}</colgroup><thead>{head}</thead>'
+        f"<tbody>{''.join(rows)}</tbody></table>"
+        f'<form id="roworderform" method="post" action="/api/order" '
+        f'style="display:none">'
+        f'<input type="hidden" id="roworder" name="order" value="">'
+        f'<input type="hidden" name="tab" value="{esc(tab or "")}"></form>'
+    )
 
 
 def render_banner(st: dict, enabled: bool) -> str:
@@ -788,10 +988,11 @@ class Handler(BaseHTTPRequestHandler):
                 "application/json",
             )
             return
+        gorder = (raw_st.get("_config") or {}).get("group_order") or []
         tab = (parse_qs(urlparse(self.path).query).get("tab") or [""])[0]
         # A tab that no longer exists (last PR moved out) falls back to All
         # rather than showing an empty table with no way back.
-        if tab and tab not in all_groups(wl):
+        if tab and tab not in all_groups(wl, gorder):
             tab = ""
         shown = {k: v for k, v in wl.items() if in_group(v, tab or None)}
         enabled = monitoring_enabled(raw_st)
@@ -808,8 +1009,8 @@ class Handler(BaseHTTPRequestHandler):
             repo=html.escape(self.repo),
             generated=now(),
             data=html.escape(str(DATA_DIR)),
-            table=render_table(shown, st),
-            tabs=render_tabs(wl, tab),
+            table=render_table(shown, st, tab),
+            tabs=render_tabs(wl, tab, gorder),
             report=html.escape(report_text(wl, st, tab or None)),
             report_html=report_html(wl, st, tab or None),
             banner=render_notice() + render_banner(raw_st, enabled),
@@ -863,6 +1064,20 @@ class Handler(BaseHTTPRequestHandler):
                 st = load(STATE, {})
                 set_monitoring(st, form.get("on") == "1")
                 save(STATE, st)
+            elif self.path == "/api/group-order":
+                # Tab order is a view preference, so it lives beside the other
+                # dashboard config rather than in the watchlist. Stored as the
+                # names the user dragged; all_groups() reconciles it with the
+                # groups that actually exist on every render.
+                st = load(STATE, {})
+                names = [g.strip() for g in form.get("order", "").split("\n")]
+                seen, clean = set(), []
+                for g in names:
+                    if g and g != UNGROUPED and g not in seen:
+                        seen.add(g)
+                        clean.append(g)
+                st.setdefault("_config", {})["group_order"] = clean
+                save(STATE, st)
             else:
                 wl = load(WATCHLIST, {})
                 if self.path == "/api/add":
@@ -896,9 +1111,12 @@ class Handler(BaseHTTPRequestHandler):
                     pr = parse_pr(form.get("pr", ""))
                     if pr in wl:
                         wl[pr]["group"] = form.get("group", "").strip()
-                elif self.path == "/api/move":
-                    move_row(wl, load(STATE, {}), parse_pr(form.get("pr", "")),
-                             form.get("dir", "up"))
+                elif self.path == "/api/order":
+                    reorder_rows(
+                        wl, load(STATE, {}),
+                        [p.strip() for p in form.get("order", "").split(",")
+                         if p.strip()],
+                    )
                 elif self.path == "/api/remove":
                     pr = parse_pr(form.get("pr", ""))
                     if wl.pop(pr, None) is not None:
@@ -915,7 +1133,10 @@ class Handler(BaseHTTPRequestHandler):
                        "text/plain; charset=utf-8")
             return
         self.send_response(303)
-        self.send_header("Location", "/")
+        # Only the tab-order form carries `tab`; everything else keeps landing
+        # on All, which is where it landed before.
+        back = form.get("tab", "")
+        self.send_header("Location", f"/?tab={quote(back)}" if back else "/")
         self.end_headers()
 
 
