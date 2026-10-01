@@ -37,6 +37,11 @@ Read `_shared/repo-config.md` for the `GH_TOKEN=""` rule. Repo is
 /pr-ci-watch arm            # register the two cron tracks
 ```
 
+Entries render as a markdown bullet with the perf line nested under it —
+`- <P0><CI clear><PR41134>Title` / `  - TPOT 6.3% improvement`. The rich flavour
+is a real nested `<ul>`, so a paste into Teams lands as a proper list; the plain
+flavour uses `- ` and two-space indent, which Teams also turns into bullets.
+
 Line 2 of each entry is the PR's **own performance claim**, extracted from its
 body by `perf.py` — not the CI triage reason. It reads the markdown result
 tables two ways: metric-in-first-cell (`| TPOT median | 2.60 | 2.48 | -4.6% |`)

@@ -130,12 +130,18 @@ PAGE = """<!doctype html>
   .note {{ width:100%; min-width:160px; padding:5px 7px; border-radius:5px;
     border:1px solid var(--line); background:var(--bg); color:var(--fg);
     font:inherit; font-size:12px; }}
-  /* No fill and no border: the block is text to be read and copied, and a
-     sunken box around it only competes with the panel it already sits in. */
-  .reportblock {{ width:100%; max-height:260px; overflow:auto; padding:2px 0;
+  /* Nothing behind the status block: it is text to be read and copied, and
+     any fill only competes with what it sits in. */
+  .panel.plain {{ background:transparent; }}
+  .reportblock {{ width:100%; max-height:300px; overflow:auto; padding:2px 0;
     background:transparent; border:none;
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px;
-    line-height:1.6; }}
+    line-height:1.65; }}
+  .reportblock ul {{ margin:0; padding-left:1.3em; }}
+  .reportblock > ul {{ padding-left:1.1em; }}
+  .reportblock li {{ margin:1px 0; }}
+  .reportblock ul ul {{ margin:1px 0 5px; }}
+  .reportblock ul ul li {{ color:var(--dim); }}
   #reportsrc {{ position:absolute; left:-9999px; width:1px; height:1px; }}
   .banner {{ padding:9px 13px; border-radius:6px; font-size:13px;
     border:1px solid currentColor; margin-bottom:14px; }}
@@ -176,7 +182,7 @@ PAGE = """<!doctype html>
 
 <div class="panel">{table}</div>
 
-<div class="panel">
+<div class="panel plain">
   <h2>Status block &mdash; paste into Teams / standup</h2>
   <div id="report" class="reportblock">{report_html}</div>
   <textarea id="reportsrc" readonly aria-hidden="true">{report}</textarea>
@@ -537,14 +543,15 @@ def report_html(wl: dict, st: dict) -> str:
     alongside for anywhere that strips HTML."""
     out = []
     for e in report_entries(wl, st):
+        # A real nested <ul> so a rich paste lands in Teams as a proper list.
+        note = (f'<ul><li>{esc(e["note"])}</li></ul>' if e["note"] else "")
         out.append(
-            f'<div>&lt;{esc(e["pri"])}&gt;&lt;{esc(e["token"])}&gt;'
+            f'<li>&lt;{esc(e["pri"])}&gt;&lt;{esc(e["token"])}&gt;'
             f'&lt;<a href="{esc(e["url"])}" target="_blank">PR{esc(e["pr"])}</a>&gt;'
-            f'{esc(e["title"])}</div>'
+            f'{esc(e["title"])}{note}</li>'
         )
-        if e["note"]:
-            out.append(f'<div class="dim">{esc(e["note"])}</div>')
-    return "".join(out) or '<div class="dim">(watchlist is empty)</div>'
+    return (f"<ul>{''.join(out)}</ul>" if out
+            else '<div class="dim">(watchlist is empty)</div>')
 
 
 def move_row(wl: dict, st: dict, pr: str, direction: str) -> None:

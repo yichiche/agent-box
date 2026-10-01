@@ -287,9 +287,12 @@ def report_text(wl: dict, st: dict) -> str:
     """
     lines = []
     for e in report_entries(wl, st):
-        lines.append(f"<{e['pri']}><{e['token']}><PR{e['pr']}>{e['title']}")
+        # Markdown bullets: Teams turns "- " into a real bullet, and two spaces
+        # of indent into a nested one, so the plain-text flavour still reads as
+        # a list wherever the rich one does not survive the paste.
+        lines.append(f"- <{e['pri']}><{e['token']}><PR{e['pr']}>{e['title']}")
         if e["note"]:
-            lines.append(e["note"])
+            lines.append(f"  - {e['note']}")
     return "\n".join(lines)
 
 
