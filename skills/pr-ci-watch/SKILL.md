@@ -229,6 +229,13 @@ attempt on a gate that will reject it again.
 `PR Test Extra`, and treating its red gate as a problem would put a permanent
 false alarm on most of the watchlist.
 
+**Every gate reason is still shown, including the non-blocking ones.** It is
+not enough to decide a red is harmless — the fail count stays on the row either
+way, and a count you cannot account for reads as two broken tests. A blocked
+gate renders red (**CI never started**, plus what unblocks it); a harmless one
+renders dim (*not a failure · `PR Test Extra` is opt-in…*), both annotated with
+how many of the fails they cover, so the numbers always add up.
+
 ### Two failures the sweep resolves without a triage pass
 
 **Watcher-only → auto `re-run`.** A `wait-for-*` job that failed with *no* real

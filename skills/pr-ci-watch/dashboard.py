@@ -47,6 +47,7 @@ from watch import (  # noqa: E402
     row_order,
     tally_bits,
     TRACKS,
+    GATE_BLOCKING,
     log_line,
     save,
     set_monitoring,
@@ -746,6 +747,10 @@ GATE_LABEL = {
     "missing-run-ci": "missing the <code>run-ci</code> label",
     "missing-label": "missing a workflow opt-in label",
     "rate-limit": "author rate-limited (low-permission cooldown)",
+    # The common one, and the reason the dashboard now shows non-blocking gates
+    # at all: most PRs never opt into PR Test Extra, so its red gate + rollup
+    # are a permanent, meaningless pair of fails on nearly every row.
+    "opt-in-extra": "<code>PR Test Extra</code> is opt-in and this PR did not opt in",
 }
 
 
@@ -756,10 +761,13 @@ def pick_track(value: str | None) -> str:
 
 
 def gate_block(s: dict) -> str:
-    """Say when CI never started, and why.
+    """Account for the fail count: which failures are a gate, and why.
 
     Without this a gated PR renders as a plain fail count — the shape that made
-    "4 pass, 4 fail" look like a test problem on a PR whose tests never ran.
+    "4 pass, 4 fail" look like a test problem on a PR whose tests never ran, and
+    "59 pass, 2 fail" look like two broken tests when both reds were the
+    not-opted-in Extra workflow. Non-blocking reasons are shown too, dimmed:
+    the whole point is that no number on this row is unexplained.
     """
     gated = s.get("gated") or {}
     if not gated:
@@ -768,12 +776,25 @@ def gate_block(s: dict) -> str:
     for wf, d in gated.items():
         reasons.setdefault(d.get("reason", "?"), []).append(wf)
     bits = []
-    for reason, wfs in reasons.items():
-        fix = " &mdash; a re-run from here clears it" if any(
-            gated[w].get("rerunnable") for w in wfs) else ""
+    for reason, wfs in sorted(reasons.items(),
+                              key=lambda kv: not gated[kv[1][0]].get(
+                                  "blocking", kv[0] in GATE_BLOCKING)):
+        d = gated[wfs[0]]
+        label = GATE_LABEL.get(reason, esc(reason))
+        # How many checks this accounts for, so the reader can subtract it from
+        # the fail count rather than wondering which reds are covered.
+        n = sum(len(gated[w].get("jobs") or []) for w in wfs)
+        count = f' <span class="dim">({n} of the fails)</span>' if n else ""
+        # State written before `blocking` existed has no such key; deriving it
+        # from the reason stops a pre-upgrade row from rendering a real block
+        # as "not a failure" for one sweep.
+        blocking = d.get("blocking", reason in GATE_BLOCKING)
+        if not blocking:
+            bits.append(f'<div class="dim">not a failure &middot; {label}{count}</div>')
+            continue
+        fix = " &mdash; a re-run from here clears it" if d.get("rerunnable") else ""
         bits.append(
-            f'<div class="bad"><b>CI never started</b> &middot; '
-            f'{GATE_LABEL.get(reason, esc(reason))}{fix}'
+            f'<div class="bad"><b>CI never started</b> &middot; {label}{fix}{count}'
             f'<div class="dim">{esc(", ".join(sorted(wfs)))}</div></div>'
         )
     return "".join(bits)

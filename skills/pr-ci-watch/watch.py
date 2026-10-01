@@ -917,11 +917,20 @@ def cmd_sweep(a) -> None:
         s["failed_groups"] = groups
         # Keep the gate picture at PR level so the dashboard can say "blocked at
         # the gate, here is which one" instead of printing a bare fail count.
-        gated = {w: {"reason": g["gate_reason"], "hint": g["gate_hint"],
-                     "rerunnable": g.get("gate_rerunnable", False)}
-                 for w, g in groups.items()
-                 if g.get("gate_reason") in GATE_BLOCKING}
-        s["gated"] = gated
+        # Store *every* resolved gate reason, not just the blocking ones. The
+        # common case by far is `opt-in-extra`, and dropping it meant a row read
+        # "59 pass, 2 fail" with no explanation anywhere — the fail count is the
+        # not-opted-in Extra workflow, which we had already diagnosed and then
+        # discarded. A count you cannot account for is worse than no count.
+        all_gates = {
+            w: {"reason": g["gate_reason"], "hint": g["gate_hint"],
+                "rerunnable": g.get("gate_rerunnable", False),
+                "blocking": g["gate_reason"] in GATE_BLOCKING,
+                "jobs": list(g.get("gate_jobs", []))}
+            for w, g in groups.items() if g.get("gate_reason")
+        }
+        s["gated"] = all_gates
+        gated = {w: d for w, d in all_gates.items() if d["blocking"]}
         if gated:
             print(f"        !! BLOCKED AT THE GATE: "
                   + "; ".join(f"{w} [{d['reason']}]" for w, d in gated.items())
