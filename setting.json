@@ -18,6 +18,7 @@
     ]
   },
   "model": "sonnet",
+  "includeCoAuthoredBy": false,
   "hooks": {
     "Stop": [
       {
