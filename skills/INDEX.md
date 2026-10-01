@@ -64,6 +64,7 @@
 | [`/commit-push`](commit-push/SKILL.md) | Commit + push to fork |
 | [`/commit-push-pr`](commit-push-pr/SKILL.md) | Commit + push + PR in one flow |
 | [`/pr`](pr/SKILL.md) | Create a GitHub PR (HackMD draft first) |
+| [`/sglang-pr-review`](sglang-pr-review/SKILL.md) | Review an sglang PR for correctness: weight loading, forward-path variants, quant scales, collectives, kernels |
 | [`/ci-analysis`](ci-analysis/SKILL.md) | Triage PR CI failures: root cause vs fast-fail cascade, PR-related or not, merge verdict |
 | [`/pr-conflict-fix`](pr-conflict-fix/SKILL.md) | Resolve a conflicting PR inside a throwaway container, push the merge back |
 | [`/pr-ci-watch`](pr-ci-watch/SKILL.md) | Watch a PR list on two cadences: `/ci-analysis`-gated NVIDIA CI re-runs + once-per-SHA conflict notice, with a local dashboard |
