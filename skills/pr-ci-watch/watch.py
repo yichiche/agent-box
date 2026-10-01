@@ -64,6 +64,54 @@ ROLLUP_RE = re.compile(r"(-finish$|\bpr-gate\b|Standard Test Results|^finish$)",
 # off as out-of-scope on another. Watchers go to triage so the log decides.
 WATCHER_RE = re.compile(r"^(wait-for-|check-pr-test-health)", re.I)
 
+# The `pr-gate` job itself. Distinct from the other rollups because its failure
+# has a *knowable* cause: .github/workflows/pr-gate.yml fails on exactly one of
+# a handful of named steps, and each one implies a different fix. Without this
+# every gated PR looks identical on the dashboard ("4 pass, 4 fail") when in
+# fact one needs a label, one needs the author to click Ready for review, and
+# one needs nothing but a re-run from someone with write access.
+GATE_JOB_RE = re.compile(r"\bpr-gate\b", re.I)
+# failing step name -> (reason token, what unblocks it, can a maintainer re-run
+# fix it on its own?). Ordered: first substring match wins.
+GATE_STEP_REASONS = (
+    ("Block draft PR", (
+        "draft",
+        "PR was a draft when CI ran — mark it Ready for review, then re-run",
+        False,
+    )),
+    ("Require run-ci label", (
+        "missing-run-ci",
+        "missing the `run-ci` label — add it (e.g. `/tag-and-rerun-ci`), then re-run",
+        False,
+    )),
+    # Not a failure to chase. pr-test-extra.yml is opt-in: every PR without the
+    # label shows this red gate, and treating it as a problem would put a
+    # permanent false alarm on most of the watchlist.
+    ("Require run-ci-extra label", (
+        "opt-in-extra",
+        "`PR Test Extra` is opt-in and this PR has not opted in — expected, not a failure",
+        False,
+    )),
+    ("Require additional label", (
+        "missing-label",
+        "missing a workflow-specific opt-in label — add it, then re-run",
+        False,
+    )),
+    # The one case a re-run genuinely fixes. The rate limit is evaluated against
+    # the run's *triggering actor*, so when someone with write access presses
+    # re-run the check is skipped outright and the gated CI finally starts.
+    ("Enforce rate limit", (
+        "rate-limit",
+        "author is rate-limited (low-permission cooldown) — a re-run triggered by "
+        "someone with write access bypasses it",
+        True,
+    )),
+)
+# Gate reasons that mean "this PR is not actually being tested", as opposed to
+# `opt-in-extra`, which means "this workflow was never asked to run".
+GATE_BLOCKING = {"draft", "stale-draft", "missing-run-ci", "missing-label",
+                 "rate-limit"}
+
 # No re-run cap. The gate on re-running is /ci-analysis: if a failure is
 # attributed to the PR it returns `code fix` and nothing is re-run at all. A
 # count limit on top of that would only ever block the case /ci-analysis has
@@ -73,9 +121,14 @@ SWEEP_DEDUP_MINUTES = 30
 ACTIONS = ("re-run", "code-fix", "merge-main", "wait-upstream", "out-of-scope")
 
 PRIORITIES = ("P0", "P1", "P2")
+# `draft` is a holding track, not a cadence: a draft PR is still being written,
+# so its CI is the author's scratchpad and its code is not final. Sweeping one
+# would re-run CI the author never asked for and triage failures they already
+# know about, so the sweep records the PR and stops there.
+TRACKS = ("regular", "high", "draft")
 # Reporting label, not the sweep cadence. Defaults off the track so you only
 # override when a P-level and a cadence genuinely disagree.
-TRACK_PRIORITY = {"high": "P0", "regular": "P1"}
+TRACK_PRIORITY = {"high": "P0", "regular": "P1", "draft": "P2"}
 
 # Short status token for the report line, e.g. <CI clear>.
 # Actions that say more than the raw CI state, so they win over it in the
@@ -84,6 +137,10 @@ CI_TOKEN_OVERRIDE = {
     "code-fix": "CI fail",
     "merge-main": "merge main",
     "wait-upstream": "blocked",
+    # Neither is a CI result. "CI red" on a PR whose tests never started is the
+    # exact misreading these two tokens exist to stop.
+    "draft": "draft",
+    "gated": "gated",
 }
 VERDICT_TOKEN = {"Pass": "CI clear", "Pending": "CI running",
                  "Fail": "CI red", "\u2014": "CI ?"}
@@ -422,6 +479,32 @@ def is_cascade(link: str) -> bool:
     return result
 
 
+_GATE_CACHE: dict[str, tuple] = {}
+
+
+def gate_reason(link: str) -> tuple[str, str, bool] | None:
+    """Why a failed `pr-gate` job blocked this workflow.
+
+    -> (reason token, human sentence, re-run-fixes-it) or None if the step is
+    not one we recognise. Same one-API-call-per-job shape as `is_cascade`, and
+    only ever called for jobs whose name already matched `GATE_JOB_RE`.
+    """
+    m = re.search(r"/job/(\d+)", link or "")
+    if not m:
+        return None
+    job_id = m.group(1)
+    if job_id in _GATE_CACHE:
+        return _GATE_CACHE[job_id]
+    rc, out, _ = gh_try([
+        "api", f"repos/{REPO_DEFAULT}/actions/jobs/{job_id}",
+        "--jq", '[.steps[] | select(.conclusion=="failure") | .name] | first',
+    ])
+    step = out.strip() if rc == 0 else ""
+    found = next((r for needle, r in GATE_STEP_REASONS if needle in step), None)
+    _GATE_CACHE[job_id] = found
+    return found
+
+
 def in_scope(workflow: str) -> bool:
     w = workflow or ""
     return not (VENDOR_RE.search(w) or ADMIN_RE.match(w) or EXTRA_SKIP_RE.search(w))
@@ -432,7 +515,7 @@ def in_scope(workflow: str) -> bool:
 
 def cmd_add(a) -> None:
     wl = load(WATCHLIST, {})
-    track = "high" if a.high else "regular"
+    track = "draft" if getattr(a, "draft", False) else "high" if a.high else "regular"
     added = []
     for ref in a.refs:
         pr = parse_pr(ref)
@@ -578,6 +661,20 @@ def failed_in_scope(pr: str, repo: str) -> tuple[dict, dict]:
             g["cascade_jobs"] = cascaded
             g["gate_jobs"].extend(cascaded)
 
+    # Third pass: ask *why* the gate said no. Only for workflows whose failure
+    # is gate-shaped — a workflow with a real failing job was clearly allowed to
+    # run, so its gate (if any) is just mirroring that.
+    for g in groups.values():
+        if g["jobs"] or g["watcher_jobs"]:
+            continue
+        for name in g["gate_jobs"]:
+            if not GATE_JOB_RE.search(name):
+                continue
+            found = gate_reason((g.get("job_links") or {}).get(name, ""))
+            if found:
+                g["gate_reason"], g["gate_hint"], g["gate_rerunnable"] = found
+                break
+
     for g in groups.values():
         # Only a pure rollup failure is unactionable. A failed watcher still
         # needs a human/agent to read why it died.
@@ -668,6 +765,36 @@ def cmd_sweep(a) -> None:
             report.append(row)
             continue
 
+        # 0. draft. A draft PR is still being written: its CI is the author's
+        # own scratchpad and its code is not up for review yet, so there is
+        # nothing here to triage and nothing we should re-run on their behalf.
+        # (`pr-gate.yml` agrees — it fails `Block draft PR` outright, which is
+        # why a watched draft otherwise shows up as a mysterious all-red gate.)
+        # The PR stays on the watchlist and keeps being snapshotted, so the
+        # sweep that follows it being marked Ready picks it straight back up.
+        if snap.get("isDraft"):
+            if meta.get("track") != "draft":
+                meta["prev_track"] = meta.get("track", "regular")
+                meta["track"] = "draft"
+                if a.apply and pr in wl:
+                    wl[pr].update(track="draft", prev_track=meta["prev_track"])
+            s["last_action"] = "draft"
+            s["last_verdict"] = "draft PR — CI and code not checked until it is marked Ready for review"
+            s["verdict_at"] = now()
+            s["tally"] = {}  # a draft's red gates are not a CI verdict
+            print(f"#{pr}  DRAFT — not checking CI or code "
+                  f"(track=draft; returns to '{meta.get('prev_track', 'regular')}' when ready)")
+            row["outcome"] = "draft"
+            report.append(row)
+            continue
+        if meta.get("track") == "draft":
+            back = meta.get("prev_track", "regular")
+            print(f"#{pr}  no longer a draft — returning to the '{back}' track")
+            if a.apply and pr in wl:
+                wl[pr]["track"] = back
+                wl[pr].pop("prev_track", None)
+            meta["track"] = back
+
         # 1. conflict, once per head SHA
         if snap.get("mergeable") == "UNKNOWN":
             # Still not computed after a re-query. Conflict status is unknowable
@@ -730,14 +857,28 @@ def cmd_sweep(a) -> None:
                     for w, g in real.items()
                 },
             }
+        # A `draft` gate records what the PR was when CI ran, not what it is
+        # now — marking a PR Ready re-triggers nothing, so the red gate just
+        # sits there forever. This sweep's snapshot says it is Ready, so the
+        # gate is stale and a re-run is the entire fix. (Reached here only when
+        # the PR is not a draft: a live draft returned above.)
+        for g in groups.values():
+            if g.get("gate_reason") == "draft":
+                g["gate_reason"] = "stale-draft"
+                g["gate_rerunnable"] = True
+                g["gate_hint"] = ("CI ran while this was a draft; it is Ready for "
+                                  "review now, so a re-run gets past the gate")
         print(f"#{pr}  {len(groups)} in-scope workflow(s) red "
               f"({len(real)} with a real failing job)")
         for w, g in groups.items():
             used = rerun_count(s, w, sha)
             if g["gate_only"]:
-                print(f"        {w}: GATE-ONLY ({', '.join(g['gate_jobs'][:4])}) — "
-                      f"no test job failed here; root cause is in a skipped job or an "
-                      f"out-of-scope vendor workflow. Re-running would just re-fail.")
+                if g.get("gate_reason"):
+                    print(f"        {w}: GATED [{g['gate_reason']}] — {g['gate_hint']}")
+                else:
+                    print(f"        {w}: GATE-ONLY ({', '.join(g['gate_jobs'][:4])}) — "
+                          f"no test job failed here; root cause is in a skipped job or an "
+                          f"out-of-scope vendor workflow. Re-running would just re-fail.")
                 continue
             if g["watcher_jobs"]:
                 print(f"        {w}: WATCHER FAILED ({', '.join(g['watcher_jobs'][:3])}) "
@@ -774,6 +915,44 @@ def cmd_sweep(a) -> None:
                   f"stop re-running; evaluate `merge main`")
 
         s["failed_groups"] = groups
+        # Keep the gate picture at PR level so the dashboard can say "blocked at
+        # the gate, here is which one" instead of printing a bare fail count.
+        gated = {w: {"reason": g["gate_reason"], "hint": g["gate_hint"],
+                     "rerunnable": g.get("gate_rerunnable", False)}
+                 for w, g in groups.items()
+                 if g.get("gate_reason") in GATE_BLOCKING}
+        s["gated"] = gated
+        if gated:
+            print(f"        !! BLOCKED AT THE GATE: "
+                  + "; ".join(f"{w} [{d['reason']}]" for w, d in gated.items())
+                  + " — these workflows never ran a single test")
+        # A gate that only this account's write access can clear is not a triage
+        # question: /ci-analysis has no log to read, because no job ran.
+        rerunnable_gate = {w: d for w, d in gated.items() if d["rerunnable"]}
+        if rerunnable_gate and not real:
+            s["last_action"] = "re-run"
+            s["last_verdict"] = "; ".join(
+                f"{w}: {d['hint']}" for w, d in rerunnable_gate.items()
+            )
+            s["verdict_at"] = now()
+            print("        -> re-run: gate rejected the author, not the code; "
+                  "a write-access re-run clears it")
+            row["outcome"] = "auto-re-run-gate"
+            rerun.append(pr)
+            report.append(row)
+            continue
+        # The rest of the blocking gates need a human act first — mark ready for
+        # review, add a label. Re-running changes nothing until that happens, so
+        # do not spend a triage pass or a re-run attempt on them.
+        if gated and not real:
+            s["last_action"] = "gated"
+            s["last_verdict"] = "; ".join(f"{w}: {d['hint']}" for w, d in gated.items())
+            s["verdict_at"] = now()
+            print("        -> gated: needs a label or Ready-for-review first; "
+                  "re-running now would just re-fail the gate")
+            row["outcome"] = "gated"
+            report.append(row)
+            continue
         if not real:
             # Every in-scope failure is an aggregation gate, so the root cause is
             # in a vendor workflow we deliberately ignore (or a job that never
@@ -908,12 +1087,17 @@ def cmd_apply_verdict(a) -> None:
     did, skipped = [], []
     for wf, g in groups.items():
         used = rerun_count(s, wf, sha)
-        if g.get("gate_only") and not a.force_gates:
-            skipped.append(
-                f"{wf} (gate-only: only {', '.join(g.get('gate_jobs', [])[:3])} failed; "
-                f"re-running an aggregation gate cannot turn it green — override with "
-                f"--force-gates)"
+        # `gate_rerunnable` is the one gate-only case worth re-running: the gate
+        # rejected the *author* (rate limit), not the code, and the check is
+        # evaluated against whoever triggers the run — so a re-run from this
+        # account, which has write access, turns it green. Skipping it here is
+        # what left #34502's NVIDIA CI permanently unstarted.
+        if g.get("gate_only") and not g.get("gate_rerunnable") and not a.force_gates:
+            why = g.get("gate_hint") or (
+                f"only {', '.join(g.get('gate_jobs', [])[:3])} failed; re-running an "
+                f"aggregation gate cannot turn it green"
             )
+            skipped.append(f"{wf} (gate-only: {why} — override with --force-gates)")
             continue
         run_id = g.get("run_id")
         if not run_id:
@@ -1079,6 +1263,8 @@ def main() -> None:
     s = sub.add_parser("add", help="add PR(s) by URL or number")
     s.add_argument("refs", nargs="+")
     s.add_argument("--high", action="store_true", help="high-priority track (2h)")
+    s.add_argument("--draft", action="store_true",
+                   help="draft track: watched, but CI and code are not checked")
     s.add_argument("--note", default="")
     s.add_argument("--priority", choices=list(PRIORITIES),
                    help="report label; defaults to P0 for --high, else P1")
@@ -1094,7 +1280,7 @@ def main() -> None:
     s.set_defaults(func=cmd_list)
 
     s = sub.add_parser("sweep", help="phase A: gather state, emit triage requests")
-    s.add_argument("--track", default="all", choices=["high", "regular", "all"])
+    s.add_argument("--track", default="all", choices=[*TRACKS, "all"])
     s.add_argument("--pr", nargs="*", help="sweep these PRs only (ignores dedup)")
     s.add_argument("--apply", action="store_true", help="allow mutations")
     s.add_argument("--force", action="store_true", help="ignore the 30m dedup window")

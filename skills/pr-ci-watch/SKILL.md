@@ -29,7 +29,7 @@ Read `_shared/repo-config.md` for the `GH_TOKEN=""` rule. Repo is
 /pr-ci-watch add <pr url|number>… [--high] [--note "..."]
 /pr-ci-watch remove <pr url|number>…
 /pr-ci-watch list | status
-/pr-ci-watch sweep [--track high|regular|all] [--pr N…] [--apply] [--force]
+/pr-ci-watch sweep [--track high|regular|draft|all] [--pr N…] [--apply] [--force]
 /pr-ci-watch triage <pr>…   # /ci-analysis + apply-verdict for PRs already swept
 /pr-ci-watch report         # the <P0><CI clear><PR…> status block
 /pr-ci-watch pause | resume # kill switch; a paused sweep is a no-op
@@ -179,6 +179,56 @@ conflict case (below); otherwise classifies in-scope failed checks into
 A PR swept in the last 30 minutes is skipped (so the daily track does not redo a
 high sweep that just ran). `--force` or `--pr N` overrides.
 
+### The `draft` track — watched, but not checked
+
+A draft PR is still being written: its CI is the author's own scratchpad and its
+code is not up for review. The sweep snapshots a draft and **stops there** — no
+conflict notice, no CI triage, no re-run on the author's behalf. `pr-gate.yml`
+agrees: it fails `Block draft PR` outright, so a watched draft would otherwise
+show up as a mysterious all-red gate with nothing behind it.
+
+The track moves itself. When a watched PR is a draft the sweep sets
+`track: draft` and remembers the one it came from in `prev_track`; the first
+sweep after it is marked Ready puts it straight back. You can also set it by
+hand (`add --draft`, or the dropdown) — the sweep will correct it either way,
+because the PR's own draft flag is the source of truth, not the watchlist.
+
+A draft row renders as a single dim line and nothing else: no tally, no failure
+block. Red gates that were never a verdict do not belong in a CI column.
+
+### Why a gate said no
+
+A failed `pr-gate` is not one thing. `.github/workflows/pr-gate.yml` fails on
+exactly one named step, and each one implies a *different* fix — so the sweep
+spends one API call to read the failed step and reports which:
+
+| reason | what actually happened | fix | re-run alone fixes it? |
+|---|---|---|---|
+| `draft` | PR was a draft when CI ran, and still is | author marks it Ready | no |
+| `stale-draft` | CI ran while it was a draft; it is Ready **now** | re-run | **yes** |
+| `missing-run-ci` | no `run-ci` label | add the label (`/tag-and-rerun-ci`) | no |
+| `missing-label` | a workflow-specific opt-in label is missing | add the label | no |
+| `rate-limit` | author is low-permission and inside the cooldown window | re-run **from an account with write access** | **yes** |
+| `opt-in-extra` | `PR Test Extra` was never asked to run | nothing — this is expected | n/a |
+
+Two of these are auto-resolved with no triage pass, because there is no log for
+`/ci-analysis` to read — *no job ran at all*:
+
+- **`rate-limit`** — the gate checks the run's **triggering actor**, not the PR
+  author. A re-run pressed by someone with write access skips the check
+  entirely. This is the one gate-only failure worth re-running, so
+  `apply-verdict` lets it through without `--force-gates`.
+- **`stale-draft`** — marking a PR Ready re-triggers nothing, so the draft gate
+  sits red forever until someone re-runs it.
+
+The rest become the `gated` action: the dashboard says **CI never started** and
+names the missing label, and the sweep deliberately does *not* burn a re-run
+attempt on a gate that will reject it again.
+
+`opt-in-extra` is explicitly **not** a failure. Most PRs have not opted into
+`PR Test Extra`, and treating its red gate as a problem would put a permanent
+false alarm on most of the watchlist.
+
 ### Two failures the sweep resolves without a triage pass
 
 **Watcher-only → auto `re-run`.** A `wait-for-*` job that failed with *no* real
@@ -202,7 +252,9 @@ not flaky, so stop retrying and look at main.*
 workflow whose only in-scope failures are these has **no root cause here** — the
 real failure is in a skipped job or an out-of-scope vendor workflow, and
 re-running an aggregation gate cannot turn it green. `apply-verdict` refuses to
-re-run those unless you pass `--force-gates`.
+re-run those unless you pass `--force-gates` — except for the two re-runnable
+gate reasons above (`rate-limit`, `stale-draft`), where the gate rejected the
+*author*, not the code.
 
 Because a gate-only red says nothing about *what broke*, every sweep that sees a
 real failure stores it as `last_real_failure` (jobs + their log URLs, scoped to
@@ -559,5 +611,10 @@ python3 watch.py arm-status --record "high=23 */2 * * *, regular=17 9 * * *"
 - **`mergeable: UNKNOWN`** means GitHub is still computing — the script re-queries
   once after 15s. If it is *still* unknown, the conflict check is deferred to the
   next sweep (CI checks are evaluated as normal); it is never treated as clean.
-- **Draft PRs stay on the list** but are worth a lower track; CI on a draft is
-  often intentionally red.
+- **Draft PRs stay on the list** on the `draft` track — snapshotted every sweep
+  so the move back happens by itself, but never triaged or re-run. CI on a draft
+  is the author's scratchpad and is often intentionally red.
+- **"4 pass, 4 fail" can mean CI never ran.** When a `pr-gate` blocks a
+  workflow, every job under it is *skipped*, so the counts collapse to a handful
+  of admin checks and look like a small test failure. Always read the gate
+  reason before concluding anything about the tests.

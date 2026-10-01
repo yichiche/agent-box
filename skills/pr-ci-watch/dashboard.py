@@ -46,6 +46,7 @@ from watch import (  # noqa: E402
     report_text,
     row_order,
     tally_bits,
+    TRACKS,
     log_line,
     save,
     set_monitoring,
@@ -241,6 +242,7 @@ PAGE = """<!doctype html>
   <select name="track">
     <option value="regular">regular &middot; daily</option>
     <option value="high">high &middot; every 2h</option>
+    <option value="draft">draft &middot; not checked</option>
   </select>
   <select name="priority">
     <option value="">priority: auto</option>
@@ -487,6 +489,11 @@ ACTION_CLASS = {
     "merge-main": "warn",
     "wait-upstream": "warn",
     "out-of-scope": "dim",
+    # Not red. Nothing is broken — the PR is simply not being tested yet, and
+    # colouring that like a failure sends you chasing a CI problem that the
+    # author (mark Ready) or a label is the only fix for.
+    "draft": "dim",
+    "gated": "warn",
 }
 
 # The whole point of the Verdict column: say what to DO, not just what happened.
@@ -495,6 +502,9 @@ ACTION_CLASS = {
 # verdict are both just long ways of saying so, and the Action column already
 # shows `-`, so Status stays blank instead of repeating it on every clean row.
 QUIET_ACTIONS = {"green", "out-of-scope"}
+# A draft shows its one-line reason and nothing else: no tally, no failure
+# block, no history of red gates that were never a verdict in the first place.
+SILENT_ACTIONS = {"draft"}
 
 ACTION_HINT = {
     "green": "nothing to do",
@@ -505,6 +515,8 @@ ACTION_HINT = {
     "conflict": "git conflict with main — author must resolve; /pr-conflict-fix",
     "wait-upstream": "STUCK: an NVIDIA job is blocked on an upstream fix",
     "out-of-scope": "nothing to do — red is outside NVIDIA scope",
+    "draft": "draft — CI and code not checked until marked Ready for review",
+    "gated": "CI never started — the gate rejected it before any test ran",
 }
 
 
@@ -678,7 +690,15 @@ def status_cell(pr: str, s: dict) -> str:
     """
     action = s.get("last_action", "")
     quiet = action in QUIET_ACTIONS
+    if action in SILENT_ACTIONS:
+        return (
+            f'<div class="dim">{esc(ACTION_HINT.get(action, action))}</div>'
+            + history_toggle(pr)
+        )
     out = []
+    g = gate_block(s)
+    if g:
+        out.append(g)
     b = notify_button(pr, s)
     if b:
         out.append(b)
@@ -707,12 +727,56 @@ def status_cell(pr: str, s: dict) -> str:
     # The toggle sits in Status because history is this column's long form —
     # how the state got here. The panel it opens is a full-width row below,
     # where the long verdict summaries have room to read.
-    out.append(
-        f'<button class="disc" type="button" data-pr="{esc(pr)}" '
-        f'aria-expanded="false" title="show this PR\'s history">'
-        f'<span class="tri">&#9656;</span> history</button>'
-    )
+    out.append(history_toggle(pr))
     return "".join(out)
+
+
+def history_toggle(pr: str) -> str:
+    return (f'<button class="disc" type="button" data-pr="{esc(pr)}" '
+            f'aria-expanded="false" title="show this PR\'s history">'
+            f'<span class="tri">&#9656;</span> history</button>')
+
+
+# How a blocked gate reads, per reason. The point of naming each one is that
+# the fix differs: a label you can add from here, a Ready-for-review click only
+# the author can make, a cooldown that a write-access re-run simply ignores.
+GATE_LABEL = {
+    "draft": "was a draft when CI ran",
+    "stale-draft": "CI ran while this was a draft; it is Ready now",
+    "missing-run-ci": "missing the <code>run-ci</code> label",
+    "missing-label": "missing a workflow opt-in label",
+    "rate-limit": "author rate-limited (low-permission cooldown)",
+}
+
+
+def pick_track(value: str | None) -> str:
+    """Form values come off the wire; an unknown track would silently exclude
+    the PR from every sweep (`--track` filters on exact match)."""
+    return value if value in TRACKS else "regular"
+
+
+def gate_block(s: dict) -> str:
+    """Say when CI never started, and why.
+
+    Without this a gated PR renders as a plain fail count — the shape that made
+    "4 pass, 4 fail" look like a test problem on a PR whose tests never ran.
+    """
+    gated = s.get("gated") or {}
+    if not gated:
+        return ""
+    reasons = {}
+    for wf, d in gated.items():
+        reasons.setdefault(d.get("reason", "?"), []).append(wf)
+    bits = []
+    for reason, wfs in reasons.items():
+        fix = " &mdash; a re-run from here clears it" if any(
+            gated[w].get("rerunnable") for w in wfs) else ""
+        bits.append(
+            f'<div class="bad"><b>CI never started</b> &middot; '
+            f'{GATE_LABEL.get(reason, esc(reason))}{fix}'
+            f'<div class="dim">{esc(", ".join(sorted(wfs)))}</div></div>'
+        )
+    return "".join(bits)
 
 
 def track_cell(pr: str, track: str) -> str:
@@ -720,7 +784,7 @@ def track_cell(pr: str, track: str) -> str:
     after tagging, and a one-way flip makes the current value ambiguous."""
     opts = "".join(
         f'<option value="{t}"{" selected" if track == t else ""}>{t}</option>'
-        for t in ("regular", "high")
+        for t in TRACKS
     )
     return (f'<form class="inline" method="post" action="/api/track">'
             f'<input type="hidden" name="pr" value="{esc(pr)}">'
@@ -1161,7 +1225,7 @@ class Handler(BaseHTTPRequestHandler):
                     pr = parse_pr(form.get("ref", ""))
                     prev = wl.get(pr, {})
                     wl[pr] = {
-                        "track": form.get("track", "regular"),
+                        "track": pick_track(form.get("track")),
                         "added": prev.get("added", now()),
                         "note": prev.get("note", ""),
                         "repo": self.repo,
@@ -1175,7 +1239,12 @@ class Handler(BaseHTTPRequestHandler):
                 elif self.path == "/api/track":
                     pr = parse_pr(form.get("pr", ""))
                     if pr in wl:
-                        wl[pr]["track"] = form.get("track", "regular")
+                        wl[pr]["track"] = pick_track(form.get("track"))
+                        # Moving off `draft` by hand must not leave the restore
+                        # target behind: the next sweep would read a stale
+                        # prev_track and bounce the PR back to it.
+                        if wl[pr]["track"] != "draft":
+                            wl[pr].pop("prev_track", None)
                 elif self.path == "/api/priority":
                     pr = parse_pr(form.get("pr", ""))
                     if pr in wl and form.get("priority") in PRIORITIES:
