@@ -1125,8 +1125,16 @@ def render_triage_panel(wl: dict, st: dict) -> str:
         f"progress. They have real failing NVIDIA jobs but no verdict yet, and "
         f"deciding <b>re-run</b> vs <b>merge main</b> vs <b>real bug</b> means "
         f"reading the job logs, which needs a Claude turn &mdash; neither this "
-        f"page nor <i>Refresh now</i> can do it. The next scheduled sweep picks "
-        f"them up automatically; to do it now, paste this to Claude:</div>"
+        f"page nor <i>Refresh now</i> can do it.<br>"
+        # The old wording said "needs a Claude turn" and "the next sweep picks
+        # them up automatically" in one breath, which reads as a contradiction
+        # unless you already know the schedule IS a Claude turn. Say so.
+        f"<b>Yes, it does this by itself.</b> The scheduled sweep is a Claude "
+        f"cron job, not a headless script, so it runs <code>/ci-analysis</code> "
+        f"on everything in this panel in the same turn. Two caveats: it only "
+        f"fires while the session is <b>idle</b>, and the cron jobs "
+        f"<b>expire after 7 days</b> (see the arm line at the top). "
+        f"To do it now instead, paste this to Claude:</div>"
         f'<div style="display:flex; gap:10px; align-items:center;">'
         f'<input class="note" id="triagecmd" type="text" readonly value="{esc(cmd)}">'
         f'<button class="primary" type="button" onclick="copyEl(\'triagecmd\', this)">Copy</button>'

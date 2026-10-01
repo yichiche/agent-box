@@ -296,10 +296,20 @@ demotes cascades to gates. Without this, a PR whose only problem is a dead
 watcher gets sent to triage with a phantom "real" failure beside it.
 
 **Verdicts survive re-sweeps.** `apply-verdict` records a fingerprint of the
-failing jobs it judged. A later sweep that sees the same head SHA and the same
-failures keeps the verdict instead of resetting to `awaiting-triage` — otherwise
-a `code-fix` decision silently evaporates and the PR is re-triaged forever. A new
-push, or a different set of failures, correctly re-opens triage.
+failing jobs it judged. A later sweep that sees the same head SHA keeps the
+verdict instead of resetting to `awaiting-triage` — otherwise a `code-fix`
+decision silently evaporates and the PR is re-triaged forever.
+
+The match is a **subset** test, not equality. The failing set legitimately
+shrinks between sweeps — a flaky shard goes green on its own, a cascade gets
+demoted — and equality reads that as a new situation and throws away a verdict
+that still accounts for every red that is left. A genuinely *new* failing job
+re-opens triage (nobody has judged it); a new push does too, via the head SHA.
+
+The judged action lives in `verdict_action`, separate from `last_action`.
+`last_action` is scratch that any sweep may overwrite with `awaiting-triage`, so
+holding the verdict off it loses the decision the moment one sweep re-opens
+triage — and the hold can then never put it back.
 
 ### Phase B — triage (the agent, via `/ci-analysis`)
 
@@ -611,6 +621,13 @@ python3 watch.py arm-status --record "high=23 */2 * * *, regular=17 9 * * *"
 >
 > A headless crontab variant would dodge both, but it cannot run `/ci-analysis`,
 > which is the entire gate on re-running. That trade is why it is not the default.
+
+**So does triage happen on its own? Yes.** The schedule is a Claude cron job,
+not a shell script, so the scheduled sweep runs Phase B in the same turn and
+clears the "Waiting on triage" panel without being asked. The panel says so
+explicitly — it used to say "needs a Claude turn" and "the next sweep picks them
+up automatically" in one breath, which reads as a contradiction unless you
+already know the sweep *is* a Claude turn.
 
 ## Data
 

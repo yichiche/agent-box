@@ -278,6 +278,33 @@ def failure_fingerprint(groups: dict) -> str:
     ))
 
 
+def fingerprint_jobs(fp: str) -> set[str]:
+    """The individual `workflow:job` pairs inside a fingerprint."""
+    out = set()
+    for part in (fp or "").split("||"):
+        if ":" not in part:
+            continue
+        wf, _, sig = part.partition(":")
+        out |= {f"{wf}:{j}" for j in sig.split("|") if j}
+    return out
+
+
+def verdict_still_covers(judged_fp: str, current_fp: str) -> bool:
+    """True when every failure still red was already covered by the verdict.
+
+    Exact equality was wrong in one direction. The failing set legitimately
+    *shrinks* between sweeps — a flaky shard goes green on its own, a cascade
+    gets demoted — and an equality test reads that as "new situation" and throws
+    away a verdict that still accounts for everything left. #41134 was judged
+    `wait-upstream` for shards 2, 9 and 10; 9 and 10 later passed, and the PR
+    went straight back into the triage queue to be told the same thing about
+    shard 2. A genuinely *new* failing job is different: nobody has judged it,
+    so that correctly re-opens triage.
+    """
+    judged, current = fingerprint_jobs(judged_fp), fingerprint_jobs(current_fp)
+    return bool(current) and current <= judged
+
+
 def ci_verdict(s: dict) -> str:
     """Current in-scope CI state, not our internal bookkeeping."""
     # A conflicting branch is a failure in its own right: CI cannot complete, so
@@ -1053,14 +1080,22 @@ def cmd_sweep(a) -> None:
             continue
 
         fp = failure_fingerprint(groups)
-        if (s.get("verdict_sha") == sha and s.get("verdict_fingerprint") == fp
-                and s.get("last_action") in ACTIONS):
-            # Already judged, same head SHA, same failing jobs. Re-triaging would
-            # throw away the verdict — and for `code-fix` that means quietly
-            # re-queueing a PR we already decided the author has to fix.
-            print(f"        -> keeping verdict `{s['last_action']}` "
-                  f"(same failures, already judged {tw(s.get('verdict_at'))})")
-            row["outcome"] = f"verdict-held:{s['last_action']}"
+        judged_fp = s.get("verdict_fingerprint", "")
+        judged_action = s.get("verdict_action") or s.get("last_action")
+        if (s.get("verdict_sha") == sha and judged_action in ACTIONS
+                and (judged_fp == fp or verdict_still_covers(judged_fp, fp))):
+            s["last_action"] = judged_action  # restore if a sweep clobbered it
+            # Already judged, same head SHA, and nothing red that the verdict
+            # did not already cover. Re-triaging would throw away the verdict —
+            # and for `code-fix` that means quietly re-queueing a PR we already
+            # decided the author has to fix.
+            gone = len(fingerprint_jobs(judged_fp) - fingerprint_jobs(fp))
+            how = "same failures" if judged_fp == fp else (
+                f"{gone} of the judged failures have since gone green; the rest "
+                f"are unchanged")
+            print(f"        -> keeping verdict `{judged_action}` "
+                  f"({how}, already judged {tw(s.get('verdict_at'))})")
+            row["outcome"] = f"verdict-held:{judged_action}"
             report.append(row)
             continue
 
@@ -1128,6 +1163,11 @@ def cmd_apply_verdict(a) -> None:
     s["verdict_at"] = now()
     s["verdict_sha"] = sha
     s["verdict_fingerprint"] = failure_fingerprint(s.get("failed_groups") or {})
+    # Kept apart from `last_action` on purpose. `last_action` is scratch — any
+    # sweep may overwrite it with `awaiting-triage` — so holding the verdict off
+    # it loses the decision the moment one sweep re-opens triage, and the hold
+    # can then never restore it. This is the durable record of what was judged.
+    s["verdict_action"] = a.action
 
     if a.action != "re-run":
         note = {
