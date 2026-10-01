@@ -130,8 +130,10 @@ PAGE = """<!doctype html>
   .note {{ width:100%; min-width:160px; padding:5px 7px; border-radius:5px;
     border:1px solid var(--line); background:var(--bg); color:var(--fg);
     font:inherit; font-size:12px; }}
-  .reportblock {{ width:100%; max-height:260px; overflow:auto; padding:11px;
-    border-radius:6px; border:1px solid var(--line); background:var(--bg);
+  /* No fill and no border: the block is text to be read and copied, and a
+     sunken box around it only competes with the panel it already sits in. */
+  .reportblock {{ width:100%; max-height:260px; overflow:auto; padding:2px 0;
+    background:transparent; border:none;
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px;
     line-height:1.6; }}
   #reportsrc {{ position:absolute; left:-9999px; width:1px; height:1px; }}
