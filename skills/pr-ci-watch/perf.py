@@ -48,6 +48,11 @@ EXCLUDE = re.compile(
 
 SEP = re.compile(r"^[\s|:-]+$")
 UNIT_METRIC = [(re.compile(r"tok/s|tokens?/s|throughput", re.I), "throughput")]
+# What a delta column can be called. `change` belongs here as much as `Δ`:
+# a header of `tok/s change | TPOT change` is the same table as `… | Δ`, and
+# leaving the word out sent the whole table down the row-label path, where the
+# label is a concurrency number and nothing matches.
+DELTA_HEADER = re.compile(r"Δ|delta|change|diff|%", re.I)
 
 
 def _tables(body: str):
@@ -106,12 +111,9 @@ def _collect(body: str) -> dict[str, list[tuple[float, bool]]]:
             m = _metric_of(cell)
             if m:
                 current = m
-            if current and (PCT.search(cell) or re.search(r"Δ|delta|%", cell, re.I)
-                            or m):
+            if current and (PCT.search(cell) or DELTA_HEADER.search(cell) or m):
                 col[idx] = current
-        header_mapped = any(
-            re.search(r"Δ|delta|%", header[i], re.I) for i in col
-        )
+        header_mapped = any(DELTA_HEADER.search(header[i]) for i in col)
         for cells in rows:
             label = cells[0] if cells else ""
             if EXCLUDE.search(label):
@@ -132,6 +134,36 @@ def _collect(body: str) -> dict[str, list[tuple[float, bool]]]:
     return out
 
 
+# Last resort: the claim is a sentence, not a table.
+#
+#   "At TP4, median TPOT drops from 3.50 to 2.78 ms at concurrency 1
+#    and from 4.92 to 3.91 ms at concurrency 4."
+#
+# Real e2e numbers, but absolute and unpercented, so nothing above sees them.
+# Scoped tightly on purpose: the metric name must appear in the same sentence
+# and before the `from A to B`, or "from 4 to 8" in a sentence about
+# concurrency becomes a 100% regression.
+PROSE = re.compile(
+    r"\b(TPOT|TTFT|E2E|throughput)\b[^.;]{0,100}?"
+    r"\bfrom\s+(\d+(?:\.\d+)?)\s*\w*\s+to\s+(\d+(?:\.\d+)?)\b",
+    re.I,
+)
+
+
+def _prose(body: str) -> dict[str, list[float]]:
+    """metric -> [delta %] computed from `from A to B` sentences."""
+    out: dict[str, list[float]] = {}
+    for sentence in re.split(r"(?<=[.;])\s+", body):
+        if EXCLUDE.search(sentence):
+            continue
+        for m in PROSE.finditer(sentence):
+            key = _metric_of(m.group(1))
+            before, after = float(m.group(2)), float(m.group(3))
+            if key and before:
+                out.setdefault(key, []).append((after - before) / before * 100)
+    return out
+
+
 def extract(body: str) -> str:
     """-> 'TPOT 4.6% improvement, TTFT 5.2% regression', or '' if none found."""
     if not body:
@@ -143,6 +175,12 @@ def extract(body: str) -> str:
         # median across rows so a multi-shape sweep is not cherry-picked.
         chosen = [d for d, pref in vals if pref] or [d for d, _ in vals]
         found[key] = statistics.median(chosen)
+
+    # Only where the tables were silent. A table that states its own delta is
+    # the PR's considered claim; prose is what is left when there is no table.
+    for key, deltas in _prose(body).items():
+        if key not in found and deltas:
+            found[key] = statistics.median(deltas)
 
     # Both of TTFT/TPOT stated -> that pair is the story. Otherwise fill up to
     # two metrics from the default order, so a PR that quotes only TTFT still

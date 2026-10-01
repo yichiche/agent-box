@@ -57,8 +57,41 @@ an improvement, `-2.9% throughput` is a regression. Reciprocal restatements
 (`Interactivity (1 / TPOT)`) and accuracy tables are excluded; counting the
 former would report one result as both an improvement and a regression.
 
+A delta column is recognised by `DELTA_HEADER` — `Δ`, `delta`, `change`,
+`diff`, `%`. **`change` is load-bearing**: a header of `tok/s change | TPOT
+change` is the same table as `… | Δ`, and while the word was missing the whole
+table fell through to the metric-in-first-cell path, where the first cell is a
+concurrency number and nothing matches — so a PR with perfectly good numbers
+reported none at all.
+
+When no table yields a metric, `_prose()` is tried as a last resort: a sentence
+like *"median TPOT drops **from 3.50 to 2.78** ms at concurrency 1"* has real
+e2e numbers, just absolute and unpercented, so nothing above sees them. It is
+scoped tightly — the metric name must be in the same sentence **and before**
+the `from A to B`, or "from 4 to 8" in a sentence about concurrency becomes a
+100% regression — and it only fills metrics the tables were silent on, because
+a table stating its own delta is the PR's considered claim. It reads one pair
+per metric mention, so a sentence quoting two shapes contributes the first.
+
+**A blank second line means the PR states no percentage delta, not that it is
+slow.** Four shapes legitimately produce nothing, and they are not bugs:
+
+| Shape | Example |
+|---|---|
+| Bug/crash fix with descriptive tables only | before/after behaviour, log lines, no numbers |
+| Absolute numbers with no delta stated | `Conc \| 4 \| 8 \| …` rows of raw tok/s — the extractor reports the PR's *claim*, it does not compute deltas itself |
+| Accuracy-only tables | excluded by `EXCLUDE` on purpose |
+| Kernel microbenchmarks only | `TP4 speedup 2.30x`, `µs` columns — no e2e metric is named, and a kernel win is not an e2e perf claim (see `memory/workflows/` on claiming perf only on `canonical-8k`) |
+
+A table whose metric is named only in the **prose above it** (`| Batch size |
+TP4 aiter | TP4 this PR | TP4 change |`, under a paragraph saying "decode step
+time … in ms") still yields nothing from the table itself — headers and first
+cells are all that is read. That shape is why the prose fallback exists.
+
 Override a poor extraction with `watch.py set <pr> --note "..."`; check one
-without a sweep via `python3 perf.py <pr>`.
+without a sweep via `python3 perf.py <pr>`. If a PR you expect numbers from
+shows none, run that first — it prints what was collected and tells you whether
+the PR is silent or the extractor missed it.
 
 The report token comes from the same `ci_verdict` the table shows (`CI clear` /
 `CI running` / `CI red`), with `code-fix`, `merge-main` and `wait-upstream`
@@ -190,7 +223,26 @@ failures keeps the verdict instead of resetting to `awaiting-triage` — otherwi
 a `code-fix` decision silently evaporates and the PR is re-triaged forever. A new
 push, or a different set of failures, correctly re-opens triage.
 
-### Phase B — triage (you, via `/ci-analysis`)
+### Phase B — triage (the agent, via `/ci-analysis`)
+
+**Do this in the same turn as the sweep, without being asked.** A sweep that
+ends with "N PRs need triage" and stops has done half a job: the PR sits on
+`awaiting-triage` until a human notices and pastes a command back, which is the
+toil this skill exists to remove. If the sweep prints `TRIAGE REQUIRED`, work
+the list immediately, record a verdict for each, and only then report.
+
+Two things that are **not** reasons to stop and ask first:
+
+- *"The live checks have moved on since the failure was recorded."* Re-sweep
+  with `--force` and triage what is red now. A re-run finishing between the
+  sweep and the triage is the normal case, not an obstacle.
+- *"The verdict might be `code-fix`, which is serious."* `code-fix` is recorded
+  like any other verdict — it is reported to the user, never commented on the
+  author's PR, and it is what *stops* the tool re-running CI. Recording it
+  early is the safe direction, not the risky one.
+
+Ask the user only when the evidence genuinely does not separate two actions;
+say which two and what would settle it.
 
 For each PR the sweep flagged, run `/ci-analysis <pr url>`, read its **Root
 Cause Failures** table, and reduce it to **one** action:
@@ -332,6 +384,66 @@ If you add a column, add a `<col>` and re-balance to 100 — and check the floor
 widths (`1250px × n%`) against what each control actually needs, not against
 what its text needs.
 
+**Per-PR history (`▸ history`).** The **toggle** sits at the foot of the
+**Status** cell, because history is that column's long form — how the state got
+here. The **panel** it opens is a full-width `<tr>` below the row, where the
+long verdict summaries have room to read; indenting it to Status would spend
+two thirds of the table on margin.
+
+The toggle is labelled rather than a bare triangle: under a stack of other
+small blocks in Status, a lone glyph reads as punctuation, not a control. Only
+the triangle rotates when open.
+
+That the panel is a second `<tr>` is the one thing it costs — row dragging has
+to move the pair together (`histOf` / `tailOf` / `draggedHist`), or a panel
+ends up describing whichever row it lands under.
+
+Nothing new is recorded for this — `history.py`
+reconstructs the timeline from the two files the sweep already writes, neither
+of which reads as a story alone: `sweep.log` holds every mutation but
+interleaved across all PRs, and `sweeps/*.json` holds every sweep's view of
+every PR including the long runs where nothing changed.
+
+So the log is filtered to one PR and the sweep records are collapsed to their
+**transitions** — a new head SHA (the author pushed), a changed CI state. The
+collapsing is the load-bearing part twice over: 36 sweeps of an idle PR is 36
+identical rows, and because only transitions survive, **a state line's
+timestamp *is* the moment the PR entered that state**. "Since when has this
+been green" is read straight off the top green line, with no arithmetic.
+
+Lines are coloured by how bad the news is — green clean, red failing, amber
+in-flight or stuck, grey bookkeeping:
+
+```
+10/01 13:44  author pushed — new head cf9e0e67                        (grey)
+10/01 13:23  re-run in flight — watcher died on its own (31 pass…)    (amber)
+10/01 12:58  verdict merge-main — hicache 3FS eval accuracy 0.005…    (amber)
+10/01 12:57  CI red — a real NVIDIA job failed (31 pass, 7 fail…)     (red)
+10/01 00:56  verdict code-fix — AttributeError 'GDNAttnBackend'…      (red)
+09/30 22:59  conflicts with main — CI cannot complete                 (red)
+```
+
+Three judgements behind that, each of which would otherwise mislead:
+
+- **`out-of-scope` IS the green state**, not a third thing: every red check is
+  an aggregation gate mirroring a vendor workflow, so no NVIDIA job is failing.
+  Calling it anything else would hide the moment a PR came good.
+- **…unless jobs are still queued.** `out-of-scope` is recorded as soon as
+  nothing *in scope* is failing, which happens while most of the run is still
+  pending; that reads as `CI running — nothing failing so far`. Calling it
+  green there would put the "went green" timestamp an hour before CI finished.
+- **Collapsing is on the state, not the raw outcome.** `needs-triage` followed
+  by `verdict-held:code-fix` is one unbroken stretch of red; printing both
+  would read as two separate failures.
+
+The job counts ride along as evidence — "CI green" beside `59 pass, 2 fail` is
+honest about the two gates still red, where the bare word reads like a
+contradiction.
+
+Verdict summaries are free text typed into `apply-verdict`, so everything
+lifted out of the log is HTML-escaped in `_kind()`; only the markup that
+function adds itself is literal.
+
 **Quick add:** paste a PR link into the box at the top and pick a track. Accepts
 `https://github.com/sgl-project/sglang/pull/41870`, a `/files` deep link, `#41870`,
 or `41870`.
@@ -344,6 +456,7 @@ or `41870`.
 | `Refresh now` | Runs `sweep --track all --force` **without `--apply`** in a subprocess: re-reads merge state and red NVIDIA CI for every PR. Comments nothing, re-runs nothing | no |
 | `Notify author` | Runs `watch.py notify --pr N --apply` — posts the conflict notice for that PR now instead of waiting for the next sweep. Shown **only** when the PR is conflicting and not yet notified for this head SHA; asks for confirmation first. The result (sent, with the comment URL — or why not) comes back as a banner, and the PR is re-swept so a button standing on stale state disappears | no |
 | `⠿` grip | Drag a row by its grip to reorder it within its sort bucket. Manual order is a tiebreaker only, so a drop into another bucket is **refused** (the target row outlines in red) rather than accepted and sprung back on reload | no |
+| `▸ history` (foot of Status) | Expands that PR's history as a full-width row below — every verdict, re-run, conflict notice and push, newest first. Fetched from `/api/history` on first open, so a page that redraws every 60s does not pay for panels nobody opened | no |
 | Track dropdown | Sets `regular` or `high` explicitly, both directions | no |
 | `Copy` (triage panel) | Copies `/pr-ci-watch triage <prs>` to paste into Claude | yes, to run it |
 | `Copy` (status block) | Copies the `<P0><CI clear><PR…>` report as **rich text + plain text**, so `<PR41133>` stays a hyperlink when pasted into Teams | no |
@@ -366,9 +479,17 @@ result. Rows are ordered **Pass first** (those are the ones you can go merge), t
 P0 → P2, then **conflicts last within each priority** (nothing can progress on
 them until the author rebases), then your manual drag order, then PR number. **Action** is what to do — `CI re-run` (one is in flight),
 `Solve conflict`, `Merge main`, `Code fix`, `Triage`, `Wait upstream`, or `-`.
-**Status** carries the job counts (`34 pass, 2 fail, 10 running`), the conflict
+**Status** carries the job counts (`29 pass, 2 fail, 3 running, 6 queued`), the conflict
 notice proof, and the triage reason; it flags the counts as stale when they
 predate a re-run.
+
+`gh pr checks` lumps `QUEUED` and `IN_PROGRESS` into one `pending` bucket, but
+they answer different questions — queued means the runners are busy, in
+progress means it is actually testing — so the sweep splits them using the
+`state` field and `tally_bits()` renders `running` as pending minus queued.
+`queued` is stored as a *subset* of `pending`, so every existing `pending`
+check (the Verdict column, the clean-CI print) keeps working untouched, and a
+tally recorded before the split simply shows everything as running.
 
 The internal verdicts map onto those columns as:
 
@@ -421,8 +542,8 @@ python3 watch.py arm-status --record "high=23 */2 * * *, regular=17 9 * * *"
 |---|---|
 | `watchlist.json` | PR → track, added, note, repo |
 | `state.json` | per PR: head SHA, `conflict_comment_sha`, `reruns{workflow:{sha,count}}`, last verdict/action, last sweep. Plus `_config`: `enabled`, `group_order` (the dragged tab order) |
-| `sweeps/<ts>.json` | one record per sweep |
-| `sweep.log` | append-only audit of every mutation |
+| `sweeps/<ts>.json` | one record per sweep. Also the source of the `▸` history panel's push/outcome transitions — don't prune it without meaning to shorten that |
+| `sweep.log` | append-only audit of every mutation. The other half of the history panel |
 
 ## Load-bearing gotchas
 

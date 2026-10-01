@@ -194,6 +194,24 @@ def tw(iso: str | None) -> str:
     return t.astimezone(TAIPEI).strftime("%m/%d %H:%M") if t else "never"
 
 
+def tally_bits(t: dict | None) -> str:
+    """`48 pass, 16 fail, 10 running, 13 queued` — zeroes omitted.
+
+    `running` is pending minus queued, so the two never double-count. Tallies
+    recorded before `queued` existed have none, which reads as "all of it is
+    running" — the old behaviour, not a wrong number.
+    """
+    t = t or {}
+    queued = t.get("queued", 0)
+    counts = (
+        ("pass", t.get("pass", 0)),
+        ("fail", t.get("fail", 0)),
+        ("running", max(t.get("pending", 0) - queued, 0)),
+        ("queued", queued),
+    )
+    return ", ".join(f"{n} {k}" for k, n in counts if n)
+
+
 def failure_fingerprint(groups: dict) -> str:
     """Identity of the actionable failures, so a verdict can be known to still
     apply. Gate-only workflows are excluded: they flap as other runs finish."""
@@ -514,12 +532,19 @@ def failed_in_scope(pr: str, repo: str) -> tuple[dict, dict]:
     )
     checks = json.loads(raw) if raw.strip() else []
     groups: dict[str, dict] = {}
-    tally = {"pass": 0, "fail": 0, "pending": 0, "skipping": 0}
+    tally = {"pass": 0, "fail": 0, "pending": 0, "skipping": 0, "queued": 0}
     for c in checks:
         if not in_scope(c.get("workflow", "")):
             continue
         bucket = c.get("bucket", "")
         tally[bucket] = tally.get(bucket, 0) + 1
+        # gh lumps QUEUED and IN_PROGRESS into one `pending` bucket, but they
+        # mean different things to someone deciding whether to wait: queued is
+        # "the runners are busy", in progress is "it is actually testing".
+        # Counted as a *subset* of pending so every existing `pending` check
+        # (the Verdict column, the clean-CI print) keeps working untouched.
+        if bucket == "pending" and c.get("state") == "QUEUED":
+            tally["queued"] += 1
         if bucket != "fail":
             continue
         wf = c["workflow"]

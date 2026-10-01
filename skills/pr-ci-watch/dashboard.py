@@ -25,6 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from history import history_html  # noqa: E402
 from watch import (  # noqa: E402
     DATA_DIR,
     PRIORITIES,
@@ -44,6 +45,7 @@ from watch import (  # noqa: E402
     report_entries,
     report_text,
     row_order,
+    tally_bits,
     log_line,
     save,
     set_monitoring,
@@ -148,6 +150,21 @@ PAGE = """<!doctype html>
   tr.dragging .grip {{ cursor:grabbing; }}
   /* The one row a drop is not allowed into: a different sort bucket. */
   tr.nodrop {{ outline:1px dashed var(--bad); outline-offset:-1px; }}
+  /* History toggle. It is labelled, not a bare triangle: in Status it sits
+     under a stack of other small blocks, where a lone glyph reads as
+     punctuation rather than a control. Only the triangle rotates. */
+  .disc {{ background:none; border:none; color:var(--dim); cursor:pointer;
+    font:inherit; font-size:11px; padding:3px 0 0; line-height:1;
+    display:inline-flex; align-items:center; gap:4px; }}
+  .disc:hover {{ color:var(--fg); }}
+  .disc .tri {{ display:inline-block; transition:transform .12s; }}
+  .disc.open .tri {{ transform:rotate(90deg); }}
+  /* Full width, below the row: the long verdict summaries need the room, and
+     indenting to Status would waste two thirds of the table on margin. */
+  tr.hist > td {{ padding:2px 8px 10px 30px; border-bottom:1px solid var(--line); }}
+  .histbox {{ font-size:12px; }}
+  .histline {{ display:flex; gap:10px; align-items:baseline; padding:2px 0; }}
+  .histat {{ flex:0 0 auto; width:76px; }}
   tr:last-child td {{ border-bottom:none; }}
   a {{ color:var(--accent); text-decoration:none; }}
   a:hover {{ text-decoration:underline; }}
@@ -317,7 +334,35 @@ the ON/OFF switch. Data: <span class="mono">{data}</span></div>
     }});
     initTabDrag();
     initRowDrag();
+    initHistory();
   }});
+
+  // Per-PR history, fetched on first open rather than rendered into every row:
+  // building it means reading the sweep archive, and a page that redraws every
+  // 60s should not pay for panels nobody opened.
+  function initHistory() {{
+    document.querySelectorAll('.disc').forEach(btn => {{
+      btn.addEventListener('click', () => {{
+        const pr = btn.dataset.pr;
+        const row = document.querySelector(`tr.hist[data-for="${{pr}}"]`);
+        if (!row) return;
+        const open = row.hidden;
+        row.hidden = !open;
+        btn.classList.toggle('open', open);
+        btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        if (open && !row.dataset.loaded) {{
+          row.dataset.loaded = '1';
+          fetch('/api/history?pr=' + encodeURIComponent(pr))
+            .then(r => r.text())
+            .then(h => {{ row.querySelector('.histbox').innerHTML = h; }})
+            .catch(() => {{
+              row.dataset.loaded = '';
+              row.querySelector('.histbox').textContent = 'could not load history';
+            }});
+        }}
+      }});
+    }});
+  }}
 
   // Rows reorder by dragging their grip, same gesture as the tabs. The row
   // moves in the DOM as you drag, so the landing spot is visible before you
@@ -326,7 +371,14 @@ the ON/OFF switch. Data: <span class="mono">{data}</span></div>
     const body = document.querySelector('#prtable tbody');
     if (!body) return;
     const rows = () => [...body.querySelectorAll('tr[data-pr]')];
-    let dragged = null, moved = false;
+    // A row owns the history panel directly beneath it; the two must travel
+    // together or the panel ends up describing whichever row it lands under.
+    const histOf = tr => {{
+      const n = tr.nextElementSibling;
+      return (n && n.classList.contains('hist')) ? n : null;
+    }};
+    const tailOf = tr => histOf(tr) || tr;
+    let dragged = null, draggedHist = null, moved = false;
     rows().forEach(tr => {{
       const grip = tr.querySelector('.grip');
       if (!grip) return;
@@ -335,7 +387,7 @@ the ON/OFF switch. Data: <span class="mono">{data}</span></div>
       grip.addEventListener('mousedown', () => {{ tr.draggable = true; }});
       grip.addEventListener('mouseup', () => {{ tr.draggable = false; }});
       tr.addEventListener('dragstart', e => {{
-        dragged = tr; moved = false;
+        dragged = tr; draggedHist = histOf(tr); moved = false;
         tr.classList.add('dragging');
         e.dataTransfer.effectAllowed = 'move';
         try {{ e.dataTransfer.setData('text/plain', tr.dataset.pr); }} catch (_) {{}}
@@ -345,7 +397,7 @@ the ON/OFF switch. Data: <span class="mono">{data}</span></div>
         tr.draggable = false;
         rows().forEach(r => r.classList.remove('nodrop'));
         if (moved) saveRowOrder();
-        dragged = null;
+        dragged = null; draggedHist = null;
       }});
       tr.addEventListener('dragover', e => {{
         if (!dragged || dragged === tr) return;
@@ -360,7 +412,10 @@ the ON/OFF switch. Data: <span class="mono">{data}</span></div>
         e.dataTransfer.dropEffect = 'move';
         const r = tr.getBoundingClientRect();
         const before = (e.clientY - r.top) < r.height / 2;
-        body.insertBefore(dragged, before ? tr : tr.nextSibling);
+        // Landing "after tr" means after tr's own history panel, not between
+        // the two.
+        body.insertBefore(dragged, before ? tr : tailOf(tr).nextSibling);
+        if (draggedHist) body.insertBefore(draggedHist, dragged.nextSibling);
         moved = true;
       }});
       tr.addEventListener('dragleave', () => tr.classList.remove('nodrop'));
@@ -443,7 +498,7 @@ QUIET_ACTIONS = {"green", "out-of-scope"}
 
 ACTION_HINT = {
     "green": "nothing to do",
-    "awaiting-triage": "QUEUED — nothing is running; waiting for a Claude turn",
+    "awaiting-triage": "needs /ci-analysis — run `/pr-ci-watch triage <pr>`",
     "re-run": "re-ran; waiting on CI",
     "code-fix": "real bug in this PR — author must fix",
     "merge-main": "STUCK: PR is behind main — merge/rebase main",
@@ -568,10 +623,7 @@ def verdict_cell(s: dict) -> str:
 
 
 def tally_line(s: dict) -> str:
-    t = s.get("tally") or {}
-    bits = [f"{n} {k}" for k, n in
-            (("pass", t.get("pass", 0)), ("fail", t.get("fail", 0)),
-             ("running", t.get("pending", 0))) if n]
+    bits = tally_bits(s.get("tally"))
     if not bits:
         return ""
     # Say so when these counts predate the re-run, instead of quietly showing
@@ -580,10 +632,10 @@ def tally_line(s: dict) -> str:
     last_rerun = max((r.get("at", "") for r in (s.get("reruns") or {}).values()
                       if r.get("sha") == sha), default="")
     if last_rerun and last_rerun > (s.get("last_sweep") or ""):
-        return (f'<div class="warn"><b>{esc(", ".join(bits))}</b> — counts from '
+        return (f'<div class="warn"><b>{esc(bits)}</b> — counts from '
                 f'<i>before</i> the {esc(tw(last_rerun))} re-run; hit '
                 f"<b>Refresh now</b></div>")
-    return (f'<div><b>{esc(", ".join(bits))}</b>'
+    return (f'<div><b>{esc(bits)}</b>'
             f'<span class="dim"> @ {esc(tw(s.get("last_sweep")))}</span></div>')
 
 
@@ -652,6 +704,14 @@ def status_cell(pr: str, s: dict) -> str:
         # GPU; un") is worse than showing no reason at all.
         if s.get("last_verdict"):
             out.append(f'<div class="dim reason">{esc(s["last_verdict"])}</div>')
+    # The toggle sits in Status because history is this column's long form —
+    # how the state got here. The panel it opens is a full-width row below,
+    # where the long verdict summaries have room to read.
+    out.append(
+        f'<button class="disc" type="button" data-pr="{esc(pr)}" '
+        f'aria-expanded="false" title="show this PR\'s history">'
+        f'<span class="tri">&#9656;</span> history</button>'
+    )
     return "".join(out)
 
 
@@ -804,21 +864,23 @@ def render_table(wl: dict, st: dict, tab: str = "") -> str:
     # declared widths exceed the table width the browser rescales *everything*
     # proportionally, so the px columns get squeezed too and the knobs overflow
     # again. The floor is held by `table { min-width }` instead.
-    cols = "".join(
-        f'<col style="width:{w}%">' for w in (
-            3,    # grip   — leftmost, where a drag handle is looked for
-            6,    # Pri    — a <select>; see note below
-            18,   # PR + title + author
-            7,    # Group
-            7,    # Track  — a <select>
-            7,    # Merge  — fits the `conflict` / `unknown` pill unwrapped
-            6,    # Verdict
-            9,    # Action
-            29,   # Status — all the prose now lives here
-            5,    # Swept  — wraps to date / time, both halves unbroken
-            3,    # remove — a glyph, not the word; see below
-        )
+    widths = (
+        3,    # grip   — leftmost, where a drag handle is looked for
+        6,    # Pri    — a <select>; see note below
+        18,   # PR + title + author
+        7,    # Group
+        7,    # Track  — a <select>
+        7,    # Merge  — fits the `conflict` / `unknown` pill unwrapped
+        6,    # Verdict
+        9,    # Action
+        29,   # Status — all the prose now lives here
+        5,    # Swept  — wraps to date / time, both halves unbroken
+        3,    # remove — a glyph, not the word; see below
     )
+    cols = "".join(f'<col style="width:{w}%">' for w in widths)
+    # The history panel spans the table, so its colspan is derived rather than
+    # written down twice — a stale literal here silently misaligns every row.
+    span = len(widths)
     head = (
         "<tr><th></th><th>Pri</th><th>PR</th><th>Group</th><th>Track</th><th>Merge</th>"
         "<th>Verdict</th><th>Action</th><th>Status</th>"
@@ -851,6 +913,11 @@ def render_table(wl: dict, st: dict, tab: str = "") -> str:
             f'<button class="linkish" title="stop watching #{esc(pr)}" '
             f'aria-label="stop watching #{esc(pr)}">&times;</button>'
             f"</form></td></tr>"
+            # Kept immediately after its own row, and the drag moves the pair
+            # together — a history panel stranded under someone else's row is
+            # worse than no panel.
+            f'<tr class="hist" data-for="{esc(pr)}" hidden>'
+            f'<td colspan="{span}"><div class="histbox">loading…</div></td></tr>'
         )
     return (
         f'<table id="prtable"><colgroup>{cols}</colgroup><thead>{head}</thead>'
@@ -973,6 +1040,16 @@ class Handler(BaseHTTPRequestHandler):
         st = {k: v for k, v in raw_st.items() if not k.startswith("_")}
         if self.path.startswith("/api/report"):
             self._send(200, report_text(wl, st).encode(), "text/plain; charset=utf-8")
+            return
+        if self.path.startswith("/api/history"):
+            q = parse_qs(urlparse(self.path).query).get("pr") or [""]
+            try:
+                pr = parse_pr(q[0])
+            except SystemExit:
+                self._send(400, b"bad pr", "text/plain; charset=utf-8")
+                return
+            self._send(200, history_html(pr).encode(),
+                       "text/html; charset=utf-8")
             return
         if self.path.startswith("/api/state"):
             self._send(
