@@ -48,6 +48,7 @@ from watch import (  # noqa: E402
     tally_bits,
     TRACKS,
     GATE_BLOCKING,
+    on_hold,
     log_line,
     save,
     set_monitoring,
@@ -143,6 +144,11 @@ PAGE = """<!doctype html>
      minimal side padding, and their columns are sized for label + native
      dropdown arrow rather than for the text alone. */
   select.mini {{ width:100%; padding:4px 2px; font-size:11px; }}
+  button.hold {{ width:100%; margin-top:3px; padding:3px 2px; font-size:10px;
+                 border:1px solid #bbb; background:#f6f6f6; color:#666;
+                 border-radius:3px; cursor:pointer; }}
+  button.hold.on {{ background:#8a5a00; border-color:#8a5a00; color:#fff;
+                    font-weight:600; }}
   /* Drag handle. Only the grip starts a drag — a draggable <tr> would eat text
      selection and turn every PR link into a drag. */
   .grip {{ display:block; cursor:grab; color:var(--dim); user-select:none;
@@ -663,8 +669,18 @@ def action_cell(s: dict) -> str:
         out.append(f'<div class="dim">{esc(wf)} re-run &times;{rec.get("count", 0)}'
                    f' &middot; {esc(tw(rec.get("at")))}</div>')
     if a == "CI re-run" and not (s.get("reruns") or {}):
-        out.append('<div class="dim">queued — GitHub refused while the run was '
-                   "still going; next sweep retries</div>")
+        # Two very different states used to render identically. Only say GitHub
+        # refused when a POST was actually made and rejected — otherwise this
+        # is a decision the sweep recorded without `--apply`, and claiming an
+        # attempt that never happened is worse than saying nothing.
+        deferred = [r for r in (s.get("rerun_deferred") or {}).values()
+                    if r.get("sha") == sha]
+        if deferred:
+            out.append('<div class="dim">queued &mdash; '
+                       f'{esc(deferred[0].get("why", "re-run refused"))}</div>')
+        else:
+            out.append('<div class="dim">decided, not yet applied &mdash; the '
+                       "next <code>--apply</code> sweep performs it</div>")
     return "".join(out)
 
 
@@ -691,6 +707,17 @@ def status_cell(pr: str, s: dict) -> str:
     """
     action = s.get("last_action", "")
     quiet = action in QUIET_ACTIONS
+    if s.get("held"):
+        out = ['<div class="warn"><b>on hold</b> &mdash; watched, but this tool '
+               "will not re-run CI or comment on it</div>"]
+        g = gate_block(s)
+        if g:
+            out.append(g)
+        t = tally_line(s)
+        if t:
+            out.append(t)
+        out.append(history_toggle(pr))
+        return "".join(out)
     if action in SILENT_ACTIONS:
         return (
             f'<div class="dim">{esc(ACTION_HINT.get(action, action))}</div>'
@@ -811,6 +838,21 @@ def track_cell(pr: str, track: str) -> str:
             f'<input type="hidden" name="pr" value="{esc(pr)}">'
             f'<select class="mini" name="track" onchange="this.form.submit()">{opts}</select>'
             f"</form>")
+
+
+def hold_cell(pr: str, meta: dict) -> str:
+    """A hold is a promise the tool makes to you, so it has to be visible on the
+    row — not buried in the watchlist file."""
+    held = on_hold(meta)
+    label = "held" if held else "hold"
+    cls = " on" if held else ""
+    title = ("released on click — sweeps may re-run and comment again"
+             if held else "keep watching, but never re-run or comment")
+    return (f'<form class="inline" method="post" action="/api/hold">'
+            f'<input type="hidden" name="pr" value="{esc(pr)}">'
+            f'<input type="hidden" name="off" value="{"1" if held else ""}">'
+            f'<button class="mini hold{cls}" type="submit" title="{esc(title)}">'
+            f'{label}</button></form>')
 
 
 def grip_cell() -> str:
@@ -985,7 +1027,7 @@ def render_table(wl: dict, st: dict, tab: str = "") -> str:
             f'<span class="title dim" title="{esc(s.get("title"))}">{esc(s.get("title"))}</span>'
             f'<span class="dim">{"@" + esc(s.get("author")) if s.get("author") else ""}</span></td>'
             f'<td class="knob">{group_cell(pr, meta)}</td>'
-            f'<td class="knob">{track_cell(pr, track)}</td>'
+            f'<td class="knob">{track_cell(pr, track)}{hold_cell(pr, meta)}</td>'
             f"<td>{merge_cell(s)}</td>"
             f"<td>{verdict_cell(s)}</td>"
             f"<td>{action_cell(s)}</td>"
@@ -1266,6 +1308,15 @@ class Handler(BaseHTTPRequestHandler):
                         # prev_track and bounce the PR back to it.
                         if wl[pr]["track"] != "draft":
                             wl[pr].pop("prev_track", None)
+                elif self.path == "/api/hold":
+                    pr = parse_pr(form.get("pr", ""))
+                    if pr in wl:
+                        if form.get("off"):
+                            wl[pr].pop("hold", None)
+                        else:
+                            wl[pr]["hold"] = True
+                        log_line(f"#{pr} hold={'off' if form.get('off') else 'on'} "
+                                 f"via dashboard")
                 elif self.path == "/api/priority":
                     pr = parse_pr(form.get("pr", ""))
                     if pr in wl and form.get("priority") in PRIORITIES:

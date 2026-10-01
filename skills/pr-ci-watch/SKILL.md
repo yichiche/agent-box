@@ -236,6 +236,25 @@ gate renders red (**CI never started**, plus what unblocks it); a harmless one
 renders dim (*not a failure · `PR Test Extra` is opt-in…*), both annotated with
 how many of the fails they cover, so the numbers always add up.
 
+### `hold` — watched, never acted on
+
+The auto-resolved cases below act with no human in the loop, which is right
+until it is not: "leave this one alone" previously had no way to be said except
+removing the PR, which also loses its history. A held PR is still snapshotted
+every sweep and still shows its merge state, CI counts and gate reasons — the
+sweep simply makes no outward move on it: **no re-run, no conflict comment**.
+
+```
+python3 watch.py hold 41982 --reason "author is mid-rewrite"
+python3 watch.py hold 41982 --off
+```
+
+`apply-verdict` refuses outright on a held PR rather than quietly doing nothing.
+Setting a hold also drops a pending `re-run` decision that was never applied —
+otherwise releasing the hold would immediately act on a judgement made before
+you asked it to stop. `list` marks held PRs with `*` after the track; the
+dashboard puts a `hold` toggle under the track dropdown.
+
 ### Two failures the sweep resolves without a triage pass
 
 **Watcher-only → auto `re-run`.** A `wait-for-*` job that failed with *no* real
@@ -615,6 +634,12 @@ python3 watch.py arm-status --record "high=23 */2 * * *, regular=17 9 * * *"
 - **Gate-only red is not flaky red.** `pr-test-finish` / `pr-gate` failing alone
   usually means the root cause is in a vendor workflow this skill deliberately
   ignores. Report it; do not re-run it.
+- **A dry-run sweep still writes its decision to state.** `sweep` without
+  `--apply` performs no mutation on GitHub, but it does record `last_action` so
+  the dashboard reflects the latest read. A row can therefore say `CI re-run`
+  with nothing re-run yet — the Action cell distinguishes *decided, not yet
+  applied* from a re-run GitHub actually refused, and only the latter is
+  recorded (as `rerun_deferred`) by a real `--apply` attempt.
 - **`mergeable: UNKNOWN`** means GitHub is still computing — the script re-queries
   once after 15s. If it is *still* unknown, the conflict check is deferred to the
   next sweep (CI checks are evaluated as normal); it is never treated as clean.

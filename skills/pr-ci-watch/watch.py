@@ -505,6 +505,18 @@ def gate_reason(link: str) -> tuple[str, str, bool] | None:
     return found
 
 
+def on_hold(meta: dict) -> bool:
+    """`hold` means: keep watching, change nothing.
+
+    A sweep still snapshots a held PR and still shows its CI state, but makes
+    no outward move on it — no re-run, no conflict comment to its author. This
+    exists because the auto-resolved cases (watcher-only, rate-limit,
+    stale-draft) act with no human in the loop, and "do not touch this one"
+    had no way to be expressed.
+    """
+    return bool((meta or {}).get("hold"))
+
+
 def in_scope(workflow: str) -> bool:
     w = workflow or ""
     return not (VENDOR_RE.search(w) or ADMIN_RE.match(w) or EXTRA_SKIP_RE.search(w))
@@ -536,6 +548,37 @@ def cmd_add(a) -> None:
     log_line(f"add {' '.join(added)}")
 
 
+def cmd_hold(a) -> None:
+    wl = load(WATCHLIST, {})
+    st = load(STATE, {})
+    for ref in a.refs:
+        pr = parse_pr(ref)
+        if pr not in wl:
+            print(f"#{pr} is not on the watchlist")
+            continue
+        if a.off:
+            wl[pr].pop("hold", None)
+            st.get(pr, {}).pop("held", None)
+            print(f"#{pr} released — sweeps may act on it again")
+            log_line(f"#{pr} hold released")
+        else:
+            wl[pr]["hold"] = a.reason or True
+            # Drop a pending decision too. Leaving `re-run` on a held PR means
+            # the moment it is released the next sweep acts on a judgement made
+            # before the hold, which is not what holding it asked for.
+            s = st.setdefault(pr, {})
+            if s.get("last_action") == "re-run" and not (s.get("reruns") or {}):
+                s["last_action"] = "held"
+                s["last_verdict"] = "on hold — pending re-run decision dropped"
+                s["verdict_at"] = now()
+            s["held"] = True
+            print(f"#{pr} on hold — still watched, never acted on"
+                  + (f" ({a.reason})" if a.reason else ""))
+            log_line(f"#{pr} hold set{(': ' + a.reason) if a.reason else ''}")
+    save(WATCHLIST, wl)
+    save(STATE, st)
+
+
 def cmd_remove(a) -> None:
     wl = load(WATCHLIST, {})
     st = load(STATE, {})
@@ -564,7 +607,8 @@ def cmd_list(a) -> None:
     for pr, meta in sorted(wl.items(), key=lambda kv: int(kv[0])):
         s = st.get(pr, {})
         print(
-            f"{'#' + pr:>7}  {meta['track']:<8} {s.get('mergeable', '?'):<12} "
+            f"{'#' + pr:>7}  {(meta['track'] + ('*' if on_hold(meta) else '')):<8} "
+            f"{s.get('mergeable', '?'):<12} "
             f"{s.get('last_action', '-'):<13} {s.get('last_sweep', '-'):<21} "
             f"{(s.get('title') or '')[:60]}"
         )
@@ -794,6 +838,17 @@ def cmd_sweep(a) -> None:
                 wl[pr]["track"] = back
                 wl[pr].pop("prev_track", None)
             meta["track"] = back
+
+        if on_hold(meta):
+            # Deliberately after the snapshot: a held PR should still show
+            # current merge state and CI counts, it just must not be acted on.
+            s["held"] = True
+            print(f"#{pr}  HELD — snapshotting only; no re-run, no conflict notice"
+                  + (f" ({meta['hold']})" if isinstance(meta.get("hold"), str) else ""))
+            row["outcome"] = "held"
+            report.append(row)
+            continue
+        s.pop("held", None)
 
         # 1. conflict, once per head SHA
         if snap.get("mergeable") == "UNKNOWN":
@@ -1088,6 +1143,10 @@ def cmd_apply_verdict(a) -> None:
         log_line(f"#{pr} verdict={a.action} :: {a.summary}")
         return
 
+    if on_hold(load(WATCHLIST, {}).get(pr, {})):
+        die(f"#{pr} is on hold — nothing will be re-run. "
+            f"Release it first: watch.py hold {pr} --off")
+
     groups = s.get("failed_groups") or {}
     if not groups:
         die(f"#{pr} has no recorded failed in-scope workflows — re-run `sweep --pr {pr}`")
@@ -1125,6 +1184,12 @@ def cmd_apply_verdict(a) -> None:
                 else:
                     why = err.splitlines()[-1] if err else "rerun failed"
                 skipped.append(f"{wf} ({why})")
+                # Proof that the POST was actually made and refused. Without it
+                # the dashboard cannot tell a refused attempt from a decision
+                # that was never applied, and it used to assume the former —
+                # printing "GitHub refused" for a re-run nobody had tried yet.
+                s.setdefault("rerun_deferred", {})[wf] = {
+                    "sha": sha, "at": now(), "why": why}
                 continue
             # Store what failed, so the next sweep can tell "same failure again"
             # from "a different failure this time".
@@ -1279,6 +1344,12 @@ def main() -> None:
                    help="report label; defaults to P0 for --high, else P1")
     s.add_argument("--group", default="", help="tab to file it under, e.g. a model name")
     s.set_defaults(func=cmd_add)
+
+    s = sub.add_parser("hold", help="keep watching PR(s) but never act on them")
+    s.add_argument("refs", nargs="+")
+    s.add_argument("--off", action="store_true", help="release the hold")
+    s.add_argument("--reason", default="", help="why, shown on the dashboard")
+    s.set_defaults(func=cmd_hold)
 
     s = sub.add_parser("remove", help="stop watching PR(s)")
     s.add_argument("refs", nargs="+")
