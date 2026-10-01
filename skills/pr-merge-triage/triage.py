@@ -44,6 +44,7 @@ AITER_IMPORT = re.compile(r"\b(from|import)\s+aiter\b|from\s+aiter\.")
 NEW_ENV = re.compile(r"^\+\s*(SGLANG_\w+)\s*=\s*Env(\w+)\(([^)]*)\)")
 NEW_GLOBAL = re.compile(r"^\+([A-Z_][A-Z0-9_]{2,})\s*=")
 DEF_LINE = re.compile(r"^[-+]\s*(?:async\s+)?def\s+(\w+)\s*\(")
+IMPORT_LINE = re.compile(r"^[-+]\s*(from\s+[\w.]+\s+import|import\s+\w|#)")
 
 OK, WARN, BAD, UNK = "PASS", "CHECK", "FAIL", "?"
 
@@ -131,10 +132,25 @@ def analyse(pr: str, repo: str) -> dict:
     nonamd_new = [f for f in nonamd if f["new"]]
     nonamd_mod = [f for f in nonamd if not f["new"]]
 
-    # Guard state only matters for edits to code that already existed and is
-    # not already AMD-only by path.
-    unguarded = [f["path"] for f in nonamd_mod if guard_state(f) == "unguarded"]
-    partial = [f["path"] for f in nonamd_mod if guard_state(f) == "partial"]
+    # An edit that only *adds* lines to shared code — a new enum member, a new
+    # accessor, a new branch keyed on a name nothing selects yet — cannot change
+    # behaviour for anyone who does not opt into it. It is a shared-code touch,
+    # and it is the cheap kind. Separating it from a real edit is what keeps the
+    # blast-radius signal worth reading.
+    # A removed *import* line is not a behaviour rewrite — widening an import to
+    # pull in one more helper is the most common removal in an otherwise purely
+    # additive diff, and counting it flips a cheap PR into the expensive bucket
+    # for nothing.
+    def rewrites(f: dict) -> bool:
+        return any(not IMPORT_LINE.match(l) and l[1:].strip()
+                   for h in f["hunks"] for l in h["removed"])
+
+    additive = [f for f in nonamd_mod if not rewrites(f)]
+    edited = [f for f in nonamd_mod if rewrites(f)]
+
+    # Guard state only matters where existing shared behaviour was rewritten.
+    unguarded = [f["path"] for f in edited if guard_state(f) == "unguarded"]
+    partial = [f["path"] for f in edited if guard_state(f) == "partial"]
 
     added = [l for f in files for h in f["hunks"] for l in h["added"]]
     new_envs = [(m.group(1), m.group(2), m.group(3).strip())
@@ -171,9 +187,10 @@ def analyse(pr: str, repo: str) -> dict:
     return {
         "pr": pr, "repo": repo, "meta": meta, "files": files, "buckets": buckets,
         "amd_files": [f["path"] for f in amd_files],
-        "common_files": [f["path"] for f in nonamd_mod],
+        "common_files": [f["path"] for f in edited],
+        "additive_files": [f["path"] for f in additive],
         "new_files": [f["path"] for f in nonamd_new],
-        "hot_common": [f["path"] for f in nonamd_mod
+        "hot_common": [f["path"] for f in edited
                        if classify_path(f["path"]) == "hot-common"],
         "unguarded": unguarded, "partial": partial,
         "new_envs": new_envs, "new_globals": new_globals,
@@ -184,159 +201,208 @@ def analyse(pr: str, repo: str) -> dict:
     }
 
 
-def rows(a: dict) -> list[tuple[str, str, str, str]]:
-    """(check, verdict, evidence, remediation-if-not-pass)"""
+# --- scoring -----------------------------------------------------------------
+#
+# Two mechanisms, deliberately not merged into one number:
+#
+#   GATES  — binary, and no amount of good elsewhere substitutes for them. Each
+#            one marks something that is either a crash, a silent wrong answer,
+#            or a claim nobody can check. A PR with an open gate is not "high
+#            risk", it is unreviewable until the gate is answered.
+#   POINTS — risk that trades off. Shared code, size, flags, missing tests: each
+#            costs points, and the total says how much review the PR needs.
+#
+# Routing is a third, separate thing: who has to look at it. A PR can be 0
+# points and still need a community reviewer, because it edits shared code.
+
+GATES = {
+    "Guard choice": "aiter import must be gated by use_aiter, not is_hip alone "
+                    "— otherwise it crashes on an AMD box without AITER",
+    "Evidence": "a numerics change with no accuracy number cannot be reviewed, "
+                "only believed",
+    "Interface churn": "a rewritten shared signature must have every caller "
+                       "updated in the same PR",
+}
+BANDS = ((3, "LOW"), (7, "MEDIUM"), (12, "HIGH"))
+
+
+def band(points: int) -> str:
+    for limit, name in BANDS:
+        if points <= limit:
+            return name
+    return "SPLIT"
+
+
+def rows(a: dict) -> list[dict]:
+    """One dict per check: verdict, evidence, remediation, risk points, gate."""
     m, out = a["meta"], []
-    hot, common, unguarded, partial = (a["hot_common"], a["common_files"],
-                                       a["unguarded"], a["partial"])
+    hot, common = a["hot_common"], a["common_files"]
+    unguarded, partial, additive = a["unguarded"], a["partial"], a["additive_files"]
 
-    # 1. Blast radius
-    if not common and a["new_files"]:
-        out.append(("Blast radius", WARN,
-                    f"no existing shared file edited; {len(a['new_files'])} new "
-                    f"file(s) outside an AMD path: {', '.join(a['new_files'][:3])}",
-                    "confirm the new module is only imported from an AMD-guarded "
-                    "call site, or move it under an AMD-named path"))
-    elif not common:
-        out.append(("Blast radius", OK,
-                    f"{len(a['amd_files'])} file(s), all AMD-only paths", ""))
-    elif hot:
-        out.append(("Blast radius", BAD,
-                    f"touches hot common code: {', '.join(hot[:3])}"
-                    + (f" (+{len(hot)-3})" if len(hot) > 3 else ""),
-                    "needs a community reviewer; see if the change can move "
-                    "behind an AMD-only module instead"))
+    def row(check, vd, ev, act="", pts=0, gate=False):
+        out.append({"check": check, "verdict": vd, "evidence": ev,
+                    "action": act, "points": pts, "gate": gate})
+
+    # 1. Blast radius — how much of the world inherits this change
+    if hot:
+        row("Blast radius", BAD,
+            f"edits hot common code: {', '.join(hot[:3])}"
+            + (f" (+{len(hot)-3})" if len(hot) > 3 else ""),
+            "needs a community reviewer; check whether it can move behind an "
+            "AMD-only module instead", 4)
+    elif common:
+        row("Blast radius", WARN,
+            f"edits {len(common)} shared file(s): {', '.join(common[:3])}",
+            "confirm no NVIDIA/CPU behaviour changes", 2)
+    elif additive:
+        row("Blast radius", WARN,
+            f"shared files, additive only: {', '.join(additive[:3])}",
+            "cheap kind — nothing existing changes behaviour; say so in review", 1)
+    elif a["new_files"]:
+        row("Blast radius", WARN,
+            f"{len(a['new_files'])} new file(s) outside an AMD path: "
+            f"{', '.join(a['new_files'][:3])}",
+            "confirm the module is only imported from an AMD-guarded call site, "
+            "or move it under an AMD-named path", 1)
     else:
-        out.append(("Blast radius", WARN,
-                    f"{len(common)} common file(s): {', '.join(common[:3])}",
-                    "confirm no NVIDIA/CPU behaviour changes"))
+        row("Blast radius", OK, f"{len(a['amd_files'])} file(s), all AMD-only paths")
 
-    # 2. Guards
+    # 2. Guards — only meaningful where existing shared behaviour was rewritten
     if not common:
-        out.append(("AMD guard", OK, "n/a — no common code touched", ""))
+        row("AMD guard", OK, "n/a — no existing shared behaviour rewritten")
     elif unguarded:
-        out.append(("AMD guard", BAD,
-                    f"added code with no is_hip/use_aiter in hunk: "
-                    f"{', '.join(unguarded[:3])}",
-                    "wrap in `if _is_hip:` (all AMD GPUs) or `if _use_aiter:` "
-                    "(needs the AITER library), or justify why it is shared"))
+        row("AMD guard", BAD,
+            f"rewrites shared code with no is_hip/use_aiter in hunk: "
+            f"{', '.join(unguarded[:3])}",
+            "wrap in `if _is_hip:` (all AMD GPUs) or `if _use_aiter:` (needs the "
+            "AITER library) — or, if the bug is shared, leave it unguarded and "
+            "get a community reviewer", 3)
     elif partial:
-        out.append(("AMD guard", WARN,
-                    f"some hunks show no guard in context: {', '.join(partial[:3])}",
-                    "read those hunks — the guard may be above the window"))
+        row("AMD guard", WARN,
+            f"some hunks show no guard in context: {', '.join(partial[:3])}",
+            "read those hunks — the guard may be above the window", 1)
     else:
-        out.append(("AMD guard", OK, "every common-code hunk sits under a guard", ""))
+        row("AMD guard", OK, "every rewritten hunk sits under a guard")
 
-    # 3. Guard choice
+    # 3. Guard choice — GATE: the wrong one is a crash, not a style problem
     if a["uses_aiter"] and not a["uses_is_hip"]:
-        out.append(("Guard choice", WARN, "imports aiter; uses_aiter expected",
-                    "gate with `_use_aiter` — `is_hip()` alone will run this on "
-                    "an AMD box that has no AITER installed"))
+        row("Guard choice", WARN, "imports aiter; no is_hip/use_aiter token added",
+            "gate with `_use_aiter` — `is_hip()` alone runs this on an AMD box "
+            "with no AITER installed", 0, gate=True)
     elif a["uses_aiter"]:
-        out.append(("Guard choice", OK, "imports aiter, both guards present", ""))
+        row("Guard choice", OK, "imports aiter, guard tokens present")
     elif a["uses_is_hip"]:
-        out.append(("Guard choice", OK, "is_hip — works on all AMD GPUs", ""))
+        row("Guard choice", OK, "is_hip — works on all AMD GPUs")
     else:
-        out.append(("Guard choice", UNK, "no guard token added", ""))
+        row("Guard choice", UNK, "no guard token added")
 
     # 4. Flags
     if a["new_envs"]:
         offs = [f"{n}={d}" for n, _, d in a["new_envs"] if "False" in d or d == ""]
         if offs:
-            out.append(("New flags", BAD,
-                        f"{len(a['new_envs'])} new env var(s), default-off: "
-                        f"{', '.join(offs[:3])}",
-                        "if the hardware implies it, default it on and detect with "
-                        "is_hip/use_aiter — do not make users export a flag"))
+            row("New flags", BAD,
+                f"{len(a['new_envs'])} new env var(s), default-off: "
+                f"{', '.join(offs[:3])}",
+                "if the hardware implies it, default it on and detect with "
+                "is_hip/use_aiter — do not make users export a flag", 3)
         else:
-            out.append(("New flags", WARN,
-                        f"new env var(s): {', '.join(n for n, _, _ in a['new_envs'])}",
-                        "default-on is right; still ask whether the knob is needed"))
+            row("New flags", WARN,
+                f"new env var(s): {', '.join(n for n, _, _ in a['new_envs'])}",
+                "default-on is right; still ask whether the knob is needed", 1)
     else:
-        out.append(("New flags", OK, "no new env var", ""))
+        row("New flags", OK, "no new env var")
 
     if a["new_globals"]:
-        out.append(("New globals", WARN,
-                    f"module-level globals in common code: "
-                    f"{', '.join(a['new_globals'][:4])}",
-                    "prefer a derived constant or a config field over global state"))
+        row("New globals", WARN,
+            f"module-level globals in shared code: "
+            f"{', '.join(a['new_globals'][:4])}",
+            "prefer a derived constant or a config field over global state", 2)
     else:
-        out.append(("New globals", OK, "no new global in common code", ""))
+        row("New globals", OK, "no new global in shared code")
 
-    # 5. Interface churn
+    # 5. Interface churn — GATE when a shared signature is rewritten
     if a["sig_changed"]:
-        out.append(("Interface churn", WARN,
-                    f"signature changed: {', '.join(a['sig_changed'][:3])}",
-                    "every caller must be updated; prefer a keyword arg with a "
-                    "default that preserves today's behaviour"))
+        row("Interface churn", WARN,
+            f"signature changed: {', '.join(a['sig_changed'][:3])}",
+            "verify every caller is updated in this PR; prefer a keyword arg "
+            "with a behaviour-preserving default", 3, gate=True)
     else:
-        out.append(("Interface churn", OK, "no common signature rewritten", ""))
+        row("Interface churn", OK, "no shared signature rewritten")
 
     # 6. Kernel kind
     if a["new_kernels"]:
-        out.append(("Kernel", WARN,
-                    f"new kernel file(s): {', '.join(a['new_kernels'][:3])}",
-                    "needs a reference-correctness test and a benchmark; check "
-                    "the non-AMD fallback still exists"))
+        row("Kernel", WARN, f"new kernel file(s): {', '.join(a['new_kernels'][:3])}",
+            "needs a reference-correctness test and a benchmark; check the "
+            "non-AMD fallback still exists", 2)
     elif a["kernels"]:
-        out.append(("Kernel", WARN,
-                    f"modifies {len(a['kernels'])} existing kernel file(s)",
-                    "needs before/after numbers on the same shapes"))
+        row("Kernel", WARN, f"modifies {len(a['kernels'])} existing kernel file(s)",
+            "needs before/after numbers on the same shapes", 1)
     else:
-        out.append(("Kernel", OK, "no kernel source touched", ""))
+        row("Kernel", OK, "no kernel source touched")
 
     # 7. Size / splittability
     tot = m["additions"] + m["deletions"]
     areas = {p.split("/")[3] if p.startswith("python/sglang/srt/") and
              len(p.split("/")) > 4 else p.split("/")[0]
-             for p in a["amd_files"] + a["common_files"] + a["new_files"]}
+             for p in a["amd_files"] + a["common_files"] + a["new_files"]
+             + a["additive_files"]}
     if tot > 800 or len(areas) > 3:
-        out.append(("Size", BAD,
-                    f"+{m['additions']}/-{m['deletions']} across {len(areas)} areas",
-                    "split: one concern per PR (kernel / model wiring / flag)"))
+        row("Size", BAD, f"+{m['additions']}/-{m['deletions']} across {len(areas)} areas",
+            "split: one concern per PR (kernel / wiring / default flip)", 3)
     elif tot > 300:
-        out.append(("Size", WARN, f"+{m['additions']}/-{m['deletions']}",
-                    "reviewable, but check it is one concern"))
+        row("Size", WARN, f"+{m['additions']}/-{m['deletions']}",
+            "reviewable, but check it is one concern", 1)
     else:
-        out.append(("Size", OK, f"+{m['additions']}/-{m['deletions']}", ""))
+        row("Size", OK, f"+{m['additions']}/-{m['deletions']}")
 
-    # 8. Evidence
+    # 8. Evidence — GATE when numerics moved and nothing was measured
     need_acc = bool(a["kernels"]) or any(
         re.search(r"quant|moe|attention", p, re.I)
-        for p in a["amd_files"] + a["common_files"] + a["new_files"])
+        for p in a["amd_files"] + a["common_files"] + a["new_files"]
+        + a["additive_files"])
     if need_acc and not a["has_accuracy"]:
-        out.append(("Evidence", BAD, "numerics touched, no accuracy number in body",
-                    "ask for GSM8K (or equivalent) before/after"))
+        row("Evidence", BAD, "numerics touched, no accuracy number in body",
+            "ask for GSM8K (or equivalent) before/after", 0, gate=True)
     elif a["kernels"] and not a["has_perf"]:
-        out.append(("Evidence", WARN, "kernel change, no perf number in body",
-                    "ask for before/after on the shapes it targets"))
+        row("Evidence", WARN, "kernel change, no perf number in body",
+            "ask for before/after on the shapes it targets", 1)
     else:
-        out.append(("Evidence", OK,
-                    f"accuracy={a['has_accuracy']} perf={a['has_perf']}", ""))
+        row("Evidence", OK,
+            f"accuracy={a['has_accuracy']} perf={a['has_perf']}")
 
     # 9. Tests
     if a["buckets"].get("test"):
-        out.append(("Tests", OK, f"{a['buckets']['test']} test file(s) touched", ""))
+        row("Tests", OK, f"{a['buckets']['test']} test file(s) touched")
     else:
-        out.append(("Tests", WARN, "no test file in the diff",
-                    "AMD-only tests belong in test/registered/amd/"))
+        row("Tests", WARN, "no test file in the diff",
+            "AMD-only tests belong in test/registered/amd/", 2)
     return out
 
 
-def verdict(rs: list[tuple[str, str, str, str]]) -> tuple[str, str]:
-    bad = [r[0] for r in rs if r[1] == BAD]
-    warn = [r[0] for r in rs if r[1] == WARN]
-    if "Blast radius" in bad:
-        return ("NEEDS COMMUNITY REVIEWER",
-                "touches code every vendor inherits — an AMD-only review is not "
-                "enough to land it")
-    if "Size" in bad:
-        return ("SPLIT FIRST", "too large or too many concerns to review as one PR")
-    if bad:
-        return ("BLOCKED ON AUTHOR", f"unresolved: {', '.join(bad)}")
-    if warn:
-        return ("MERGEABLE AFTER CHECKS", f"read before approving: {', '.join(warn)}")
-    return ("EASY MERGE", "AMD-only, guarded, one concern, evidence attached")
+def verdict(a: dict, rs: list[dict]) -> dict:
+    open_gates = [r["check"] for r in rs if r["gate"] and r["verdict"] != OK]
+    points = sum(r["points"] for r in rs)
+    b = band(points)
+    needs_community = bool(a["hot_common"]) or bool(a["unguarded"])
+
+    if b == "SPLIT":
+        name, why = "SPLIT FIRST", (f"{points} risk points — too much in one PR to "
+                                    f"review as a unit")
+    elif open_gates:
+        name, why = "BLOCKED ON AUTHOR", (f"open gate(s): {', '.join(open_gates)} — "
+                                          f"no score substitutes for these")
+    elif needs_community:
+        name, why = "NEEDS COMMUNITY REVIEWER", (
+            f"{points} risk points ({b}), but it changes code every vendor "
+            f"inherits — an AMD-side review cannot land it")
+    elif b == "LOW":
+        name, why = "LOW RISK — MERGE", (f"{points} risk points, no open gate, "
+                                         f"AMD-side review is enough")
+    else:
+        name, why = f"{b} RISK — REVIEW", (f"{points} risk points; read the "
+                                           f"flagged rows before approving")
+    return {"name": name, "why": why, "points": points, "band": b,
+            "open_gates": open_gates, "needs_community": needs_community}
 
 
 def main() -> None:
@@ -349,12 +415,10 @@ def main() -> None:
 
     data = analyse(pr, a.repo)
     rs = rows(data)
-    v, why = verdict(rs)
+    v = verdict(data, rs)
 
     if a.json:
-        print(json.dumps({"pr": pr, "verdict": v, "why": why,
-                          "rows": [dict(zip(("check", "verdict", "evidence",
-                                             "action"), r)) for r in rs]}, indent=2))
+        print(json.dumps({"pr": pr, **v, "rows": rs}, indent=2))
         return
 
     m = data["meta"]
@@ -363,18 +427,30 @@ def main() -> None:
     print(f"**{m['title']}** — @{m['author']['login']}, "
           f"+{m['additions']}/-{m['deletions']} over {m['changedFiles']} files"
           f"{' (DRAFT)' if m['isDraft'] else ''}\n")
-    print("| | Check | Verdict | Evidence |")
-    print("|---|---|---|---|")
-    for check, vd, ev, _ in rs:
-        print(f"| {mark[vd]} | {check} | {vd} | {ev} |")
-    print(f"\n**Verdict: {v}** — {why}\n")
-    acts = [(c, act) for c, vd, _, act in rs if act and vd in (BAD, WARN)]
+    print("| | Check | Verdict | Risk | Evidence |")
+    print("|---|---|---|---|---|")
+    for r in rs:
+        g = " **GATE**" if r["gate"] and r["verdict"] != OK else ""
+        pts = f"+{r['points']}" if r["points"] else "0"
+        print(f"| {mark[r['verdict']]} | {r['check']}{g} | {r['verdict']} "
+              f"| {pts} | {r['evidence']} |")
+    print(f"| | **Total** | | **{v['points']}** | band: {v['band']} "
+          f"(LOW ≤3, MEDIUM ≤7, HIGH ≤12, SPLIT >12) |")
+    print(f"\n**Verdict: {v['name']}** — {v['why']}\n")
+
+    if v["open_gates"]:
+        print("### Gates (must be answered — points cannot buy these off)")
+        for g in v["open_gates"]:
+            print(f"- **{g}** — {GATES[g]}")
+        print()
+    acts = [r for r in rs if r["action"] and r["verdict"] in (BAD, WARN)]
     if acts:
         print("### Ask the author")
-        for i, (c, act) in enumerate(acts, 1):
-            print(f"{i}. **{c}** — {act}")
+        for i, r in enumerate(acts, 1):
+            print(f"{i}. **{r['check']}** — {r['action']}")
     print("\n> Mechanical half only. Still yours to judge: is the guard the right "
-          "one, is this one concern or three, and is the bug AMD-only or shared "
+          "one, is this one concern or three, is it a new feature or a live "
+          "regression, and is the bug AMD-only or shared "
           "(see SKILL.md 'What the script cannot decide').")
 
 

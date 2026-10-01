@@ -34,12 +34,15 @@ Output is a markdown checklist you can paste straight into a review, plus a
 verdict and a numbered "ask the author" list:
 
 ```
-| | Check | Verdict | Evidence |
-|---|---|---|---|
-| - [x] | Blast radius | PASS | 5 file(s), all AMD-only paths |
-| - [ ] | AMD guard | FAIL | added code with no is_hip/use_aiter in hunk: …
+| | Check | Verdict | Risk | Evidence |
+|---|---|---|---|---|
+| - [ ] | Blast radius | CHECK | +1 | shared files, additive only: arg_groups/choices.py, … |
+| - [x] | AMD guard | PASS | 0 | n/a — no existing shared behaviour rewritten |
+| - [ ] | Guard choice **GATE** | CHECK | 0 | imports aiter; no is_hip/use_aiter token added |
 …
-**Verdict: NEEDS COMMUNITY REVIEWER** — touches code every vendor inherits
+| | **Total** | | **2** | band: LOW (LOW ≤3, MEDIUM ≤7, HIGH ≤12, SPLIT >12) |
+
+**Verdict: BLOCKED ON AUTHOR** — open gate(s): Guard choice
 ```
 
 It reads the PR with `gh` (prefixed `GH_TOKEN=""`, per `_shared/repo-config.md`)
@@ -126,13 +129,13 @@ reviewable in a sitting.
 
 ## The classification: what the checklist asks
 
-Nine axes. `triage.py` answers them from the diff; the ones it cannot decide are
+Ten axes. `triage.py` answers them from the diff; the ones it cannot decide are
 marked and listed below.
 
 | # | Axis | Why it matters |
 |---|---|---|
 | 1 | **Blast radius** — AMD-only paths / new files / existing shared files / hot common code | decides whether you need a community reviewer |
-| 2 | **AMD guard** — is every added hunk in shared code under `is_hip`/`use_aiter`? | an unguarded hunk changes NVIDIA behaviour by accident |
+| 2 | **AMD guard** — is every *rewritten* hunk in shared code under `is_hip`/`use_aiter`? | an unguarded rewrite changes NVIDIA behaviour by accident |
 | 3 | **Guard choice** — `is_hip` vs `use_aiter` | wrong one = crash on AMD boxes without AITER |
 | 4 | **New flags** — new env vars, and their defaults | guideline 1; default-off AMD capability is the common smell |
 | 5 | **New globals** in shared files | global state is the hardest thing to unpick later |
@@ -140,6 +143,7 @@ marked and listed below.
 | 7 | **Kernel** — new kernel vs upgrade of an existing one | new ⇒ needs reference test + benchmark + fallback; upgrade ⇒ needs before/after on the same shapes |
 | 8 | **Size** — lines and number of areas touched | guideline 4; the split trigger |
 | 9 | **Evidence** — accuracy and perf numbers in the body | a numerics change with no GSM8K is unreviewable |
+| 10 | **Tests** — is a test file in the diff? | AMD-only tests belong in `test/registered/amd/` |
 
 **Hot common code** (auto-escalates): `layers/linear.py`, `layers/layernorm.py`,
 `layers/activation.py`, `rotary_embedding.py`, `models/`, `managers/`,
@@ -189,19 +193,71 @@ cheap kind: nothing existing changes behaviour. Say so in the review and move on
 
 ---
 
-## Verdict ladder
+## What must pass, and what merely adds up
 
-| Verdict | Trigger | What it means |
-|---|---|---|
-| **EASY MERGE** | AMD-only, guarded, one concern, evidence attached | AMD-side review and land |
-| **MERGEABLE AFTER CHECKS** | only `CHECK` rows | read the flagged hunks; usually lands the same day |
-| **BLOCKED ON AUTHOR** | a `FAIL` that the author can fix | unguarded hunk, default-off flag, missing accuracy number |
-| **SPLIT FIRST** | >800 lines or >3 areas | ask for the split before reviewing — a review of the whole is wasted work |
-| **NEEDS COMMUNITY REVIEWER** | touches hot common code | correct and expected for shared fixes; budget the extra round-trip |
+Three mechanisms, deliberately kept apart. Collapsing them into one number is
+the thing that makes a scorecard useless — a PR can be flawless on nine axes and
+still be unmergeable because of the tenth.
 
-`NEEDS COMMUNITY REVIEWER` is not a rejection. It is a schedule: find the owner
-of the shared code early, in the PR description, rather than discovering after
-two weeks that nobody with merge rights has read it.
+### 1. Gates — binary, nothing buys them off
+
+A gate marks something that is **a crash, a silent wrong answer, or a claim
+nobody can check**. A PR with an open gate is not "higher risk"; it is
+unreviewable until the gate is answered. There are only three, so that the word
+keeps its force:
+
+| Gate | Why it cannot be traded away |
+|---|---|
+| **Guard choice** | code importing AITER gated by `is_hip()` alone crashes on an AMD box without AITER. Not a style preference — a crash |
+| **Evidence** | a numerics change with no accuracy number can only be believed, not reviewed |
+| **Interface churn** | a rewritten shared signature must have every caller updated **in the same PR**, or main breaks for someone else |
+
+### 2. Risk points — these add up
+
+Everything else is a trade-off, scored 0–4:
+
+| Axis | 0 | +1 | +2 | +3 | +4 |
+|---|---|---|---|---|---|
+| Blast radius | AMD-only paths | new file outside AMD path, **or shared files additive-only** | edits a shared file | | edits hot common code |
+| AMD guard | all rewritten hunks guarded | guard not visible in hunk | | rewrites shared code unguarded | |
+| New flags | none | new, default-on | | new, default-off | |
+| New globals | none | | in shared code | | |
+| Interface churn | none | | | signature rewritten | |
+| Kernel | none touched | upgrade of existing | new kernel | | |
+| Size | ≤300 lines | ≤800 lines | | >800 or >3 areas | |
+| Evidence | numbers present | kernel without perf number | | | |
+| Tests | test file in diff | | none in diff | | |
+
+**Bands**: `LOW ≤3` · `MEDIUM ≤7` · `HIGH ≤12` · `SPLIT >12`
+
+> **Additive-only is the discount that matters.** Adding an enum member, an
+> accessor, or a validation branch keyed on a name nothing selects yet is a
+> shared-code touch that changes nobody's behaviour. It scores +1, not +4. The
+> script ignores removed *import* lines when deciding this — widening an import
+> to pull in one more helper is not a behaviour rewrite.
+
+### 3. Routing — who has to look at it
+
+Independent of the score. **Any edit (not addition) to hot common code, or any
+unguarded rewrite of shared code, needs a community reviewer** — even at 0
+points. This is a schedule, not a rejection: name the owner of that code in the
+PR description early, rather than discovering after two weeks that nobody with
+merge rights has read it.
+
+### Putting it together
+
+| Verdict | Condition |
+|---|---|
+| **LOW RISK — MERGE** | no open gate, ≤3 points, no shared-code edit → AMD-side review is enough |
+| **MEDIUM/HIGH RISK — REVIEW** | no open gate, 4–12 points → read the flagged rows before approving |
+| **BLOCKED ON AUTHOR** | any open gate, at any score |
+| **NEEDS COMMUNITY REVIEWER** | hot-common edit or unguarded shared rewrite, at any score |
+| **SPLIT FIRST** | >12 points → ask for the split *before* reviewing; a review of the whole is wasted work |
+
+**The short answer to "how many points is safe":** ≤3 **and** zero open gates
+**and** no shared-code edit. Points alone never clear a PR — a 0-point PR with
+an unanswered accuracy question is still blocked, and a 6-point PR that only
+edits AMD files is fine.
 
 ---
 
