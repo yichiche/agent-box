@@ -72,16 +72,15 @@ PRIORITIES = ("P0", "P1", "P2")
 TRACK_PRIORITY = {"high": "P0", "regular": "P1"}
 
 # Short status token for the report line, e.g. <CI clear>.
-CI_TOKEN = {
-    "green": "CI clear",
-    "conflict": "conflict",
-    "awaiting-triage": "CI red",
-    "re-run": "CI rerun",
+# Actions that say more than the raw CI state, so they win over it in the
+# report token. Everything else falls through to the Verdict.
+CI_TOKEN_OVERRIDE = {
     "code-fix": "CI fail",
     "merge-main": "merge main",
     "wait-upstream": "blocked",
-    "out-of-scope": "CI n/a",
 }
+VERDICT_TOKEN = {"Pass": "CI clear", "Pending": "CI running",
+                 "Fail": "CI red", "\u2014": "CI ?"}
 
 AGENT_BOX = Path(__file__).resolve().parents[2]
 HOST_HOME = Path(os.environ.get("AGENT_BOX_HOST_HOME", AGENT_BOX.parent))
@@ -142,10 +141,14 @@ def priority_of(meta: dict) -> str:
 
 
 def ci_token(s: dict) -> str:
-    action = s.get("last_action")
-    if not action:
-        return "CI ?"
-    return CI_TOKEN.get(action, action)
+    """Report token. Derived from the same Verdict the table shows, so a row
+    cannot say `Pass` in one place and `CI n/a` in the other."""
+    if s.get("mergeable") == "CONFLICTING":
+        return "conflict"
+    override = CI_TOKEN_OVERRIDE.get(s.get("last_action", ""))
+    if override:
+        return override
+    return VERDICT_TOKEN.get(ci_verdict(s), "CI ?")
 
 
 TAIPEI = timezone(timedelta(hours=8))  # Asia/Taipei — no DST, so a fixed offset
@@ -239,6 +242,26 @@ def row_order(st: dict):
     return key
 
 
+def report_entries(wl: dict, st: dict) -> list[dict]:
+    """Structured rows behind the status block, so the plain-text and the
+    hyperlinked HTML renderings cannot disagree."""
+    out = []
+    for pr, meta in sorted(wl.items(), key=row_order(st)):
+        s = st.get(pr, {})
+        out.append({
+            "pri": priority_of(meta),
+            "token": ci_token(s),
+            "pr": pr,
+            "url": s.get("url") or
+                   f"https://github.com/{meta.get('repo', REPO_DEFAULT)}/pull/{pr}",
+            "title": s.get("title") or "(not swept yet — title unknown)",
+            # Line 2 falls back to the triage reason now that the dashboard no
+            # longer has a note field; `watch.py set --note` still overrides it.
+            "note": (meta.get("note") or s.get("last_verdict") or "").strip(),
+        })
+    return out
+
+
 def report_text(wl: dict, st: dict) -> str:
     """The paste-into-Teams block.
 
@@ -246,15 +269,10 @@ def report_text(wl: dict, st: dict) -> str:
     ~5% P90 E2E improvement at TP4 conc4 agent mode
     """
     lines = []
-    for pr, meta in sorted(wl.items(), key=row_order(st)):
-        s = st.get(pr, {})
-        title = s.get("title") or "(not swept yet — title unknown)"
-        lines.append(f"<{priority_of(meta)}><{ci_token(s)}><PR{pr}>{title}")
-        # Line 2 falls back to the triage reason now that the dashboard no
-        # longer has a note field; `watch.py set --note` still overrides it.
-        note = (meta.get("note") or s.get("last_verdict") or "").strip()
-        if note:
-            lines.append(note)
+    for e in report_entries(wl, st):
+        lines.append(f"<{e['pri']}><{e['token']}><PR{e['pr']}>{e['title']}")
+        if e["note"]:
+            lines.append(e["note"])
     return "\n".join(lines)
 
 

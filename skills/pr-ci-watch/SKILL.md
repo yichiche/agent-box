@@ -37,6 +37,11 @@ Read `_shared/repo-config.md` for the `GH_TOKEN=""` rule. Repo is
 /pr-ci-watch arm            # register the two cron tracks
 ```
 
+The report token comes from the same `ci_verdict` the table shows (`CI clear` /
+`CI running` / `CI red`), with `code-fix`, `merge-main` and `wait-upstream`
+overriding it because they say more than the raw state. Row order is shared via
+`row_order()` — the table and the block cannot drift apart.
+
 **`triage`** is Phase B on demand: for each PR named, run
 [`/ci-analysis`](../ci-analysis/SKILL.md), reduce its table to one action, and
 record it with `apply-verdict --apply`. The dashboard's "Waiting on triage" panel
@@ -224,7 +229,7 @@ or `41870`.
 | `Monitoring ON/OFF` | Writes `_config.enabled`; every sweep, including a cron-fired one, exits immediately when off | no — takes effect instantly |
 | `Refresh now` | Runs `sweep --track all --force` **without `--apply`** in a subprocess: re-reads merge state and red NVIDIA CI for every PR. Comments nothing, re-runs nothing | no |
 | `Copy` (triage panel) | Copies `/pr-ci-watch triage <prs>` to paste into Claude | yes, to run it |
-| `Copy` (status block) | Copies the `<P0><CI clear><PR…>` report | no |
+| `Copy` (status block) | Copies the `<P0><CI clear><PR…>` report as **rich text + plain text**, so `<PR41133>` stays a hyperlink when pasted into Teams | no |
 
 `Refresh now` is deliberately read-only. Deciding **re-run vs merge main vs real
 bug** means reading job logs — that is `/ci-analysis`, which needs a Claude turn,

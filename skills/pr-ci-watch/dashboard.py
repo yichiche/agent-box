@@ -35,6 +35,7 @@ from watch import (  # noqa: E402
     now,
     parse_pr,
     priority_of,
+    report_entries,
     report_text,
     row_order,
     log_line,
@@ -123,10 +124,11 @@ PAGE = """<!doctype html>
   .note {{ width:100%; min-width:160px; padding:5px 7px; border-radius:5px;
     border:1px solid var(--line); background:var(--bg); color:var(--fg);
     font:inherit; font-size:12px; }}
-  textarea#report {{ width:100%; height:190px; padding:11px; border-radius:6px;
-    border:1px solid var(--line); background:var(--bg); color:var(--fg);
+  .reportblock {{ width:100%; max-height:260px; overflow:auto; padding:11px;
+    border-radius:6px; border:1px solid var(--line); background:var(--bg);
     font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px;
-    line-height:1.6; resize:vertical; }}
+    line-height:1.6; }}
+  #reportsrc {{ position:absolute; left:-9999px; width:1px; height:1px; }}
   .banner {{ padding:9px 13px; border-radius:6px; font-size:13px;
     border:1px solid currentColor; margin-bottom:14px; }}
 </style></head><body>
@@ -168,7 +170,8 @@ PAGE = """<!doctype html>
 
 <div class="panel">
   <h2>Status block &mdash; paste into Teams / standup</h2>
-  <textarea id="report" readonly>{report}</textarea>
+  <div id="report" class="reportblock">{report_html}</div>
+  <textarea id="reportsrc" readonly aria-hidden="true">{report}</textarea>
   <div style="margin-top:10px; display:flex; gap:10px; align-items:center;">
     <button class="primary" type="button" onclick="copyReport(this)">Copy</button>
     <span class="sub">Edit the second line of each entry in the <b>Note</b>
@@ -189,7 +192,20 @@ the ON/OFF switch. Data: <span class="mono">{data}</span></div>
       () => {{ document.execCommand('copy'); btn.textContent = 'Copied'; }}
     );
   }}
-  function copyReport(btn) {{ copyEl('report', btn); }}
+  function copyReport(btn) {{
+    const html = document.getElementById('report').innerHTML;
+    const text = document.getElementById('reportsrc').value;
+    const done = () => {{ btn.textContent = 'Copied';
+                          setTimeout(() => btn.textContent = 'Copy', 1400); }};
+    // text/html keeps <PRnnnnn> a hyperlink in Teams; text/plain is the
+    // fallback for anywhere that strips markup.
+    if (window.ClipboardItem && navigator.clipboard.write) {{
+      navigator.clipboard.write([new ClipboardItem({{
+        'text/html': new Blob([html], {{type: 'text/html'}}),
+        'text/plain': new Blob([text], {{type: 'text/plain'}}),
+      }})]).then(done, () => copyEl('reportsrc', btn));
+    }} else {{ copyEl('reportsrc', btn); }}
+  }}
   // Refresh on a timer, but never while a field is focused — otherwise a note
   // being typed gets wiped mid-edit.
   setInterval(() => {{
@@ -437,6 +453,22 @@ def prio_cell(pr: str, meta: dict) -> str:
     )
 
 
+def report_html(wl: dict, st: dict) -> str:
+    """Same block, but <PRnnnnn> is a real link. Copying this as rich text keeps
+    the hyperlink when it lands in Teams; the plain-text flavour is copied
+    alongside for anywhere that strips HTML."""
+    out = []
+    for e in report_entries(wl, st):
+        out.append(
+            f'<div>&lt;{esc(e["pri"])}&gt;&lt;{esc(e["token"])}&gt;'
+            f'&lt;<a href="{esc(e["url"])}" target="_blank">PR{esc(e["pr"])}</a>&gt;'
+            f'{esc(e["title"])}</div>'
+        )
+        if e["note"]:
+            out.append(f'<div class="dim">{esc(e["note"])}</div>')
+    return "".join(out) or '<div class="dim">(watchlist is empty)</div>'
+
+
 def render_table(wl: dict, st: dict) -> str:
     if not wl:
         return EMPTY
@@ -606,6 +638,7 @@ class Handler(BaseHTTPRequestHandler):
             data=html.escape(str(DATA_DIR)),
             table=render_table(wl, st),
             report=html.escape(report_text(wl, st)),
+            report_html=report_html(wl, st),
             banner=render_banner(raw_st, enabled),
             arm_line=html.escape(arm_line(raw_st)),
             toggle_to="0" if enabled else "1",
