@@ -230,8 +230,12 @@ or `41870`.
 bug** means reading job logs — that is `/ci-analysis`, which needs a Claude turn,
 so no button can do it. Registering cron likewise needs a Claude turn.
 
-**Verdict** is the CI state only — `Pass` / `Pending` (in flight, first run or
-re-run) / `Fail`. **Action** is what to do — `CI re-run` (one is in flight),
+**Verdict** is the in-scope CI state only — `Pass` / `Pending` (in flight,
+first run or re-run) / `Fail`. A red *aggregation gate* never makes it `Fail`: a
+gate is not a job, it is mirroring a vendor workflow this tool excludes, so
+calling that Fail would report someone else's failure as this PR's NVIDIA
+result. Rows are ordered **Pass first** (those are the ones you can go merge),
+then P0 → P2, then PR number. **Action** is what to do — `CI re-run` (one is in flight),
 `Solve conflict`, `Merge main`, `Code fix`, `Triage`, `Wait upstream`, or `-`.
 **Status** carries the job counts (`34 pass, 2 fail, 10 running`), the conflict
 notice proof, and the triage reason; it flags the counts as stale when they

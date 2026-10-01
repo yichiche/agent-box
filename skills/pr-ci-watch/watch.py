@@ -188,8 +188,10 @@ def ci_verdict(s: dict) -> str:
     if t.get("pending"):
         # In flight — first run or a re-run, same thing from here.
         return "Pending"
-    if t.get("fail"):
-        return "Fail"  # nothing left running and gates are still red
+    # Every NVIDIA job finished and none failed. Aggregation gates may still be
+    # red, but a gate is not a job — it is mirroring a vendor workflow this tool
+    # excludes by design. Calling that `Fail` reports someone else's failure as
+    # this PR's NVIDIA result. The Status column carries the nuance.
     return "Pass" if t.get("pass") else "—"
 
 

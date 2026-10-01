@@ -36,6 +36,7 @@ from watch import (  # noqa: E402
     parse_pr,
     priority_of,
     report_text,
+    log_line,
     save,
     set_monitoring,
     tw,
@@ -444,7 +445,13 @@ def render_table(wl: dict, st: dict) -> str:
         "<th>Last swept (TW)</th><th></th></tr>"
     )
     rows = []
-    for pr, meta in sorted(wl.items(), key=lambda kv: (priority_of(kv[1]), int(kv[0]))):
+    # Pass first — those are the ones you can go merge — then P0 → P2, then PR.
+    def order(kv):
+        pr, meta = kv
+        return (0 if ci_verdict(st.get(pr, {})) == "Pass" else 1,
+                priority_of(meta), int(pr))
+
+    for pr, meta in sorted(wl.items(), key=order):
         s = st.get(pr, {})
         track = meta.get("track", "regular")
         other = "regular" if track == "high" else "high"
@@ -648,6 +655,8 @@ class Handler(BaseHTTPRequestHandler):
                         wl[pr]["priority"] = form["priority"]
                     elif prev.get("priority"):
                         wl[pr]["priority"] = prev["priority"]
+                    log_line(f"#{pr} added via dashboard "
+                             f"(track={wl[pr]['track']})")
                 elif self.path == "/api/track":
                     pr = parse_pr(form.get("pr", ""))
                     if pr in wl:
@@ -661,7 +670,11 @@ class Handler(BaseHTTPRequestHandler):
                     if pr in wl:
                         wl[pr]["note"] = form.get("note", "").strip()
                 elif self.path == "/api/remove":
-                    wl.pop(parse_pr(form.get("pr", "")), None)
+                    pr = parse_pr(form.get("pr", ""))
+                    if wl.pop(pr, None) is not None:
+                        # Audit it: an open PR vanishing from the list with no
+                        # trace is indistinguishable from a bug.
+                        log_line(f"#{pr} removed from watchlist via dashboard")
                 else:
                     self._send(404, b"no such endpoint", "text/plain")
                     return
