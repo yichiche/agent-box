@@ -238,12 +238,31 @@ attempt on a gate that will reject it again.
 `PR Test Extra`, and treating its red gate as a problem would put a permanent
 false alarm on most of the watchlist.
 
+### Missing `run-ci` is fixed, not reported
+
+Without the `run-ci` label the entire NVIDIA suite refuses to start, so an open
+PR that lacks it is not waiting on CI — it is waiting on a one-word fix. Every
+sweep checks the PR's labels **as they are now**, and an `--apply` sweep adds
+the label itself.
+
+Checked live rather than inferred from the recorded gate failure, because the
+two disagree: #41982's gate died at `Block draft PR`, so the run-ci step was
+never even evaluated — yet that label is what actually blocks it today. A live
+`missing-run-ci` therefore overrides a stale gate reason, since it is what a
+re-run would hit next.
+
+Two exemptions: a **draft** is skipped entirely (we leave drafts alone), and a
+**held** PR is reported but not labelled — `hold` means no outward action, and
+labelling someone else's PR is an outward action.
+
 **A blocking gate also takes over the Merge and Verdict columns.** `clean` is
 true (there is no git conflict) but on its own reads as ready to land, and
 `Pass` off the handful of admin checks that survive a blocked gate is a verdict
 nobody earned — #41982 showed `clean` / `Pass` beside "4 pass, 4 fail" while
 both NVIDIA workflows sat un-started. A blocking gate now renders Merge as
-`gate blocked` and Verdict as a dash. Only a *blocking* gate does this, so
+`gate blocked` and Verdict as **Fail**. Fail rather than a dash: nothing ran,
+so it is not a test result, but the PR cannot merge and someone has to act —
+and a dash reads as "no data yet" and sorts the row down beside the quiet ones. Only a *blocking* gate does this, so
 ordinary rows keep the clean/conflict split the column exists for instead of
 every row turning amber over an opt-in workflow.
 

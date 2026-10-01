@@ -648,6 +648,7 @@ ACTION_COLOR = {
     "CI re-run": "warn",
     "Triage": "warn",
     "Wait upstream": "warn",
+    "Need run-ci tag": "bad",
     "-": "dim",
 }
 

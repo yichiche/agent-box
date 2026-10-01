@@ -111,6 +111,9 @@ GATE_STEP_REASONS = (
 # `opt-in-extra`, which means "this workflow was never asked to run".
 GATE_BLOCKING = {"draft", "stale-draft", "missing-run-ci", "missing-label",
                  "rate-limit"}
+# Without this label the whole NVIDIA suite refuses to start, so an open PR that
+# lacks it is not "waiting on CI" — it is waiting on a one-word fix.
+RUN_CI_LABEL = "run-ci"
 
 # No re-run cap. The gate on re-running is /ci-analysis: if a failure is
 # attributed to the PR it returns `code fix` and nothing is re-run at all. A
@@ -316,9 +319,12 @@ def ci_verdict(s: dict) -> str:
     # The remaining counts are admin checks, and `Pass` off those is a claim
     # nobody earned — #41982 read `Pass` beside "4 pass, 4 fail" while both
     # NVIDIA workflows sat un-started at the gate. Unknown, not green.
+    # Fail, not "—". Nothing ran, so this is not a test result; but the PR
+    # cannot merge and someone has to act, and a dash reads as "no data yet"
+    # and sinks the row to the bottom of the table next to the quiet ones.
     if any(d.get("blocking", d.get("reason") in GATE_BLOCKING)
            for d in (s.get("gated") or {}).values()):
-        return "\u2014"
+        return "Fail"
     # A conflicting branch is a failure in its own right: CI cannot complete, so
     # say Fail rather than showing an empty verdict because no tally was taken.
     if s.get("mergeable") == "CONFLICTING":
@@ -358,6 +364,10 @@ def ci_action(s: dict) -> str:
     # draft's conflicts are the author's to discover in their own time.
     if s.get("is_draft"):
         return "-"
+    # Before the conflict branch: a PR whose CI never started has nothing to
+    # merge-check against yet, and this is the cheaper fix of the two.
+    if s.get("needs_run_ci"):
+        return "Need run-ci tag"
     if s.get("mergeable") == "CONFLICTING":
         return "Solve conflict"
     if action == "merge-main":
@@ -677,7 +687,7 @@ def pr_snapshot(pr: str, repo: str) -> dict:
     # state.json does not grow a copy of every PR description.
     fields = (
         "state,mergeable,mergeStateStatus,headRefOid,headRefName,author,title,"
-        "url,isDraft,body"
+        "url,isDraft,body,labels"
     )
     data = json.loads(gh(["pr", "view", pr, "--repo", repo, "--json", fields]))
     if data.get("mergeable") == "UNKNOWN":
@@ -883,6 +893,33 @@ def cmd_sweep(a) -> None:
                 wl[pr].pop("prev_track", None)
             meta["track"] = back
 
+        # Missing `run-ci` on an OPEN, non-draft PR. Checked against the PR's
+        # labels right now, not against whichever gate step happened to fail
+        # first: #41982's recorded gate failure was `Block draft PR`, so the
+        # run-ci step never even got evaluated, yet that label is what actually
+        # blocks it today. A draft is exempt — we leave drafts alone entirely.
+        labels = {l.get("name") for l in (snap.get("labels") or [])}
+        needs_run_ci = RUN_CI_LABEL not in labels
+        s["needs_run_ci"] = needs_run_ci
+        if needs_run_ci:
+            if on_hold(meta):
+                print(f"#{pr}  missing `{RUN_CI_LABEL}` — not adding it, PR is on hold")
+            elif a.apply:
+                rc, _, err = gh_try(["pr", "edit", pr, "--repo", repo,
+                                     "--add-label", RUN_CI_LABEL])
+                if rc == 0:
+                    s["run_ci_added_at"] = now()
+                    s["needs_run_ci"] = needs_run_ci = False
+                    labels.add(RUN_CI_LABEL)
+                    print(f"#{pr}  added the `{RUN_CI_LABEL}` label — NVIDIA CI can "
+                          f"start now")
+                    log_line(f"#{pr} added {RUN_CI_LABEL} label")
+                else:
+                    print(f"#{pr}  could not add `{RUN_CI_LABEL}`: "
+                          f"{err.splitlines()[-1] if err else 'failed'}")
+            else:
+                print(f"#{pr}  missing `{RUN_CI_LABEL}` — would add it (pass --apply)")
+
         if on_hold(meta):
             # Deliberately after the snapshot: a held PR should still show
             # current merge state and CI counts, it just must not be acted on.
@@ -1029,6 +1066,16 @@ def cmd_sweep(a) -> None:
             for w, g in groups.items() if g.get("gate_reason")
         }
         s["gated"] = all_gates
+        # A recorded gate reason describes the run that already happened. If the
+        # label is missing *now*, that is what a re-run would hit next, so say
+        # so rather than repeating a draft gate the PR has already outgrown.
+        if needs_run_ci:
+            for d in all_gates.values():
+                if d["blocking"]:
+                    d["reason"] = "missing-run-ci"
+                    d["rerunnable"] = False
+                    d["hint"] = (f"missing the `{RUN_CI_LABEL}` label — the whole "
+                                 f"NVIDIA suite refuses to start without it")
         gated = {w: d for w, d in all_gates.items() if d["blocking"]}
         if gated:
             print(f"        !! BLOCKED AT THE GATE: "
