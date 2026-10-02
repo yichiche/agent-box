@@ -40,7 +40,7 @@ REPO_DEFAULT = "sgl-project/sglang"
 # workflow and must stay in scope. Exclude-list (rather than an allow-list) so
 # a newly added NVIDIA workflow is picked up without a code change.
 VENDOR_RE = re.compile(
-    r"\b(AMD|ROCm|Arm64|aarch64|MLX|MUSA|NPU|Ascend|XPU|Xeon|Gaudi|HPU|TPU|Mori)\b",
+    r"\b(AMD|ROCm|Arm64|aarch64|MLX|MUSA|NPU|Ascend|XPU|Xeon|Gaudi|HPU|TPU|Mori|PPU)\b",
     re.I,
 )
 ADMIN_RE = re.compile(
@@ -277,7 +277,7 @@ def tw(iso: str | None) -> str:
 
 
 def tally_bits(t: dict | None) -> str:
-    """`48 pass, 16 fail, 10 running, 13 queued` — zeroes omitted.
+    """`48 pass, 16 fail, 19 cancelled, 10 running, 13 queued` — zeroes omitted.
 
     `running` is pending minus queued, so the two never double-count. Tallies
     recorded before `queued` existed have none, which reads as "all of it is
@@ -288,6 +288,10 @@ def tally_bits(t: dict | None) -> str:
     counts = (
         ("pass", t.get("pass", 0)),
         ("fail", t.get("fail", 0)),
+        # Counted all along, never rendered: #39575 showed "9 pass, 3 fail"
+        # with 19 cancelled jobs — including every required `base-a-test-cpu`
+        # shard — invisible behind it.
+        ("cancelled", t.get("cancel", 0)),
         ("running", max(t.get("pending", 0) - queued, 0)),
         ("queued", queued),
     )
@@ -362,6 +366,18 @@ def ci_verdict(s: dict) -> str:
         for g in (s.get("failed_groups") or {}).values()
     )
     if real_fail:
+        return "Fail"
+    # In-scope jobs were cancelled and nothing is running to take their place,
+    # so there is no result to report. Usually the concurrency cancel:
+    # `pr-test.yml` kills the whole run when a higher-priority request lands on
+    # the same group, and the jobs read "Cancelled after 5m". `Pass` off the
+    # handful that happened to finish first is the same unearned claim the
+    # blocking-gate branch above exists to stop — #39575 read `Pass` while all
+    # 11 required `base-a-test-cpu` shards sat cancelled. `Fail` for that
+    # branch's reason too: nothing ran, the PR cannot merge, and a dash reads
+    # as "no data yet". Gated on `pending` because a cancel is routine when a
+    # push supersedes a run — there the replacement is already in flight.
+    if t.get("cancel") and not t.get("pending"):
         return "Fail"
     if t.get("pending"):
         # In flight — first run or a re-run, same thing from here.
