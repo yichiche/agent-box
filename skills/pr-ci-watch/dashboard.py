@@ -930,6 +930,15 @@ def status_cell(pr: str, s: dict) -> str:
         out.append(last_failure_block(s))
     if not quiet:
         hint = ACTION_HINT.get(action, "")
+        # `re-run` is the one action that names something already done, so it
+        # is the one that can lie. A sweep sets the action the moment it
+        # decides a re-run is owed — the POST happens separately and may not
+        # have happened at all — and #41982 read "re-ran; waiting on CI" beside
+        # a greyed-out button with nothing re-run on this head.
+        if action == "re-run" and not any(
+                r.get("sha") == s.get("head_sha")
+                for r in (s.get("reruns") or {}).values()):
+            hint = "needs a re-run — not started yet"
         if hint:
             out.append(f"<div>{esc(hint)}</div>")
         # Wrap, never truncate: cutting the reason mid-word ("…OOM on a 32GB
@@ -1186,9 +1195,25 @@ def auto_cell(pr: str, meta: dict) -> str:
 def rerunnable(s: dict) -> list:
     """Workflows a re-run could actually turn green — the same test
     `apply-verdict` applies before POSTing, so the button is not offered for
-    rows where it would come back "skipped: gate-only"."""
-    return [wf for wf, g in (s.get("failed_groups") or {}).items()
-            if g.get("run_id") and (not g.get("gate_only") or g.get("gate_rerunnable"))]
+    rows where it would come back "skipped: gate-only".
+
+    Cancelled work counts, and it is why this cannot just read
+    `failed_groups`. #41982 showed `43 pass, 3 fail, 4 cancelled` with the
+    action set to `re-run` and the button greyed out: both failed groups were
+    gate-only, so this returned nothing, while `apply-verdict` would happily
+    have re-run `PR Test Base` for its 4 cancelled jobs. A gate-only workflow
+    is re-runnable when it carries cancelled jobs, for the same reason it is
+    over there — the gate is red because the run was killed, not because the
+    code failed.
+    """
+    cancelled = s.get("cancelled_groups") or {}
+    out = [wf for wf, g in (s.get("failed_groups") or {}).items()
+           if g.get("run_id") and (not g.get("gate_only")
+                                   or g.get("gate_rerunnable")
+                                   or wf in cancelled)]
+    out += [wf for wf, g in cancelled.items()
+            if g.get("run_id") and wf not in out]
+    return out
 
 
 def act_cell(pr: str, meta: dict, s: dict) -> str:
