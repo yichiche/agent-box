@@ -121,6 +121,13 @@ RUN_CI_LABEL = "run-ci"
 # already cleared as unrelated. Attempts are still counted, per head SHA, so the
 # dashboard can show how many times a workflow has been retried.
 SWEEP_DEDUP_MINUTES = 30
+# Backoff for an UNKNOWN mergeability, in seconds. Bounded on purpose: a sweep
+# walks the whole watchlist, so this is the per-PR worst case, paid only when
+# GitHub has not answered yet. Never keep the previous known value instead —
+# UNKNOWN shows up precisely when the branch just changed, which is also when a
+# conflict is most likely to have appeared, so stale `clean` is the one wrong
+# answer that actually misleads.
+MERGEABLE_RETRY_DELAYS = (5, 10, 20, 30)
 ACTIONS = ("re-run", "code-fix", "merge-main", "wait-upstream", "out-of-scope")
 
 PRIORITIES = ("P0", "P1", "P2")
@@ -645,9 +652,17 @@ def pr_snapshot(pr: str, repo: str) -> dict:
         "url,isDraft,body,labels"
     )
     data = json.loads(gh(["pr", "view", pr, "--repo", repo, "--json", fields]))
-    if data.get("mergeable") == "UNKNOWN":
-        # GitHub computes mergeability lazily; one re-query is enough in practice.
-        time.sleep(15)
+    # GitHub computes mergeability lazily, and asking is what schedules the
+    # computation — so the first answer on a recently-touched PR is routinely
+    # UNKNOWN. One 15s retry was not enough: #41982 and #39575 both stored
+    # UNKNOWN and then sat that way on the dashboard, while the real answer
+    # (MERGEABLE for both) had been available within the minute. A stale
+    # UNKNOWN survives until the next sweep, which on the regular track is a
+    # whole day. Poll instead, returning the moment it resolves.
+    for delay in MERGEABLE_RETRY_DELAYS:
+        if data.get("mergeable") != "UNKNOWN":
+            break
+        time.sleep(delay)
         data = json.loads(gh(["pr", "view", pr, "--repo", repo, "--json", fields]))
     return data
 

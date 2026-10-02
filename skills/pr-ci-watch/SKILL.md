@@ -671,9 +671,19 @@ already know the sweep *is* a Claude turn.
   with nothing re-run yet — the Action cell distinguishes *decided, not yet
   applied* from a re-run GitHub actually refused, and only the latter is
   recorded (as `rerun_deferred`) by a real `--apply` attempt.
-- **`mergeable: UNKNOWN`** means GitHub is still computing — the script re-queries
-  once after 15s. If it is *still* unknown, the conflict check is deferred to the
-  next sweep (CI checks are evaluated as normal); it is never treated as clean.
+- **`mergeable: UNKNOWN`** means GitHub is still computing, not that anything is
+  wrong — asking is what schedules the computation, so the first answer on a
+  recently-touched PR is routinely UNKNOWN. The snapshot polls (5s, 10s, 20s,
+  30s), returning the moment it resolves. A single retry was not enough: two PRs
+  stored UNKNOWN and sat that way on the dashboard while the real answer had
+  been available within the minute — and a stale UNKNOWN survives until the next
+  sweep, which on the regular track is a whole day.
+  If it is *still* unknown after the backoff, the conflict check is deferred to
+  the next sweep (CI checks are evaluated as normal); it is never treated as
+  clean. The previous known value is **not** kept either — UNKNOWN appears
+  precisely when the branch just changed, which is when a conflict is most
+  likely to have appeared, so a stale `clean` is the one wrong answer that
+  actually misleads.
 - **Draft PRs stay on the list** and keep their track — snapshotted every
   sweep, but never triaged, labelled or re-run. CI on a draft is the author's
   scratchpad and is often intentionally red.
