@@ -720,8 +720,14 @@ def behind_by(repo: str, base: str, sha: str) -> int | None:
         return None
 
 
-def failed_in_scope(pr: str, repo: str) -> tuple[dict, dict]:
-    """-> ({workflow: {run_id, jobs[]}}, tally)."""
+def failed_in_scope(pr: str, repo: str) -> tuple[dict, dict, dict]:
+    """-> ({workflow: {run_id, jobs[]}}, tally, {workflow: {run_id, jobs[]}}).
+
+    The third value is the cancelled in-scope work. It is kept apart from
+    `groups` because a cancelled job is not a failure and must not be counted
+    as one — but it is not nothing either, and treating it as nothing is how
+    #39575 reported `Pass` with every required shard killed mid-run.
+    """
     raw = gh(
         [
             "pr",
@@ -736,6 +742,7 @@ def failed_in_scope(pr: str, repo: str) -> tuple[dict, dict]:
     )
     checks = json.loads(raw) if raw.strip() else []
     groups: dict[str, dict] = {}
+    cancelled: dict[str, dict] = {}
     tally = {"pass": 0, "fail": 0, "pending": 0, "skipping": 0, "queued": 0}
     for c in checks:
         if not in_scope(c.get("workflow", "")):
@@ -749,6 +756,12 @@ def failed_in_scope(pr: str, repo: str) -> tuple[dict, dict]:
         # (the Verdict column, the clean-CI print) keeps working untouched.
         if bucket == "pending" and c.get("state") == "QUEUED":
             tally["queued"] += 1
+        if bucket == "cancel":
+            cg = cancelled.setdefault(
+                c["workflow"], {"run_id": run_id_of(c.get("link", "")), "jobs": []})
+            cg["jobs"].append(c.get("name", "?"))
+            if not cg["run_id"]:
+                cg["run_id"] = run_id_of(c.get("link", ""))
         if bucket != "fail":
             continue
         wf = c["workflow"]
@@ -806,7 +819,7 @@ def failed_in_scope(pr: str, repo: str) -> tuple[dict, dict]:
         g["watcher_only"] = bool(g["watcher_jobs"]) and not g["jobs"]
         # Signature of *what* failed, so a repeat after a re-run is detectable.
         g["sig"] = "|".join(sorted(g["jobs"] + g["watcher_jobs"]))
-    return groups, tally
+    return groups, tally, cancelled
 
 
 def cmd_sweep(a) -> None:
@@ -974,7 +987,7 @@ def cmd_sweep(a) -> None:
             continue  # CI is meaningless until the conflict is resolved
 
         # 2. in-scope CI
-        groups, tally = failed_in_scope(pr, repo)
+        groups, tally, cancelled = failed_in_scope(pr, repo)
         row["tally"] = tally
         s["tally"] = tally  # drives the Running / Pass / Fail column
         if not groups:
@@ -1115,6 +1128,38 @@ def cmd_sweep(a) -> None:
             row["outcome"] = "gated"
             report.append(row)
             continue
+        # In-scope jobs were cancelled and nothing is in flight to replace
+        # them. Not a test result and not nothing: the jobs have to actually
+        # run before this PR has a verdict, and no log exists for /ci-analysis
+        # to read, so this is a re-run and not a triage question. Placed ahead
+        # of the out-of-scope branch because that branch's premise — "nothing
+        # here to re-run" — is exactly what a cancelled run disproves.
+        #
+        # Bounded to one attempt per head SHA. A cancel is often the
+        # concurrency group doing its job, and a sweep that re-runs every time
+        # it sees one can cancel-and-retry in a loop.
+        cancelled_now = {
+            w: g for w, g in (cancelled or {}).items()
+            if g.get("run_id") and not rerun_count(s, w, sha)
+        }
+        if cancelled_now and not tally.get("pending") and not real:
+            s["cancelled_groups"] = cancelled_now
+            s["last_action"] = "re-run"
+            s["last_verdict"] = (
+                "; ".join(f"{w}: {len(g['jobs'])} job(s) cancelled mid-run"
+                          for w, g in cancelled_now.items())
+                + " — cancelled, not failed; the jobs never produced a result"
+            )
+            s["verdict_at"] = now()
+            print("        -> re-run: "
+                  + ", ".join(f"{w} had {len(g['jobs'])} job(s) cancelled"
+                              for w, g in cancelled_now.items())
+                  + "; nothing is running to replace them")
+            row["outcome"] = "auto-re-run-cancelled"
+            rerun.append(pr)
+            report.append(row)
+            continue
+        s.pop("cancelled_groups", None)
         if not real:
             # Every in-scope failure is an aggregation gate, so the root cause is
             # in a vendor workflow we deliberately ignore (or a job that never
@@ -1278,7 +1323,19 @@ def cmd_apply_verdict(a) -> None:
         log_line(f"#{pr} verdict={a.action} :: {a.summary}")
         return
 
-    groups = s.get("failed_groups") or {}
+    # Cancelled work is folded in here rather than kept as a separate pass: a
+    # workflow can be in both (#39575's `PR Test Base` had 19 cancelled jobs
+    # and one failed gate), and re-running it twice would have the second
+    # attempt cancel the first through the very concurrency group that caused
+    # this.
+    groups = {w: dict(g) for w, g in (s.get("failed_groups") or {}).items()}
+    for w, cg in (s.get("cancelled_groups") or {}).items():
+        g = groups.setdefault(
+            w, {"run_id": cg.get("run_id"), "jobs": [], "gate_jobs": [],
+                "watcher_jobs": []})
+        g["cancelled_jobs"] = cg.get("jobs") or []
+        if not g.get("run_id"):
+            g["run_id"] = cg.get("run_id")
     if not groups:
         die(f"#{pr} has no recorded failed in-scope workflows — re-run `sweep --pr {pr}`")
 
@@ -1327,7 +1384,8 @@ def cmd_apply_verdict(a) -> None:
         # evaluated against whoever triggers the run — so a re-run from this
         # account, which has write access, turns it green. Skipping it here is
         # what left #34502's NVIDIA CI permanently unstarted.
-        if g.get("gate_only") and not g.get("gate_rerunnable") and not a.force_gates:
+        if (g.get("gate_only") and not g.get("gate_rerunnable")
+                and not g.get("cancelled_jobs") and not a.force_gates):
             why = g.get("gate_hint") or (
                 f"only {', '.join(g.get('gate_jobs', [])[:3])} failed; re-running an "
                 f"aggregation gate cannot turn it green"
@@ -1343,15 +1401,23 @@ def cmd_apply_verdict(a) -> None:
         # entry that points at an older run even though the snapshot itself is
         # current — a re-run recorded against a superseded workflow run.
         rc, out, _ = gh_try(["api", f"repos/{a.repo}/actions/runs/{run_id}",
-                             "-q", ".head_sha"])
-        run_sha = out.strip() if rc == 0 else ""
+                             "-q", ".head_sha + \" \" + (.conclusion // \"\")"])
+        run_sha, _, run_conclusion = (out.strip() if rc == 0 else "").partition(" ")
         if run_sha and current and run_sha != current:
             skipped.append(
                 f"{wf} (run {run_id} is on {run_sha[:8]}, not the current head "
                 f"{current[:8]} — re-queuing it would cancel the live run)")
             continue
 
-        endpoint = f"repos/{a.repo}/actions/runs/{run_id}/rerun-failed-jobs"
+        # `rerun-failed-jobs` re-runs failed jobs; a cancelled job is not one,
+        # so on a cancelled run it restarts the aggregation gate and leaves
+        # every killed test exactly where it was. #39575's run 37021312519 had
+        # 19 cancelled jobs against a single failure — the narrow endpoint
+        # would have re-run that one gate and reported success.
+        full = bool(g.get("cancelled_jobs")) or run_conclusion == "cancelled"
+        how = ", all jobs — the run was cancelled" if full else ""
+        endpoint = (f"repos/{a.repo}/actions/runs/{run_id}/"
+                    + ("rerun" if full else "rerun-failed-jobs"))
         if a.apply:
             rc, _, err = gh_try(["api", "-X", "POST", endpoint])
             if rc != 0:
@@ -1375,9 +1441,9 @@ def cmd_apply_verdict(a) -> None:
             # from "a different failure this time".
             reruns[wf] = {"sha": sha, "count": used + 1, "at": now(),
                           "sig": g.get("sig", "")}
-            did.append(f"{wf} (run {run_id}, attempt {used + 1})")
+            did.append(f"{wf} (run {run_id}, attempt {used + 1}{how})")
         else:
-            did.append(f"WOULD rerun {wf} (run {run_id}, attempt {used + 1})")
+            did.append(f"WOULD rerun {wf} (run {run_id}, attempt {used + 1}{how})")
 
     for line in did:
         print(f"#{pr}  re-run: {line}")
