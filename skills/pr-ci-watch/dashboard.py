@@ -1,21 +1,34 @@
 #!/usr/bin/env python3
 """pr-ci-watch dashboard — stdlib HTTP server, no dependencies.
 
-Deliberately inert: it reads and writes watchlist.json / state.json and nothing
-else. It makes no `gh` calls and cannot re-run a workflow or post a comment.
-Every outward-facing action stays in `watch.py sweep`, which runs under a Claude
-turn — so the web layer never needs credentials and has no blast radius.
+Mostly a view over watchlist.json / state.json. It makes no `gh` calls of its
+own and formats no GitHub request itself; everything outward-facing is delegated
+to `watch.py`, which owns the guards (one conflict comment per head SHA, the
+gate-only re-run rules, the monitoring switch).
 
-The one control that *does* bite immediately is the ON/OFF switch: it writes
-`_config.enabled`, which every sweep (including a cron-fired one) checks before
-doing anything. Pausing therefore works from the browser with no Claude turn.
+Three controls do bite immediately, and all three are deliberate:
+
+- **ON/OFF** writes `_config.enabled`, which every sweep — including a cron-fired
+  one — checks first, so pausing works from a phone with no Claude turn.
+- **Auto** (per PR) writes `watchlist[pr].auto.{triage,rerun}`. Both default on,
+  so an entry that predates the switches behaves exactly as it did. Off means
+  "keep watching this PR, do not act on it".
+- **Act now** (per PR) is three buttons that do not wait for the schedule:
+  `Triage now` spawns a headless `claude -p` (the one place this page starts a
+  Claude turn, hence a concurrency cap), `Re-run CI` POSTs a re-run without
+  waiting for a verdict, and `Update branch` calls GitHub's own
+  `PUT /pulls/{n}/update-branch` — a server-side merge commit that cannot
+  rewrite the author's commits or resolve a conflict.
 """
 
 from __future__ import annotations
 
 import html
 import json
+import os
 import re
+import shlex
+import shutil
 import socket
 from urllib.parse import quote, urlparse, parse_qs
 import subprocess
@@ -26,9 +39,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from history import history_html  # noqa: E402
+import auth as ghauth  # noqa: E402
+from auth import DEVICE_URL, SCOPES  # noqa: E402
 from watch import (  # noqa: E402
+    AUTO_FIELDS,
     DATA_DIR,
     PRIORITIES,
+    auto_on,
+    set_auto,
     STATE,
     WATCHLIST,
     ci_action,
@@ -48,6 +66,7 @@ from watch import (  # noqa: E402
     tally_bits,
     TRACKS,
     GATE_BLOCKING,
+    HOST_HOME,
     log_line,
     save,
     set_monitoring,
@@ -84,6 +103,124 @@ def run_refresh() -> None:
         out, rc = f"refresh failed: {e}", 1
     with SWEEP_LOCK:
         SWEEP.update(running=False, finished=now(), output=out, rc=rc)
+
+
+# --- Triage now: one headless Claude turn per PR ------------------------------
+
+# Triage is a log read, not a rule, so it genuinely needs a model — `watch.py`
+# can only ever queue it. `claude -p` is how this page stops queueing and just
+# does it. Two at a time: each one is a full /ci-analysis pass over a PR's
+# failing jobs, and a row of clicks would otherwise fan out into a dozen
+# concurrent turns against the same GitHub token.
+MAX_CONCURRENT_RUNS = 2
+RUN_TIMEOUT_SECONDS = 1800
+
+JOBS: dict[str, dict] = {}
+JOBS_LOCK = threading.Lock()
+
+# The dashboard is usually started detached (`setsid nohup`) from cron, a
+# login-less shell, or an editor task, so it inherits a bare PATH the same way
+# the cron sweep does — see the PATH export in cron-sweep.sh, which exists
+# because every sweep used to die on FileNotFoundError: 'gh'. `claude` and `gh`
+# live in per-user bin dirs that a bare PATH does not contain, so resolve them
+# against a widened PATH rather than trusting whatever we were launched with.
+# RUN_PATH is also handed to the turn itself: the triage prompt shells out to
+# `gh`, so a claude we found by widening PATH would otherwise fail one level
+# deeper for the same reason.
+EXTRA_PATH = [str(Path.home() / ".local/bin"), str(HOST_HOME / "bin"),
+              "/root/.local/bin", "/usr/local/bin"]
+RUN_PATH = os.pathsep.join(
+    dict.fromkeys(EXTRA_PATH + os.environ.get("PATH", "").split(os.pathsep)))
+
+
+def _resolve_claude() -> str:
+    """Explicit override wins; otherwise search the widened PATH."""
+    override = os.environ.get("PR_CI_WATCH_CLAUDE")
+    if override:
+        return override
+    return shutil.which("claude", path=RUN_PATH) or "claude"
+
+
+CLAUDE_BIN = _resolve_claude()
+
+
+# What the triage turn is allowed to touch, instead of switching permissions
+# off wholesale. `--dangerously-skip-permissions` used to carry this, but Claude
+# Code refuses that flag under `getuid() === 0`, which is every run once the
+# dashboard lives in the container rather than on the host as a normal user.
+# An allowlist sidesteps the guard and is the tighter grant anyway: triage reads
+# CI logs and records a verdict, so `gh` plus this directory's own `watch.py`
+# is the whole job. `Skill` is here because step 2 invokes /ci-analysis, and the
+# Bash patterns stay narrow because the prompt already runs with cwd=here and
+# therefore never needs to `cd` first.
+RUN_ALLOWED_TOOLS = [
+    "Bash(gh *)",
+    "Bash(python3 watch.py *)",
+    "Read", "Grep", "Glob", "Skill", "TodoWrite",
+]
+
+RUN_PROMPT = """/pr-ci-watch triage {pr}
+
+Do this for PR #{pr} only, end to end, without asking me anything:
+
+1. `python3 watch.py sweep --pr {pr} --apply --force` in {here}.
+2. If it reports the PR needs triage, run /ci-analysis on it, reduce the Root
+   Cause Failures table to exactly one action using the precedence in SKILL.md
+   (code-fix > merge-main > wait-upstream > re-run), then record it with
+   `python3 watch.py apply-verdict --pr {pr} --action <action> --summary "<one line>" --apply`.
+3. If the sweep already settled it (out-of-scope, verdict held, auto-re-run),
+   say so and record nothing new.
+
+Do not post any comment on the PR. Do not merge main or push to any branch.
+Finish with one line: `#{pr} <action>: <one-sentence reason>`.
+"""
+
+
+def run_now(pr: str) -> None:
+    here = Path(__file__).resolve().parent
+    cmd = [CLAUDE_BIN, "-p", RUN_PROMPT.format(pr=pr, here=here),
+           "--allowedTools", *RUN_ALLOWED_TOOLS]
+    cmd += shlex.split(os.environ.get("PR_CI_WATCH_CLAUDE_ARGS", ""))
+    env = {**os.environ, "PATH": RUN_PATH}
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=RUN_TIMEOUT_SECONDS, cwd=str(here), env=env)
+        out, rc = (p.stdout or "") + (p.stderr or ""), p.returncode
+    except FileNotFoundError:
+        # Name the dirs we searched: the usual cause is that the dashboard runs
+        # on a host where Claude Code is only installed inside a container.
+        out, rc = (f"`{CLAUDE_BIN}` not found. Searched PATH={RUN_PATH}. "
+                   f"Install Claude Code where the dashboard runs, or start the "
+                   f"dashboard with PR_CI_WATCH_CLAUDE=/full/path/to/claude."), 127
+    except subprocess.TimeoutExpired:
+        out, rc = f"timed out after {RUN_TIMEOUT_SECONDS // 60} min", 1
+    except Exception as e:  # never let a worker kill the server
+        out, rc = f"run failed: {e}", 1
+    with JOBS_LOCK:
+        JOBS[pr] = {"running": False, "started": JOBS.get(pr, {}).get("started", ""),
+                    "finished": now(), "output": out.strip(), "rc": rc}
+    # Whatever the turn decided is in state.json now; re-read this one PR so the
+    # table shows the verdict rather than the pre-click snapshot.
+    try:
+        subprocess.run([sys.executable, str(here / "watch.py"), "sweep", "--pr", pr],
+                       capture_output=True, text=True, timeout=300, cwd=str(here))
+    except Exception:
+        pass
+
+
+def start_run(pr: str) -> str:
+    """Returns "" if started, else why not."""
+    with JOBS_LOCK:
+        if JOBS.get(pr, {}).get("running"):
+            return f"#{pr} is already running"
+        live = sum(1 for j in JOBS.values() if j.get("running"))
+        if live >= MAX_CONCURRENT_RUNS:
+            return (f"{live} runs already in flight (cap {MAX_CONCURRENT_RUNS}) — "
+                    f"wait for one to finish")
+        JOBS[pr] = {"running": True, "started": now(), "finished": "",
+                    "output": "", "rc": None}
+    threading.Thread(target=run_now, args=(pr,), daemon=True).start()
+    return ""
 
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -126,8 +263,8 @@ PAGE = """<!doctype html>
      Status — the column that carries all the prose — into a two-words-per-line
      ribbon. Widths come from the <colgroup>. */
   table {{ width:100%; border-collapse:collapse; table-layout:fixed;
-    min-width:1150px; }}
-  /* A 12-column table has a floor; below it, scroll rather than crush the
+    min-width:1400px; }}
+  /* A 13-column table has a floor; below it, scroll rather than crush the
      knobs until their borders paint over the next column. */
   .panel.tabbed {{ overflow-x:auto; }}
   th {{ text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.04em;
@@ -143,6 +280,29 @@ PAGE = """<!doctype html>
      minimal side padding, and their columns are sized for label + native
      dropdown arrow rather than for the text alone. */
   select.mini {{ width:100%; padding:4px 2px; font-size:11px; }}
+  /* Auto column: the two policy switches, side by side.
+     Grid rather than flex so `triage` and `re-run` keep the same width however
+     long their labels are — two switches of different sizes read as two
+     different kinds of control. */
+  .autobox {{ display:grid; grid-template-columns:1fr 1fr; gap:3px; }}
+  /* Beats `td.knob form {{ display:block }}`, which would stack them. */
+  .autobox > form {{ display:block; margin:0; }}
+  button.auto {{ width:100%; padding:3px 2px; font-size:10px; border-radius:5px;
+    letter-spacing:.02em; }}
+  /* Act now: one button per row, stacked, all the same width — these are
+     three different actions, not a primary with two afterthoughts. */
+  .actbox {{ display:grid; gap:3px; }}
+  .actbox > form {{ display:block; margin:0; }}
+  button.act {{ width:100%; padding:4px 2px; font-size:10px; border-radius:5px;
+    border:1px solid var(--accent); background:transparent; color:var(--accent);
+    font-weight:600; cursor:pointer; white-space:nowrap; }}
+  button.act:hover:not(:disabled) {{ background:var(--accent); color:#fff; }}
+  /* The one that pushes a commit to someone else's branch does not look like
+     the two that only touch CI. */
+  button.act.go {{ border-color:var(--warn); color:var(--warn); }}
+  button.act.go:hover:not(:disabled) {{ background:var(--warn); color:#fff; }}
+  button.act:disabled {{ border-color:var(--line); color:var(--dim);
+    cursor:default; }}
   /* Drag handle. Only the grip starts a drag — a draggable <tr> would eat text
      selection and turn every PR link into a drag. */
   .grip {{ display:block; cursor:grab; color:var(--dim); user-select:none;
@@ -228,6 +388,7 @@ PAGE = """<!doctype html>
     <div class="sub">{repo} &middot; NVIDIA CI only &middot; {generated}</div>
   </div>
   <div class="grow"></div>
+  {who}
   <form class="inline" method="post" action="/api/refresh">
     <button class="primary" type="submit" {refresh_disabled}>{refresh_label}</button>
   </form>
@@ -238,9 +399,12 @@ PAGE = """<!doctype html>
   <span class="sub">{arm_line}</span>
 </div>
 
+{auth_panel}
 {banner}
 {refresh_status}
+{run_status}
 {triage_panel}
+{mergemain_panel}
 
 <div class="panel"><form class="add" method="post" action="/api/add">
   <input type="text" name="ref" placeholder="Paste a PR link or number — https://github.com/{repo}/pull/41870" autofocus>
@@ -547,7 +711,18 @@ def merge_cell(s: dict) -> str:
         return ('<span class="pill bad" title="branch conflicts with main; the '
                 'author has to resolve it before CI can finish">conflict</span>')
     if m == "MERGEABLE":
-        return '<span class="pill ok" title="no git conflict with main">clean</span>'
+        pill = ('<span class="pill ok" title="no git conflict with main">'
+                'clean</span>')
+        # How far behind is not a merge *problem* — it is clean either way —
+        # but it is the one fact that decides whether `Update branch` has
+        # anything to do, so it belongs next to the pill that implies ready.
+        behind = s.get("behind_by")
+        if behind:
+            pill += (f'<div class="dim" style="font-size:10px; margin-top:3px" '
+                     f'title="main has {behind} commit(s) this branch does not. '
+                     f'Harmless on its own; it matters when a CI failure was '
+                     f'already fixed on main.">{behind} behind</div>')
+        return pill
     if m == "UNKNOWN":
         # Not a state of the PR — a state of our knowledge. GitHub computes
         # mergeability lazily and had not answered by the time that sweep ran
@@ -975,6 +1150,118 @@ def group_cell(pr: str, meta: dict) -> str:
     )
 
 
+AUTO_HINT = {
+    "triage": ("run /ci-analysis on this PR's red jobs and record a verdict",
+               "leave this PR's red CI unjudged"),
+    "rerun": ("re-run failed workflows once a verdict says the failure is not "
+              "this PR's fault",
+              "never re-run anything on this PR"),
+}
+
+
+def auto_cell(pr: str, meta: dict) -> str:
+    """Two switches and the button that fires them now.
+
+    Short labels on purpose: `triage` / `re-run` is the whole vocabulary of the
+    tool, and a column that spells out "Auto triage: enabled" in every row is a
+    column nobody can scan.
+    """
+    bits = []
+    for f in AUTO_FIELDS:
+        on = auto_on(meta, f)
+        label = "re-run" if f == "rerun" else f
+        why = AUTO_HINT[f][0 if on else 1]
+        bits.append(
+            f'<form class="inline" method="post" action="/api/auto">'
+            f'<input type="hidden" name="pr" value="{esc(pr)}">'
+            f'<input type="hidden" name="field" value="{esc(f)}">'
+            f'<input type="hidden" name="on" value="{"0" if on else "1"}">'
+            f'<button class="auto {"on" if on else "off"}" '
+            f'title="{esc(("ON — " if on else "OFF — ") + why)} (click to turn '
+            f'{"off" if on else "on"})">{esc(label)}</button></form>'
+        )
+    return f'<div class="autobox">{"".join(bits)}</div>'
+
+
+def rerunnable(s: dict) -> list:
+    """Workflows a re-run could actually turn green — the same test
+    `apply-verdict` applies before POSTing, so the button is not offered for
+    rows where it would come back "skipped: gate-only"."""
+    return [wf for wf, g in (s.get("failed_groups") or {}).items()
+            if g.get("run_id") and (not g.get("gate_only") or g.get("gate_rerunnable"))]
+
+
+def act_cell(pr: str, meta: dict, s: dict) -> str:
+    """Do it now, by hand — the column that does not wait for the schedule.
+
+    Kept apart from Auto on purpose. Those are a *policy* ("from now on…"),
+    these are an *action* ("this PR, now"), and they were unreadable stacked
+    together: `re-run` appeared twice in one cell meaning two different things.
+    """
+    bits = []
+    with JOBS_LOCK:
+        job = dict(JOBS.get(pr) or {})
+    if job.get("running"):
+        bits.append('<button class="act" disabled title="a Claude turn is '
+                    'working on this PR right now">triaging…</button>')
+    elif not auto_on(meta, "triage"):
+        bits.append('<button class="act" disabled title="auto triage is off for '
+                    'this PR — turn the triage switch on to allow it">'
+                    'Triage now</button>')
+    else:
+        bits.append(
+            f'<form class="inline" method="post" action="/api/runnow">'
+            f'<input type="hidden" name="pr" value="{esc(pr)}">'
+            f'<button class="act" title="read the failing job logs now and '
+            f'record a verdict, instead of waiting for the next scheduled '
+            f'sweep — starts a Claude turn, costs tokens">Triage now</button>'
+            f"</form>")
+
+    wfs = rerunnable(s)
+    if wfs:
+        bits.append(
+            f'<form class="inline" method="post" action="/api/rerun" '
+            f'onsubmit="return confirm(\'Re-run failed jobs on #{esc(pr)}?\\n\\n'
+            f'{esc(", ".join(wfs))}\\n\\nThis skips triage — you are deciding '
+            f"the failure is not this PR's fault.')\">"
+            f'<input type="hidden" name="pr" value="{esc(pr)}">'
+            f'<button class="act" title="re-run {esc(", ".join(wfs))} now, '
+            f'without waiting for a verdict">Re-run CI</button></form>')
+    else:
+        bits.append('<button class="act" disabled title="nothing failing that a '
+                    're-run could turn green">Re-run CI</button>')
+
+    behind = s.get("behind_by")
+    done = (s.get("update_branch") or {}).get("sha") == s.get("head_sha")
+    if s.get("mergeable") == "CONFLICTING":
+        bits.append('<button class="act" disabled title="branch conflicts with '
+                    'main — GitHub cannot merge it for you; needs '
+                    '/pr-conflict-fix">Update branch</button>')
+    elif done:
+        bits.append('<button class="act" disabled title="already updated on this '
+                    'head; CI is running on the merge commit">updated ✓</button>')
+    elif not behind:
+        # None (never measured) and 0 (up to date) both mean "no reason to show
+        # a live button"; the title says which.
+        bits.append(f'<button class="act" disabled title="'
+                    f'{"up to date with main" if behind == 0 else "not measured yet — next sweep records it"}'
+                    f'">Update branch</button>')
+    else:
+        bits.append(
+            f'<form class="inline" method="post" action="/api/updatebranch" '
+            f'onsubmit="return confirm(\'Merge main into #{esc(pr)}?\\n\\n'
+            f'{behind} commit(s) behind. GitHub makes the merge commit '
+            f'server-side and it will be attributed to you.\\n\\nThe branch '
+            f"belongs to @{esc(s.get('author') or '?')}. Their commits are not "
+            f'rewritten and no conflict is resolved.\')">'
+            f'<input type="hidden" name="pr" value="{esc(pr)}">'
+            f'<button class="act go" title="GitHub\'s own Update branch: merge '
+            f'the latest main into this PR branch ({behind} behind). Does not '
+            f'touch anyone\'s code and cannot resolve a conflict">'
+            f'Update branch</button></form>')
+    return f'<div class="actbox">{"".join(bits)}</div>'
+
+
 def render_table(wl: dict, st: dict, tab: str = "") -> str:
     if not wl:
         return EMPTY
@@ -987,14 +1274,16 @@ def render_table(wl: dict, st: dict, tab: str = "") -> str:
     # again. The floor is held by `table { min-width }` instead.
     widths = (
         3,    # grip   — leftmost, where a drag handle is looked for
-        6,    # Pri    — a <select>; see note below
-        18,   # PR + title + author
-        7,    # Group
-        7,    # Track  — a <select>
+        5,    # Pri    — a <select>; see note below
+        16,   # PR + title + author
+        6,    # Group
+        6,    # Track  — a <select>
         7,    # Merge  — fits the `conflict` / `unknown` pill unwrapped
         6,    # Verdict
-        9,    # Action
-        29,   # Status — all the prose now lives here
+        7,    # Action
+        8,    # Auto   — the two policy switches, side by side
+        10,   # Act    — three stacked do-it-now buttons; widest label sets it
+        18,   # Status — all the prose now lives here
         5,    # Swept  — wraps to date / time, both halves unbroken
         3,    # remove — a glyph, not the word; see below
     )
@@ -1004,7 +1293,7 @@ def render_table(wl: dict, st: dict, tab: str = "") -> str:
     span = len(widths)
     head = (
         "<tr><th></th><th>Pri</th><th>PR</th><th>Group</th><th>Track</th><th>Merge</th>"
-        "<th>Verdict</th><th>Action</th><th>Status</th>"
+        "<th>Verdict</th><th>Action</th><th>Auto</th><th>Act now</th><th>Status</th>"
         "<th>Swept (TW)</th><th></th></tr>"
     )
     rows = []
@@ -1025,6 +1314,8 @@ def render_table(wl: dict, st: dict, tab: str = "") -> str:
             f"<td>{merge_cell(s)}</td>"
             f"<td>{verdict_cell(s)}</td>"
             f"<td>{action_cell(s)}</td>"
+            f'<td class="knob">{auto_cell(pr, meta)}</td>'
+            f'<td class="knob">{act_cell(pr, meta, s)}</td>'
             f"<td>{status_cell(pr, s)}</td>"
             f'<td class="mono dim">{esc(tw(s.get("last_sweep")))}</td>'
             # A glyph, not the word "remove": a <button> cannot wrap or shrink,
@@ -1048,6 +1339,174 @@ def render_table(wl: dict, st: dict, tab: str = "") -> str:
         f'<input type="hidden" id="roworder" name="order" value="">'
         f'<input type="hidden" name="tab" value="{esc(tab or "")}"></form>'
     )
+
+
+def render_run_status() -> str:
+    """What the Triage now clicks are doing, and what the finished ones decided.
+
+    Separate from the refresh banner because these two things fail differently:
+    a refresh is a script that either ran or did not, a run is a Claude turn
+    that can finish cleanly and still decide "nothing to do".
+    """
+    with JOBS_LOCK:
+        jobs = {pr: dict(j) for pr, j in JOBS.items()}
+    if not jobs:
+        return ""
+    live = sorted(pr for pr, j in jobs.items() if j.get("running"))
+    out = []
+    if live:
+        out.append(
+            f'<div class="banner warn">Running now on '
+            f'{", ".join("#" + esc(p) for p in live)}… a headless Claude turn is '
+            f"sweeping, reading the failing job logs, and recording a verdict. "
+            f"This page polls until it finishes; it posts no comment and pushes "
+            f"to no branch.</div>")
+    done = sorted((j.get("finished", ""), pr, j)
+                  for pr, j in jobs.items() if not j.get("running"))
+    for _, pr, j in reversed(done[-3:]):
+        cls = "ok" if j.get("rc") == 0 else "bad"
+        # The last line is the one the prompt asks for (`#N <action>: <why>`);
+        # the rest is the turn's working-out and belongs behind the disclosure.
+        body = (j.get("output") or "").strip()
+        head_ = body.splitlines()[-1] if body else "no output"
+        out.append(
+            f'<details class="panel"><summary class="{cls}">'
+            f'<b>Run #{esc(pr)}</b> <span class="dim">{esc(tw(j.get("finished")))}'
+            f'</span> &middot; <span class="mono">{esc(head_[:200])}</span>'
+            f'</summary><pre class="mono" style="white-space:pre-wrap; '
+            f'margin:10px 0 0;">{esc(body[-6000:])}</pre></details>')
+    return "".join(out)
+
+
+def render_mergemain_panel(wl: dict, st: dict) -> str:
+    """PRs whose verdict is `merge-main`, with the one button that fixes it.
+
+    The button is GitHub's own `Update branch` — a server-side merge commit —
+    and not a clone-merge-push, which is why it is offered on other people's
+    branches at all: it cannot rewrite their commits and cannot resolve a
+    conflict. A conflicting branch gets no button here; that is
+    `/pr-conflict-fix`.
+    """
+    rows = []
+    for pr, meta in sorted(wl.items(), key=lambda kv: int(kv[0])):
+        s = st.get(pr, {})
+        # Gated on the head SHA, the same way the sweep decides to hold a
+        # verdict. `verdict_action` is durable by design — it survives a sweep
+        # that resets `last_action` — so three of these branches still carried
+        # `merge-main` from a SHA the author has since pushed past, and the
+        # panel listed PRs whose CI had long gone green.
+        if (s.get("verdict_action") != "merge-main"
+                or s.get("verdict_sha") != s.get("head_sha")):
+            continue
+        url = s.get("url") or f"https://github.com/{meta.get('repo', '')}/pull/{pr}"
+        behind = s.get("behind_by")
+        rows.append(
+            f'<li><a href="{esc(url)}" target="_blank"><b>#{esc(pr)}</b></a> '
+            f'<span class="dim">@{esc(s.get("author") or "?")}'
+            f'{f" &middot; {behind} behind" if behind else ""} &middot; '
+            f'{esc(tw(s.get("verdict_at")))}</span>'
+            f'<div style="max-width:220px; margin:4px 0 8px">'
+            f'{act_cell(pr, meta, s).replace(chr(10), "")}</div>'
+            f'<span class="mono dim">{esc(s.get("last_verdict") or "")}</span></li>')
+    if not rows:
+        return ""
+    return (
+        f'<div class="panel"><h2>Main already has the fix &mdash; {len(rows)} PR(s)</h2>'
+        f'<div class="sub" style="margin-bottom:10px;">Triage found the failure '
+        f"is fixed on <b>main</b>, so re-running cannot help &mdash; the branch "
+        f"needs main merged into it. <b>Nobody has been told</b>: no comment is "
+        f"posted here. <b>Update branch</b> is GitHub's own button &mdash; it "
+        f"makes the merge commit server-side, attributed to you, and never "
+        f"rewrites the author's commits or resolves a conflict. If the branch "
+        f'actually conflicts the button is disabled; that is '
+        f'<span class="mono">/pr-conflict-fix &lt;pr&gt;</span>.</div>'
+        f'<ul style="margin:0; padding-left:20px; line-height:1.7">'
+        f"{''.join(rows)}</ul></div>")
+
+
+def render_who(a: dict) -> str:
+    """Who GitHub thinks you are, in the bar — because every action on this
+    page is attributed to that account, including the merge commit."""
+    if not a.get("logged_in"):
+        return ('<form class="inline" method="post" action="/api/login">'
+                '<button class="off" type="submit">Sign in to GitHub</button>'
+                "</form>")
+    return (
+        f'<span class="sub" title="every re-run, comment and merge commit this '
+        f'page makes is attributed to this account">@{esc(a["user"])}</span>'
+        f'<form class="inline" method="post" action="/api/logout" '
+        f'onsubmit="return confirm(\'Sign out of GitHub?\\n\\nThis runs '
+        f'`gh auth logout`, so it signs out your whole gh CLI, not just this '
+        f'page.\')"><button class="linkish" type="submit">sign out</button>'
+        f"</form>")
+
+
+def render_auth_panel(a: dict, login: dict) -> str:
+    """The sign-in flow, and the two things that silently break without it.
+
+    Shown whenever there is something to do: not signed in, a device-code flow
+    in progress, or signed in with a token that lacks a scope this page needs.
+    """
+    out = []
+    state = login.get("state")
+    if state == "waiting" and login.get("code"):
+        code = login["code"]
+        out.append(
+            f'<div class="panel"><h2>Finish signing in to GitHub</h2>'
+            f'<div class="sub" style="margin-bottom:12px">Open '
+            f'<a href="{DEVICE_URL}" target="_blank">{DEVICE_URL}</a> on any '
+            f"device you are signed in to GitHub on, and enter this code. This "
+            f"page notices by itself when you are done.</div>"
+            f'<div style="display:flex; gap:14px; align-items:center; '
+            f'flex-wrap:wrap">'
+            f'<span class="mono" style="font-size:30px; letter-spacing:.14em; '
+            f'font-weight:700">{esc(code)}</span>'
+            f'<button class="primary" type="button" '
+            f"onclick=\"execCopy('{esc(code)}', this)\">Copy code</button>"
+            f'<form class="inline" method="post" action="/api/login/cancel">'
+            f'<button class="linkish" type="submit">cancel</button></form>'
+            f'</div><div class="sub" style="margin-top:10px">The code expires '
+            f"in about 15 minutes. Requested scopes: "
+            f'<span class="mono">{esc(SCOPES)}</span>.</div></div>')
+    elif state == "error" and login.get("error"):
+        out.append(f'<div class="banner bad"><b>Sign-in failed</b><br>'
+                   f'<span class="mono">{esc(login["error"])}</span></div>')
+
+    if not a.get("logged_in") and state != "waiting":
+        why = a.get("error") or ""
+        out.append(
+            f'<div class="panel"><h2>Not signed in to GitHub</h2>'
+            f'<div class="sub" style="margin-bottom:12px">The table above is '
+            f"read from files on disk and still renders, but nothing that "
+            f"talks to GitHub works &mdash; no refresh, no triage, no re-run, "
+            f"no update branch. Signing in here runs "
+            f"<span class=\"mono\">gh auth login</span>, the same thing you "
+            f"would run in a terminal, so the token lands where the "
+            f"<span class=\"mono\">gh</span> CLI already looks and nothing on "
+            f"this page stores it."
+            f'{f"<br><br><b>gh says:</b> <span class=.mono.>{esc(why)}</span>" if why else ""}'
+            f'</div>'
+            f'<div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">'
+            f'<form class="inline" method="post" action="/api/login">'
+            f'<button class="primary" type="submit">Sign in with a browser</button>'
+            f"</form>"
+            f'<span class="sub">or, if a proxy blocks that:</span>'
+            f'<form class="inline" method="post" action="/api/login/token" '
+            f'style="display:flex; gap:8px">'
+            f'<input class="note" type="password" name="token" '
+            f'placeholder="paste a personal access token" '
+            f'style="min-width:260px" autocomplete="off">'
+            f'<button type="submit">Use token</button></form></div></div>')
+    elif a.get("logged_in"):
+        missing = a.get("missing") or []
+        if missing:
+            out.append(
+                f'<div class="banner warn"><b>Signed in as @{esc(a["user"])}, '
+                f'but the token is missing <span class="mono">'
+                f'{esc(", ".join(missing))}</span>.</b> Reads work; '
+                f"<b>Re-run CI</b> and <b>Update branch</b> will fail when you "
+                f"click them. Sign out and back in to re-request scopes.</div>")
+    return "".join(out)
 
 
 def render_banner(st: dict, enabled: bool) -> str:
@@ -1204,14 +1663,29 @@ class Handler(BaseHTTPRequestHandler):
         enabled = monitoring_enabled(raw_st)
         with SWEEP_LOCK:
             running = SWEEP["running"]
+        with JOBS_LOCK:
+            # A triage run takes minutes, not seconds, so it polls slower than a
+            # refresh — 5s would be a few hundred useless reloads per turn.
+            run_live = any(j.get("running") for j in JOBS.values())
+        login = ghauth.login_state()
+        who = ghauth.status()
+        if who.get("logged_in"):
+            who["missing"] = ghauth.missing_scopes()
         page = PAGE.format(
             # Poll faster while a refresh is in flight so the result appears on
             # its own instead of after a 60s wait.
-            refresh=5 if running else REFRESH_SECONDS,
+            # While a device code is on screen, poll briskly: the whole point
+            # is that the page notices the moment GitHub accepts the code.
+            refresh=(3 if login.get("state") == "waiting"
+                     else 5 if running else 15 if run_live else REFRESH_SECONDS),
             refresh_label="Refreshing…" if running else "Refresh now",
             refresh_disabled="disabled" if running else "",
             refresh_status=render_refresh_status(),
+            who=render_who(who),
+            auth_panel=render_auth_panel(who, login),
+            run_status=render_run_status(),
             triage_panel=render_triage_panel(shown, st),
+            mergemain_panel=render_mergemain_panel(shown, st),
             repo=html.escape(self.repo),
             generated=now(),
             data=html.escape(str(DATA_DIR)),
@@ -1236,6 +1710,18 @@ class Handler(BaseHTTPRequestHandler):
         return {k: v[0] for k, v in parse_qs(raw, keep_blank_values=True).items()}
 
     def do_POST(self) -> None:
+        # Binding to loopback keeps the *network* out, but not the browser: any
+        # page you visit can POST a form to http://127.0.0.1:8813/api/... and
+        # your browser will send it. That is enough to re-run CI, merge main
+        # into a PR, or start a Claude turn on this machine. Browsers attach
+        # `Origin` to cross-site form POSTs, so a mismatch is a forgery; a
+        # missing header is curl or a same-origin navigation and is allowed.
+        origin = self.headers.get("Origin")
+        if origin:
+            host = (urlparse(origin).hostname or "").lower()
+            if host not in ("127.0.0.1", "localhost", "::1", ""):
+                self._send(403, b"cross-site POST refused", "text/plain")
+                return
         form = self._form()
         try:
             if self.path == "/api/notify":
@@ -1266,6 +1752,67 @@ class Handler(BaseHTTPRequestHandler):
                         SWEEP.update(running=True, started=now(), finished="",
                                      output="", rc=None)
                         threading.Thread(target=run_refresh, daemon=True).start()
+            elif self.path == "/api/runnow":
+                pr = parse_pr(form.get("pr", ""))
+                why = start_run(pr)
+                if why:
+                    NOTICE.update(at=now(), ok=False, text=why)
+                else:
+                    log_line(f"#{pr} Triage now started via dashboard")
+            elif self.path == "/api/login":
+                why = ghauth.start_login()
+                if why:
+                    NOTICE.update(at=now(), ok=False, text=why)
+            elif self.path == "/api/login/cancel":
+                ghauth.cancel()
+            elif self.path == "/api/login/token":
+                # The token is handed straight to `gh` and not kept, echoed or
+                # logged — the audit line records only that a sign-in happened.
+                ok, msg = ghauth.login_with_token(form.get("token", ""))
+                NOTICE.update(at=now(), ok=ok, text=msg)
+                log_line(f"gh sign-in via pasted token: "
+                         f"{'ok' if ok else 'rejected'}")
+            elif self.path == "/api/logout":
+                ok, msg = ghauth.logout()
+                NOTICE.update(at=now(), ok=ok, text=msg)
+                log_line("gh sign-out via dashboard")
+            elif self.path in ("/api/rerun", "/api/updatebranch"):
+                pr = parse_pr(form.get("pr", ""))
+                here = Path(__file__).resolve().parent
+                if self.path == "/api/rerun":
+                    # Routed through apply-verdict so the gate-only rules, the
+                    # per-SHA attempt counter and the "already running" deferral
+                    # are the same ones the sweep uses. --force-auto because an
+                    # explicit click outranks the standing switch.
+                    cmd = ["apply-verdict", "--pr", pr, "--action", "re-run",
+                           "--summary", "manual re-run from the dashboard",
+                           "--apply", "--force-auto"]
+                else:
+                    cmd = ["update-branch", "--pr", pr, "--apply"]
+                p = subprocess.run(
+                    [sys.executable, str(here / "watch.py"), *cmd],
+                    capture_output=True, text=True, timeout=300, cwd=str(here))
+                msg = (p.stdout or "").strip() or (p.stderr or "").strip()
+                NOTICE.update(at=now(), ok=(p.returncode == 0),
+                              text=msg or f"#{pr}: no output")
+                # Both change what the row should offer next (an updated branch
+                # has a new head, a re-run turns Verdict pending), so re-read
+                # this PR before the redirect redraws it.
+                subprocess.run(
+                    [sys.executable, str(here / "watch.py"), "sweep", "--pr", pr],
+                    capture_output=True, text=True, timeout=300, cwd=str(here))
+            elif self.path == "/api/auto":
+                pr = parse_pr(form.get("pr", ""))
+                field = form.get("field", "")
+                wl = load(WATCHLIST, {})
+                if pr in wl and field in AUTO_FIELDS:
+                    on = form.get("on") == "1"
+                    set_auto(wl[pr], field, on)
+                    save(WATCHLIST, wl)
+                    # Audit it like the other switches: "why did this PR stop
+                    # getting re-run" has to be answerable from the log.
+                    log_line(f"#{pr} auto {field}="
+                             f"{'on' if on else 'off'} via dashboard")
             elif self.path == "/api/monitoring":
                 st = load(STATE, {})
                 set_monitoring(st, form.get("on") == "1")

@@ -30,11 +30,19 @@ mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/cron.log"
 LOCK="$LOG_DIR/cron-${TRACK}.lock"
 
+# cron hands us a bare PATH (/usr/bin:/bin), and `gh` lives in the user's own
+# bin dir — without this every sweep dies on FileNotFoundError: 'gh'.
+export PATH="$HOST_HOME/bin:/usr/local/bin:$PATH"
+
 {
   echo "===== $(date -Is) track=$TRACK host=$(hostname) taipei=$(TZ=Asia/Taipei date +%H:%M) ====="
   if ! flock -n 9; then
     echo "skipped: another $TRACK sweep is still running"
     exit 0
+  fi
+  if ! command -v gh >/dev/null; then
+    echo "abort: gh not on PATH ($PATH) — install it or fix PATH in cron-sweep.sh"
+    exit 127
   fi
   python3 "$HERE/watch.py" sweep --track "$TRACK" --apply
   rc=$?

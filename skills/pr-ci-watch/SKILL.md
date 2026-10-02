@@ -31,6 +31,8 @@ Read `_shared/repo-config.md` for the `GH_TOKEN=""` rule. Repo is
 /pr-ci-watch list | status
 /pr-ci-watch sweep [--track high|regular|all] [--pr N…] [--apply] [--force]
 /pr-ci-watch triage <pr>…   # /ci-analysis + apply-verdict for PRs already swept
+/pr-ci-watch auto <pr> [--triage on|off] [--rerun on|off]   # per-PR switches
+/pr-ci-watch update-branch --pr N [--apply]   # GitHub's Update branch
 /pr-ci-watch report         # the <P0><CI clear><PR…> status block
 /pr-ci-watch pause | resume # kill switch; a paused sweep is a no-op
 /pr-ci-watch dashboard [--port 8812]
@@ -426,8 +428,157 @@ Stdlib HTTP server, no dependencies, loopback only (both `127.0.0.1` and `::1`,
 so an editor port-forwarder that resolves `localhost` to IPv6 still works). The
 script prints the Remote-SSH / `ssh -L` instructions; `--stop` shuts it down.
 
+### Signing in to GitHub
+
+**One dashboard per person, on their own machine.** This is not a service other
+people log in to — it is loopback-only and has no concept of a user. Sharing the
+skill means they run their own copy against their own watchlist, so sign-in
+exists to spare a newcomer "first go and figure out `gh auth login`", not to
+separate accounts.
+
+The sign-in button **is** `gh auth login --web`. There is no OAuth App to
+register, no client ID to configure, and `auth.py` never sees, stores or logs a
+token — `gh` writes it to the system credential store, which is where every
+`gh` call in `watch.py` already looks. Signing out is `gh auth logout`, so it
+signs out the whole `gh` CLI, not just this page; the confirm dialog says so.
+
+The only real work is that `gh auth login --web` is interactive: it prints a
+one-time code and waits for Enter before opening a browser. A web handler has no
+terminal, so it runs on a **pty**, the code is scraped from the output and shown
+on the page in 30px type, and Enter is fed from our side with `BROWSER=true` so
+a headless host does not try to launch one. The page polls every 3s while a code
+is on screen, so it notices by itself the moment GitHub accepts it.
+
+A **paste-a-PAT** field sits beside it for when a proxy blocks the device flow.
+It goes to `gh auth login --with-token` on stdin and is never echoed back or
+written to `sweep.log` — the audit line records only that a sign-in happened.
+
+Scopes requested: `repo,read:org,gist`. If you are signed in with a token
+missing `repo` or `read:org`, the page says so up front, because the failure
+mode otherwise is that everything reads fine and only **Re-run CI** and
+**Update branch** break when clicked — which looks like a broken button, not a
+missing permission.
+
+### Cross-site POSTs are refused
+
+Loopback keeps the network out, not the browser: any page you visit can POST a
+form to `http://127.0.0.1:8813/api/...` and your browser will send it — enough
+to re-run CI, merge main into a PR, or start a Claude turn on your machine.
+`do_POST` rejects a request whose `Origin` is not a loopback host. A *missing*
+`Origin` is allowed: that is `curl`, not a forgery.
+
 Columns: Pri, PR + title + author, group, track, merge state, Verdict, Action,
-Status, last swept (Taiwan time). Auto-refreshes every 60s.
+Auto, Status, last swept (Taiwan time). Auto-refreshes every 60s (every 15s
+while a `Triage now` is in flight).
+
+### Auto — the two per-PR switches
+
+Two switches per row, **both default on**, stored at `watchlist[pr].auto`:
+
+| Switch | On (default) | Off |
+|---|---|---|
+| `triage` | the PR enters the triage queue; the sweep's Claude turn runs `/ci-analysis` and records a verdict | the sweep records `triage-off` and moves on. It still reads and displays the CI — you just see the red without anything being judged |
+| `re-run` | a verdict of `re-run` actually POSTs `rerun-failed-jobs` | the verdict is still recorded, the POST is withheld. Flip it back on and the re-run goes out with a reason already attached |
+
+Off means **"keep watching this PR, do not act on it"** — the row is still swept
+and still displayed. This is the per-PR version of the global `Monitoring OFF`
+switch, and it replaces the old `hold` flag.
+
+The `re-run` switch is enforced inside `apply-verdict`, not only in the sweep,
+because that is the single place the POST is made — a hand-run command, the
+sweep and the dashboard are all gated by the same check. `--force-auto`
+overrides it from the CLI.
+
+```bash
+python3 watch.py auto 41133                        # show
+python3 watch.py auto 41133 --rerun off            # set
+python3 watch.py auto 41133 --triage on --rerun on
+```
+
+### Act now — the three buttons that skip the schedule
+
+`Auto` is a *policy* ("from now on…"); `Act now` is an *action* ("this PR,
+now"). They are separate columns because stacking them put `re-run` in one cell
+twice meaning two different things.
+
+**`Triage now`** spawns `claude -p … --allowedTools …` in the skill directory and
+runs the whole pipeline for that one PR: `sweep --pr N --apply --force`, then
+`/ci-analysis` and `apply-verdict`. The allowlist is `RUN_ALLOWED_TOOLS` in
+`dashboard.py` — `gh`, this directory's `watch.py`, and the read-only tools.
+It replaced `--dangerously-skip-permissions`, which Claude Code refuses under
+`getuid() === 0`: fine while the dashboard ran on the host as a normal user,
+fatal once it runs as root inside a container. It is the manual version of
+the `triage` switch — same work, just not waiting up to 2h (or a day, on the
+regular track) for the next sweep. Disabled when the `triage` switch is off.
+
+The prompt forbids commenting on the PR and forbids pushing to any branch.
+Guardrails, because this is the only button that spends tokens:
+
+- **One PR per click** — there is no "run all".
+- **`MAX_CONCURRENT_RUNS = 2`**, and a PR already running refuses a second click.
+- **30-minute timeout** per run.
+- `PR_CI_WATCH_CLAUDE` overrides the binary, `PR_CI_WATCH_CLAUDE_ARGS` appends
+  flags (e.g. `--model` to run these on something cheaper than the default).
+
+**`Re-run CI`** re-runs the failing workflows without waiting for a verdict —
+you have decided the failure is not the PR's fault. Routed through
+`apply-verdict --action re-run --force-auto`, so the gate-only rules, the
+per-SHA attempt counter and the "already running" deferral are the ones the
+sweep uses. Offered only when something is failing that a re-run could turn
+green; gate-only reds get a disabled button. It **overwrites the stored
+verdict** — an explicit click outranks what triage concluded, including
+`code-fix`.
+
+It refuses to re-queue a run that is not on the PR's current head, checked two
+ways: the live PR head against the swept one, and each run's own `head_sha`.
+This is not thrift. `pr-test.yml` sets `concurrency:
+pr-test-pull_request-<n>-all` with `cancel-in-progress: true`, so re-running an
+older run outranks the one already going and GitHub cancels the real CI —
+"Canceling since a higher priority waiting request … exists". The jobs then
+read *Cancelled after 5m*, which looks like a timeout and is not one. #39575 on
+2026-10-02: a button drawn from a pre-push sweep re-ran `36947209065`
+(`321d4ed0`) and killed `37021312519` on the then-current `41b89e5e`.
+
+**`Update branch`** is GitHub's own button:
+`PUT /repos/{repo}/pulls/{n}/update-branch`, with `expected_head_sha` so a click
+on a stale page fails instead of merging into a head nobody looked at. GitHub
+makes the merge commit **server-side, attributed to you**. It does not touch a
+working tree, never rewrites the author's commits, and **cannot resolve a
+conflict** — which is exactly why it is safe to offer on the 9-in-11 watched PRs
+that belong to other people. Both buttons ask for confirmation first.
+
+Four states, and the title attribute says which:
+
+| State | Button |
+|---|---|
+| `behind_by > 0`, mergeable | live, amber (it is the only button that writes to a branch) |
+| `behind_by == 0` | disabled — "up to date with main" |
+| `behind_by is None` | disabled — never measured; the next sweep records it |
+| `CONFLICTING` | disabled — GitHub would refuse; that is `/pr-conflict-fix` |
+| already updated on this head | disabled — `updated ✓` |
+
+```bash
+python3 watch.py update-branch --pr 41133            # dry run
+python3 watch.py update-branch --pr 41133 --apply
+```
+
+### `behind_by`, and why `mergeStateStatus` could not answer this
+
+`BEHIND` only appears in `mergeStateStatus` when the repo **requires** branches
+to be up to date, and sglang does not — so every out-of-date PR here reads
+`BLOCKED` or `UNSTABLE` like any other, and the column that would have told you
+never says anything. The sweep therefore spends one `gh api compare/main...<head>`
+per PR and stores `behind_by`. It is shown under the `clean` pill, because
+"clean" on a branch 677 commits behind reads as ready-to-land when it is not.
+
+### `Main already has the fix` panel
+
+Every PR whose verdict is `merge-main`, listed with the triage reason. It has no
+button on purpose: most watched PRs belong to other people, and a dashboard that
+can push to someone else's branch is a different tool with a different blast
+radius. **Nothing is posted and nobody is told** — the panel exists so the
+decision reaches you instead of sitting in a JSON field. `/pr-conflict-fix <pr>`
+is what actually does the merge.
 
 **Status is the only prose column, and it is silent when nothing is wrong.**
 There used to be a separate `Red NVIDIA CI` column, but on a clean row it spent
@@ -554,12 +705,18 @@ or `41870`.
 
 | Button | Does | Needs Claude? |
 |---|---|---|
+| `Sign in to GitHub` | Runs `gh auth login --web` on a pty and shows the one-time code. No OAuth App, no token stored by this skill. A PAT paste field is the proxy fallback | no |
+| `sign out` | `gh auth logout` — signs out the whole `gh` CLI, not just this page. Confirms first | no |
 | `Monitoring ON/OFF` | Writes `_config.enabled`; every sweep, including a cron-fired one, exits immediately when off | no — takes effect instantly |
 | `Refresh now` | Runs `sweep --track all --force` **without `--apply`** in a subprocess: re-reads merge state and red NVIDIA CI for every PR. Comments nothing, re-runs nothing | no |
 | `Notify author` | Runs `watch.py notify --pr N --apply` — posts the conflict notice for that PR now instead of waiting for the next sweep. Shown **only** when the PR is conflicting and not yet notified for this head SHA; asks for confirmation first. The result (sent, with the comment URL — or why not) comes back as a banner, and the PR is re-swept so a button standing on stale state disappears | no |
 | `⠿` grip | Drag a row by its grip to reorder it within its sort bucket. Manual order is a tiebreaker only, so a drop into another bucket is **refused** (the target row outlines in red) rather than accepted and sprung back on reload | no |
 | `▸ history` (foot of Status) | Expands that PR's history as a full-width row below — every verdict, re-run, conflict notice and push, newest first. Fetched from `/api/history` on first open, so a page that redraws every 60s does not pay for panels nobody opened | no |
 | Track dropdown | Sets `regular` or `high` explicitly, both directions | no |
+| `triage` / `re-run` (Auto column) | Writes `watchlist[pr].auto.<field>`. Both default on; off means "keep watching this PR, do not act on it" | no — takes effect on the next sweep |
+| `Triage now` (Act now) | Spawns a headless `claude -p`: sweep, `/ci-analysis`, record the verdict, re-run if the verdict says so. The manual version of the `triage` switch. Posts no comment, pushes to no branch. Capped at 2 concurrent | **it is one** — the only button that starts a Claude turn, and it costs tokens |
+| `Re-run CI` (Act now) | `apply-verdict --action re-run --force-auto` — re-runs the failing workflows now, skipping triage. Overwrites the stored verdict | no |
+| `Update branch` (Act now) | `PUT /pulls/{n}/update-branch` — GitHub merges main into the PR branch server-side, attributed to you. Cannot rewrite the author's commits, cannot resolve a conflict. Confirms first | no |
 | `Copy` (triage panel) | Copies `/pr-ci-watch triage <prs>` to paste into Claude | yes, to run it |
 | `Copy` (status block) | Copies the `<P0><CI clear><PR…>` report as **rich text + plain text**, so `<PR41133>` stays a hyperlink when pasted into Teams | no |
 
@@ -569,9 +726,12 @@ selected. `navigator.clipboard` **does not exist outside a secure context**, so
 reaching `localhost` by IP rather than through a port forward leaves only the
 last two rungs; touching it unguarded throws and the button appears dead.
 
-`Refresh now` is deliberately read-only. Deciding **re-run vs merge main vs real
-bug** means reading job logs — that is `/ci-analysis`, which needs a Claude turn,
-so no button can do it. Registering cron likewise needs a Claude turn.
+`Refresh now` is deliberately read-only — it re-reads every PR and decides
+nothing. Deciding **re-run vs merge main vs real bug** means reading job logs,
+which is `/ci-analysis` and needs a model. `Triage now` is the button that
+admits this and starts one, for a single PR; the dashboard process itself still
+judges nothing. `Re-run CI` and `Update branch` are you making that call by
+hand instead. Registering cron likewise needs a Claude turn.
 
 **Verdict** is the in-scope CI state only — `Pass` / `Pending` (in flight,
 first run or re-run) / `Fail`. A red *aggregation gate* never makes it `Fail`: a
@@ -636,6 +796,15 @@ python3 watch.py arm-status --record "high=23 */2 * * *, regular=17 9 * * *"
 > A headless crontab variant would dodge both, but it cannot run `/ci-analysis`,
 > which is the entire gate on re-running. That trade is why it is not the default.
 
+`cron-sweep.sh` is that headless variant, available as a belt-and-braces Phase A
+from the host crontab. **It must set its own `PATH`**: cron hands a job
+`/usr/bin:/bin`, `gh` lives in `~/bin`, and every sweep it ran died on
+`FileNotFoundError: 'gh'` — silently, because the traceback went to `cron.log`
+and the dashboard shows Claude-cron results, which were fine. It now exports the
+PATH and aborts with a readable message instead of a traceback if `gh` is still
+missing. If you ever wonder whether it is working, read `cron.log`, not the
+dashboard.
+
 **So does triage happen on its own? Yes.** The schedule is a Claude cron job,
 not a shell script, so the scheduled sweep runs Phase B in the same turn and
 clears the "Waiting on triage" panel without being asked. The panel says so
@@ -649,10 +818,10 @@ already know the sweep *is* a Claude turn.
 
 | file | holds |
 |---|---|
-| `watchlist.json` | PR → track, added, note, repo |
-| `state.json` | per PR: head SHA, `conflict_comment_sha`, `reruns{workflow:{sha,count}}`, last verdict/action, last sweep. Plus `_config`: `enabled`, `group_order` (the dragged tab order) |
+| `watchlist.json` | PR → track, added, note, repo, `auto{triage,rerun}` (absent means on) |
+| `state.json` | per PR: head SHA, `behind_by`, `update_branch{sha,at}`, `conflict_comment_sha`, `reruns{workflow:{sha,count}}`, last verdict/action, last sweep. Plus `_config`: `enabled`, `group_order` (the dragged tab order) |
 | `sweeps/<ts>.json` | one record per sweep. Also the source of the `▸` history panel's push/outcome transitions — don't prune it without meaning to shorten that |
-| `sweep.log` | append-only audit of every mutation. The other half of the history panel |
+| `sweep.log` | append-only audit of every mutation (sign-ins are recorded, tokens never are). The other half of the history panel |
 
 ## Load-bearing gotchas
 

@@ -208,6 +208,22 @@ def set_monitoring(st: dict, on: bool) -> None:
     st["_config"]["toggled_at"] = now()
 
 
+# Per-PR autopilot, one switch per phase. Both default ON because that is
+# exactly what every sweep did before the switches existed — an existing
+# watchlist entry keeps behaving the way its owner last saw it, and only an
+# explicit click changes that. Turning one off means "look at this PR, do not
+# act on it": the sweep still reads and displays its CI either way.
+AUTO_FIELDS = ("triage", "rerun")
+
+
+def auto_on(meta: dict, field: str) -> bool:
+    return bool((meta.get("auto") or {}).get(field, True))
+
+
+def set_auto(meta: dict, field: str, on: bool) -> None:
+    meta.setdefault("auto", {})[field] = bool(on)
+
+
 UNGROUPED = "Ungrouped"
 
 
@@ -648,8 +664,8 @@ def pr_snapshot(pr: str, repo: str) -> dict:
     # extracted from it here and only the one-line result is stored, so
     # state.json does not grow a copy of every PR description.
     fields = (
-        "state,mergeable,mergeStateStatus,headRefOid,headRefName,author,title,"
-        "url,isDraft,body,labels"
+        "state,mergeable,mergeStateStatus,headRefOid,headRefName,baseRefName,"
+        "author,title,url,isDraft,body,labels"
     )
     data = json.loads(gh(["pr", "view", pr, "--repo", repo, "--json", fields]))
     # GitHub computes mergeability lazily, and asking is what schedules the
@@ -665,6 +681,27 @@ def pr_snapshot(pr: str, repo: str) -> dict:
         time.sleep(delay)
         data = json.loads(gh(["pr", "view", pr, "--repo", repo, "--json", fields]))
     return data
+
+
+def behind_by(repo: str, base: str, sha: str) -> int | None:
+    """How many commits main is ahead of this head. `None` if GitHub would not say.
+
+    Not available from `mergeStateStatus`: `BEHIND` only appears when the repo
+    *requires* branches to be up to date, and sglang does not — so every
+    out-of-date PR here reads `BLOCKED` or `UNSTABLE` like any other. The
+    compare API is the only thing that answers the question, and the answer is
+    what decides whether `Update branch` has anything to do.
+    """
+    if not sha:
+        return None
+    rc, out, _ = gh_try(["api", f"repos/{repo}/compare/{base}...{sha}",
+                         "--jq", ".behind_by"])
+    if rc != 0:
+        return None
+    try:
+        return int(out.strip())
+    except ValueError:
+        return None
 
 
 def failed_in_scope(pr: str, repo: str) -> tuple[dict, dict]:
@@ -821,6 +858,10 @@ def cmd_sweep(a) -> None:
             perf=perf.extract(snap.get("body") or "") or s.get("perf", ""),
             last_sweep=now(),
         )
+        # One extra API call per PR per sweep, and it is what makes the
+        # `Update branch` button honest: without it the dashboard cannot tell a
+        # branch that is 114 commits behind from one cut this morning.
+        s["behind_by"] = behind_by(repo, snap.get("baseRefName") or "main", sha)
         if a.apply:
             s["last_apply_sweep"] = now()
         row = {"pr": pr, "title": s["title"], "author": author, "sha": sha[:8]}
@@ -1087,6 +1128,14 @@ def cmd_sweep(a) -> None:
                 f"died on its own (API/timeout) with no failing test beside it"
             )
             s["verdict_at"] = now()
+            if not auto_on(meta, "rerun"):
+                # The verdict is still recorded — the switch gates the action,
+                # not the judgement, so flipping it back on later re-runs with
+                # a reason already attached instead of starting from nothing.
+                print("        -> re-run WITHHELD: auto re-run is off for this PR")
+                row["outcome"] = "auto-off:rerun"
+                report.append(row)
+                continue
             print("        -> re-run: watcher-only failure, no triage needed")
             row["outcome"] = "auto-re-run"
             rerun.append(pr)
@@ -1110,6 +1159,22 @@ def cmd_sweep(a) -> None:
             print(f"        -> keeping verdict `{judged_action}` "
                   f"({how}, already judged {tw(s.get('verdict_at'))})")
             row["outcome"] = f"verdict-held:{judged_action}"
+            report.append(row)
+            continue
+
+        if not auto_on(meta, "triage"):
+            # Deliberately not "awaiting-triage": nothing is waiting, because
+            # nothing will pick it up. Saying otherwise puts the PR in the
+            # triage panel forever and makes the queue look stuck.
+            s["last_action"] = "triage-off"
+            s["last_verdict"] = (
+                "real in-scope NVIDIA failure, but auto triage is off for this "
+                "PR — turn it on or hit Run now on the dashboard"
+            )
+            s["verdict_at"] = now()
+            print("        -> triage SKIPPED: auto triage is off for this PR")
+            row["outcome"] = "auto-off:triage"
+            row["groups"] = groups
             report.append(row)
             continue
 
@@ -1201,6 +1266,42 @@ def cmd_apply_verdict(a) -> None:
     if not groups:
         die(f"#{pr} has no recorded failed in-scope workflows — re-run `sweep --pr {pr}`")
 
+    # Checked here rather than only in the sweep: this is the single place a
+    # re-run is actually POSTed, so every caller — sweep, dashboard, a hand-run
+    # command — is gated by the same switch.
+    if not auto_on(load(WATCHLIST, {}).get(pr, {}), "rerun") and not a.force_auto:
+        save(STATE, st)  # keep the verdict; only the action is withheld
+        print(f"#{pr}  verdict `re-run` recorded, but auto re-run is OFF for "
+              f"this PR — nothing re-run. Flip it on in the dashboard's Auto "
+              f"column, or pass --force-auto.")
+        log_line(f"#{pr} rerun withheld (auto off) :: {a.summary}")
+        return
+
+    # Never re-queue a run that is not on the PR's current head. `pr-test.yml`
+    # uses `concurrency: pr-test-pull_request-<n>-all` with
+    # `cancel-in-progress: true`, so POSTing rerun-failed-jobs at an older run
+    # does not merely waste CI: the re-queued run outranks the one already
+    # going and GitHub kills the real CI with "Canceling since a higher
+    # priority waiting request for pr-test-pull_request-<n>-all exists".
+    #
+    # #39575 on 2026-10-02 is the worked example. The author pushed at 14:38
+    # and run 37021312519 started on 41b89e5e; the button had been drawn from a
+    # pre-push sweep, so the 14:43 click re-ran 36947209065 (321d4ed0) and
+    # cancelled 37021312519 five minutes in. The jobs read "Cancelled after
+    # 5m", which looks exactly like a timeout and is not one.
+    #
+    # `Update branch` has refused this class of mistake all along via
+    # `expected_head_sha`; this is the same guard for the other button.
+    live_head = ""
+    rc, out, _ = gh_try(["api", f"repos/{a.repo}/pulls/{pr}", "-q", ".head.sha"])
+    if rc == 0:
+        live_head = out.strip()
+    if live_head and sha and live_head != sha:
+        die(f"#{pr} state is stale: swept at {sha[:8]}, head is now "
+            f"{live_head[:8]}. Re-sweep first — re-running a run from the old "
+            f"head would cancel the CI now going on {live_head[:8]}.")
+    current = live_head or sha
+
     reruns = s.setdefault("reruns", {})
     did, skipped = [], []
     for wf, g in groups.items():
@@ -1221,6 +1322,19 @@ def cmd_apply_verdict(a) -> None:
         if not run_id:
             skipped.append(f"{wf} (no run id parsed from check link)")
             continue
+        # Second half of the staleness guard. The PR-level check above catches
+        # "the author pushed since the sweep"; this catches a `failed_groups`
+        # entry that points at an older run even though the snapshot itself is
+        # current — a re-run recorded against a superseded workflow run.
+        rc, out, _ = gh_try(["api", f"repos/{a.repo}/actions/runs/{run_id}",
+                             "-q", ".head_sha"])
+        run_sha = out.strip() if rc == 0 else ""
+        if run_sha and current and run_sha != current:
+            skipped.append(
+                f"{wf} (run {run_id} is on {run_sha[:8]}, not the current head "
+                f"{current[:8]} — re-queuing it would cancel the live run)")
+            continue
+
         endpoint = f"repos/{a.repo}/actions/runs/{run_id}/rerun-failed-jobs"
         if a.apply:
             rc, _, err = gh_try(["api", "-X", "POST", endpoint])
@@ -1338,6 +1452,81 @@ def cmd_toggle(a) -> None:
     log_line(f"monitoring {'resumed' if on else 'paused'}")
 
 
+def cmd_update_branch(a) -> None:
+    """GitHub's own `Update branch` button, nothing more.
+
+    `PUT /pulls/{n}/update-branch` asks GitHub to make the merge commit
+    server-side. It does not touch a working tree, cannot resolve a conflict,
+    and never rewrites the author's commits — so it is safe to offer on
+    someone else's PR in a way that cloning and pushing would not be. When the
+    branch genuinely conflicts GitHub refuses, and that is `/pr-conflict-fix`'s
+    job, not this one.
+    """
+    pr = parse_pr(a.pr)
+    st = load(STATE, {})
+    s = st.get(pr)
+    if not s:
+        die(f"#{pr} has no sweep state — run `sweep --pr {pr}` first")
+
+    sha = s.get("head_sha", "")
+    if s.get("mergeable") == "CONFLICTING":
+        die(f"#{pr} conflicts with main — GitHub's Update branch cannot merge it. "
+            f"That needs a working tree: `/pr-conflict-fix {pr}`.")
+    behind = s.get("behind_by")
+    if behind == 0 and not a.force:
+        die(f"#{pr} is already up to date with main — nothing to merge.")
+
+    prev = (s.get("update_branch") or {})
+    if prev.get("sha") == sha and not a.force:
+        die(f"#{pr} was already updated at {prev.get('at')} and has not moved "
+            f"since ({sha[:8]}). Re-sweep first, or pass --force.")
+
+    if not a.apply:
+        print(f"#{pr}  WOULD update branch ({behind} commit(s) behind main)")
+        return
+
+    # expected_head_sha makes this a no-op if the author pushed between the
+    # sweep that drew the button and the click: better a 422 than merging into
+    # a head we never looked at.
+    rc, out, err = gh_try(["api", "-X", "PUT",
+                           f"repos/{a.repo}/pulls/{pr}/update-branch",
+                           "-f", f"expected_head_sha={sha}"])
+    if rc != 0:
+        detail = (err or out or "").strip().splitlines()
+        why = detail[-1] if detail else "update-branch failed"
+        if "expected_head_sha" in (err or "") or "422" in (err or ""):
+            why += (" — the head moved since the last sweep; refresh and try again")
+        print(f"#{pr}  NOT updated: {why}")
+        log_line(f"#{pr} update-branch failed :: {why}")
+        sys.exit(1)
+
+    s["update_branch"] = {"sha": sha, "at": now(), "behind_was": behind}
+    save(STATE, st)
+    print(f"#{pr}  update branch requested — GitHub is merging main "
+          f"({behind} commit(s)) into the branch; CI restarts on the new head.")
+    log_line(f"#{pr} update-branch applied ({behind} behind) at {sha[:8]}")
+
+
+def cmd_auto(a) -> None:
+    pr = parse_pr(a.pr)
+    wl = load(WATCHLIST, {})
+    if pr not in wl:
+        die(f"#{pr} is not on the watchlist")
+    changed = []
+    for f in AUTO_FIELDS:
+        want = getattr(a, f.replace("-", "_"), None)
+        if want is None:
+            continue
+        set_auto(wl[pr], f, want == "on")
+        changed.append(f"{f}={want}")
+    if changed:
+        save(WATCHLIST, wl)
+        log_line(f"#{pr} auto {' '.join(changed)}")
+    print(f"#{pr} auto: "
+          + "  ".join(f"{f}={'on' if auto_on(wl[pr], f) else 'OFF'}"
+                      for f in AUTO_FIELDS))
+
+
 def cmd_report(a) -> None:
     wl, st = load(WATCHLIST, {}), load(STATE, {})
     if not wl:
@@ -1415,7 +1604,23 @@ def main() -> None:
     s.add_argument("--apply", action="store_true")
     s.add_argument("--force-gates", action="store_true",
                    help="also re-run workflows whose only failures are rollup gates")
+    s.add_argument("--force-auto", action="store_true",
+                   help="re-run even if this PR's auto re-run switch is off")
     s.set_defaults(func=cmd_apply_verdict)
+
+    s = sub.add_parser("update-branch",
+                       help="GitHub's Update branch: merge main into the PR branch")
+    s.add_argument("--pr", required=True)
+    s.add_argument("--apply", action="store_true")
+    s.add_argument("--force", action="store_true",
+                   help="update even if already up to date / already updated on this head")
+    s.set_defaults(func=cmd_update_branch)
+
+    s = sub.add_parser("auto", help="per-PR autopilot switches (both default on)")
+    s.add_argument("pr")
+    for f in AUTO_FIELDS:
+        s.add_argument(f"--{f}", choices=["on", "off"])
+    s.set_defaults(func=cmd_auto)
 
     s = sub.add_parser("notify", help="post the conflict notice for one PR now")
     s.add_argument("--pr", required=True)
