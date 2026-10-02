@@ -544,9 +544,18 @@ def merge_cell(s: dict) -> str:
                 'CI never ran">gate blocked</span>')
     m = s.get("mergeable", "?")
     if m == "CONFLICTING":
-        return '<span class="pill bad">conflict</span>'
+        return ('<span class="pill bad" title="branch conflicts with main; the '
+                'author has to resolve it before CI can finish">conflict</span>')
     if m == "MERGEABLE":
-        return '<span class="pill ok">clean</span>'
+        return '<span class="pill ok" title="no git conflict with main">clean</span>'
+    if m == "UNKNOWN":
+        # Not a state of the PR — a state of our knowledge. GitHub computes
+        # mergeability lazily and had not answered by the time that sweep ran
+        # (watch.py already re-queried once). Saying so beats a bare `unknown`
+        # pill that reads like a third merge outcome alongside clean/conflict.
+        return ('<span class="pill warn" title="GitHub had not finished computing '
+                'mergeability when this sweep ran — not a conflict, not confirmed '
+                'clean; the next sweep resolves it">unknown</span>')
     return f'<span class="pill warn">{esc(str(m).lower())}</span>'
 
 
