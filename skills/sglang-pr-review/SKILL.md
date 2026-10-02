@@ -165,12 +165,24 @@ Key patterns:
 | Critical/High/Medium/Low | One-line description |
 
 ### Decision
-**approve** | **comment** | **request-changes** — rationale + numbered action items
+**approve** | **comment** | **request-changes** — <one sentence>
+
+**request-changes** — <which blocking finding, at which line>
+
+Blocking lines:
+- `path:line` — <one Critical finding>
+- `path:line` — <another Critical finding, if there is one>
+1. `path:line` — <the change required at that line>
 ```
 
+A **request-changes** decision lists only the findings that block this merge.
+Those are the Critical ones. There may be several, and each gets its own
+`path:line` here, its own findings bullet, and its own Risk row. A High,
+Medium, or Low finding stays out of **Blocking lines**.
+
 **Keep the Risk & Scope rows labelled exactly `Critical` / `High` / `Medium` /
-`Low`, and keep the severity word in the findings bullets.** Those two shapes
-are what [`/pr-merge-triage`](../pr-merge-triage/SKILL.md) parses when the
+`Low`, and keep the severity word in the findings bullets.** A Critical bullet is `[bug] CRITICAL — path:line — …` and a High bullet is `[bug] High — path:line — …` (severity word, then `path:line`). Those shapes are what
+[`/pr-merge-triage`](../pr-merge-triage/SKILL.md) parses when the
 findings are folded back into the merge verdict:
 
 ```bash
@@ -178,18 +190,23 @@ findings are folded back into the merge verdict:
 python3 ~/agent-box/skills/pr-merge-triage/triage.py 41870 --review /tmp/review.md
 ```
 
-A single `Critical` opens that skill's **Correctness gate** and blocks the merge
-at any risk score — so a row labelled `Critical` is a real decision, not an
-emphasis. A finding that bounds the blast radius of a Critical (`everything else
-still falls back to the old kernel`) belongs in the `Low` row; it does not
-downgrade the Critical.
+Each `Critical` row opens that skill's **Correctness gate** and blocks the merge
+at any risk score. Several Criticals are normal when several independent
+problems each block the merge; list every one, and do not let a narrower
+finding cancel another. A row labelled `Critical` is a real decision, not an
+emphasis. A note that only bounds the blast radius (`everything else still
+falls back to the old kernel`) belongs in the `Low` row; it does not downgrade
+the Critical.
 
 ### Severity Guidelines
 
-- **CRITICAL**: Produces wrong model outputs silently (e.g., dropped scale, missing weight, lost expert). Always `request-changes`, and always a merge blocker.
-- **High**: Can crash or degrade under specific configurations (e.g., dtype mismatch on fallback, DeepEP + fusion interaction). Likely `request-changes`.
-- **Medium**: Edge cases, fragile patterns, missing tests. Can be `comment` with action items.
-- **Low**: Style, docs, minor cleanup. `comment` or `approve`.
+The question for Critical is whether this problem blocks the merge. It is not
+limited to silent wrong outputs, and a review can contain more than one.
+
+- **CRITICAL**: Blocks the merge. Includes a silent wrong answer, a hang, a crash, a `raise`, a startup failure, or any other bug on the path this PR ships. Always `request-changes`. Each Critical is its own Risk row and its own Decision **Blocking lines** entry, as `[bug] CRITICAL — path:line — …`.
+- **High**: Real damage on a specific configuration, but it does not by itself refuse the merge (triage scores it, it does not open the gate). If you would not merge until it is fixed, label it Critical instead.
+- **Medium**: Edge cases, fragile patterns, missing tests. `comment`.
+- **Low**: Style, docs, minor cleanup. `comment` or `approve`. Does not affect the merge.
 
 ## Additional Resources
 

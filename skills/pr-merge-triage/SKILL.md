@@ -288,7 +288,7 @@ keeps its force:
 | Gate | Why it cannot be traded away |
 |---|---|
 | **Guard choice** | code importing AITER gated by `is_hip()` alone crashes on an AMD box without AITER. Not a style preference — a crash. Only occupies a must-pass row when it fires; otherwise it reports as context |
-| **Critical risk** | a `CRITICAL` from [`/sglang-pr-review`](../sglang-pr-review/SKILL.md) is wrong model output — it gets fixed, not weighed |
+| **Critical risk** | a `CRITICAL` from [`/sglang-pr-review`](../sglang-pr-review/SKILL.md) blocks the merge — wrong output, a hang, a crash, a raise, or a startup failure. Several can fire. Each gets fixed, not weighed |
 
 Flags, globals, interface changes, kernel kind, size, and evidence numbers are
 not gates. They show up in the risk picture so the reviewer can see them.

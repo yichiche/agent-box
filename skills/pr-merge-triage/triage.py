@@ -276,8 +276,9 @@ def describe_guards(a: dict) -> str:
 GATES = {
     "Guard choice": "aiter import must be gated by use_aiter, not is_hip alone "
                     "— otherwise it crashes on an AMD box without AITER",
-    "Critical risk": "a CRITICAL finding from /sglang-pr-review produces "
-                     "wrong model output — it must be fixed, not weighed",
+    "Critical risk": "a CRITICAL finding from /sglang-pr-review blocks the "
+                     "merge — wrong output, hang, crash, raise, or startup "
+                     "failure — and must be fixed, not weighed",
 }
 BANDS = ((3, "LOW"), (7, "MEDIUM"), (12, "HIGH"))
 
@@ -511,7 +512,8 @@ def rows(a: dict) -> list[dict]:
         detail = "; ".join((rv.get("details") or {}).get("CRITICAL") or [])
         row("Critical risk", BAD,
             f"{rv['CRITICAL']} CRITICAL" + (f" — {detail}" if detail else ""),
-            "must be fixed before merge — a CRITICAL is wrong model output, "
+            "must be fixed before merge — a CRITICAL blocks the merge "
+            "(wrong output, hang, crash, raise, or startup failure), "
             "not a risk to weigh", 0, gate=True)
     else:
         row("Critical risk", OK,
