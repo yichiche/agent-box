@@ -1,0 +1,17 @@
+{
+  "conclusion": "cannot_merge",
+  "common_path_changed": true,
+  "nvidia_execution_identical": false,
+  "nvidia_interface_identical": true,
+  "nvidia_behavior_identical": false,
+  "nvidia_diff_line": "python/sglang/multimodal_gen/runtime/layers/quantization/mxfp4.py:257",
+  "nvidia_diff_why": "This call runs on NVIDIA, and the op is registered only when _is_hip is true, so apply no longer raises the MI350 RuntimeError.",
+  "hardware_scope": "all_backends",
+  "hardware_scope_detail": "all backends that reach Mxfp4LinearMethod.apply; registration is only under _is_hip",
+  "guard_contains_new_behavior": false,
+  "guard_line": "python/sglang/multimodal_gen/runtime/layers/quantization/mxfp4.py:257",
+  "guard_why": "The custom-op call is not under _is_hip or is_gfx95_supported(), so every backend that reaches apply executes it.",
+  "guard_action": "Call mxfp4_diffusion_quant_gemm only inside the same _is_hip condition that registers the op.",
+  "summary": "NVIDIA apply() no longer raises the MI350 RuntimeError.",
+  "owner_action": "Restore the is_gfx95_supported() RuntimeError immediately before mxfp4.py:257."
+}

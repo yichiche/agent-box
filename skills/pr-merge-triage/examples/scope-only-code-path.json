@@ -1,0 +1,14 @@
+{
+  "conclusion": "cannot_merge",
+  "common_path_changed": true,
+  "nvidia_execution_identical": false,
+  "nvidia_interface_identical": true,
+  "nvidia_behavior_identical": false,
+  "nvidia_diff_line": "python/sglang/srt/layers/attention/bar.py:40",
+  "nvidia_diff_why": "The shared score update at this line runs on NVIDIA and changes the stored scores.",
+  "hardware_scope": "gfx950",
+  "hardware_scope_detail": "gfx950 / MI355 only (is_gfx95_supported())",
+  "guard_contains_new_behavior": true,
+  "summary": "NVIDIA stored scores change. The gfx950 correction stays under is_gfx95_supported().",
+  "owner_action": "Keep the NVIDIA score update on the previous formula."
+}

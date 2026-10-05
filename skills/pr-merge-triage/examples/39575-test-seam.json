@@ -1,4 +1,7 @@
 {
+  "official_pass": true,
+  "official_evidence": "The added cases are unittest functions. Each covers one scenario, the name states the purpose, and asserts check the result.",
+  "official_action": "",
   "conclusion": "mixed",
   "changed_behavior": "For an unaligned cached prefix, snapshot prefix-side keys before project_qk overwrites their pending-ring slots, then recompress the crossing group.",
   "correct_seam": "_forward_impl",

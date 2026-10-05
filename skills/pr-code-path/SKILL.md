@@ -39,12 +39,21 @@ python3 ~/agent-box/skills/pr-code-path/path_cover.py 39575
 python3 ~/agent-box/skills/pr-code-path/path_cover.py https://github.com/sgl-project/sglang/pull/39575
 ```
 
-The script prints production facts: added and removed executable lines, guard
-tokens, moved statements, and removed bare returns. It does not decide the
-three questions. Write the report from those facts plus a read of any function
-the script marks `REALIGN` or `# moved`.
+Run that command once. It writes `/tmp/pr-<number>-src/focus.md`: every changed
+function at base and at head, with line numbers. A long function is the edited
+branch plus the fallthrough after it. One level of functions that branch calls
+is included. The stdout is only an index.
 
-The calibration case is [examples.md](examples.md) (PR 39575).
+Read `focus.md` and stop. Do not open the source files under `base/` or `head/`.
+Do not run `gh`, `git diff`, or `grep`. A `>` line was added. A `<` line was
+removed. A `callee` section is one function the edited branch calls. Line numbers
+in that file are the ones the value trace cites. A function marked `REALIGN`
+in the index is already whole inside `focus.md`.
+
+The script does not decide the three questions. Write the report from `focus.md`.
+
+Do not re-read this skill. Do not open [examples.md](examples.md). The
+calibration case is PR 39575.
 
 ## 1. Common Path
 
@@ -197,15 +206,25 @@ and correctness of the AMD math are separate gates.
    picture, guard quotes, and value traces in that canvas. When execution flow
    or the internal interface is **No**, the canvas must contain one three-block
    trace per such edit (before, after on the same input, consumers, then the
-   same `if`s with the hardware-specific values that make them true). The
-   calibration traces are in [examples.md](examples.md). Canvas file:
+   same `if`s with the hardware-specific values that make them true). That
+   paragraph is the whole trace. Canvas file:
    `~/.cursor/projects/<workspace>/canvases/pr-<number>-code-path.canvas.tsx`.
+   Read `~/.cursor/skills-cursor/canvas/SKILL.md` once. Use `Stack`, `H1`,
+   `H2`, `Text`, `Table`, `Card`, and `Callout` from `cursor/canvas`. Colors
+   come from `useHostTheme()`. Do not open `sdk/*.d.ts`, `examples.md`, or
+   another PR's canvas.
 
 
 ## When called from /pr-merge-triage
 
 Do the same analysis, including the value trace when execution flow or the
-internal interface is not identical. Do not print the chat report. Do write
+internal interface is not identical. The only production code you read is
+`/tmp/pr-<number>-src/focus.md`. Do not run `gh`, `git diff`, or `grep` to
+find a line or a callee. Do not print the chat report. Do not read or edit
+`triage.py`. Read `~/.cursor/skills-cursor/canvas/SKILL.md` once, then write
+the canvas with `Stack`, `H1`, `H2`, `Text`, `Table`, `Card`, and `Callout`
+from `cursor/canvas`. Do not open `sdk/*.d.ts`, `examples.md`, or another
+PR's canvas. Do write
 the canvas to `~/.cursor/projects/<workspace>/canvases/pr-<number>-code-path.canvas.tsx`
 with the editor Write tool in this session, so the canvas host registers it.
 A file that is only on disk, or a sidecar status of `canvas-missing`, opens
@@ -213,12 +232,16 @@ as canvas not found. If the user reports that, edit the `.canvas.tsx` again
 in this session; repeating the link does not register it. Write `/tmp/pr-<number>-code-path.json` using the schema in
 `/pr-merge-triage`. `nvidia_behavior_identical` is `true` only when that trace
 shows the original outputs unchanged. Use `"unproven"` when the trace was not
-done. `owner_action` is one concrete code change when the conclusion is
-`cannot_merge` or the numerical result is not identical. When
-`nvidia_behavior_identical` is not `true`, also set `nvidia_diff_line` to the
-PR-head `path:line` that changes NVIDIA behavior, and `nvidia_diff_why` to one
-sentence on why that line differs on NVIDIA. The owner comment prints them as
-Line, Why, and Fix.
+done. `owner_action` is the Affected Scope fix, required only when
+`nvidia_behavior_identical` is not `true`. Then also set `nvidia_diff_line`
+to the PR-head `path:line` that changes NVIDIA behavior, and `nvidia_diff_why`
+to one sentence on why that line differs on NVIDIA.
+
+`guard_contains_new_behavior` is a separate boolean. Set it true only when the
+new behavior runs inside `hardware_scope`. When it is false, set `guard_line`,
+`guard_why`, and `guard_action`. Do not copy the NVIDIA line, reason, or fix
+into those fields. Triage prints each failed row as its own Line, Why, and Fix.
+`conclusion` does not decide either row.
 
 ## Related
 

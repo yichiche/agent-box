@@ -6,7 +6,9 @@ the code. It is never a merge approval.
 
 Shape (size, flags, evidence) comes from the diff. Affected scope and the AMD
 guard come only from a /pr-code-path judgment JSON. Unit-test quality comes
-only from a /pr-test-seam judgment JSON. Missing judgments stay BLOCKED.
+only from a /pr-test-seam judgment JSON. The contribution-guide bar and full
+coverage (`conclusion` is `complete`) both have to hold. Missing judgments
+stay BLOCKED.
 
     python3 triage.py 41870 --shape
     python3 triage.py 41870 --code-path /tmp/pr-41870-code-path.json \
@@ -40,7 +42,7 @@ HOT_COMMON = re.compile(
     r"|arg_groups/|server_args\.py|entrypoints/)",
 )
 KERNEL_PATH = re.compile(r"(python/sglang/kernels/|\.cu$|\.cuh$|\.hip$|\.cpp$|csrc/)")
-TEST_PATH = re.compile(r"^(test/|python/sglang/test/)")
+TEST_PATH = re.compile(r"^(test/|python/sglang/test/)|/test/")
 DOC_PATH = re.compile(r"^(docs/|benchmark/|.*\.md$)")
 
 GUARD = re.compile(
@@ -131,7 +133,7 @@ def guard_state(f: dict) -> str:
 def analyse(pr: str, repo: str) -> dict:
     meta = json.loads(sh([
         "gh", "pr", "view", pr, "--repo", repo, "--json",
-        "title,body,author,additions,deletions,changedFiles,files,state,isDraft,labels",
+        "title,body,author,additions,deletions,changedFiles,files,state,isDraft,labels,headRefOid",
     ]))
     diff = sh(["gh", "pr", "diff", pr, "--repo", repo])
     files = split_hunks(diff)
@@ -215,6 +217,7 @@ def analyse(pr: str, repo: str) -> dict:
         "uses_aiter": uses_aiter, "uses_is_hip": uses_is_hip,
         "guard_examples": guard_examples(files),
         "has_accuracy": has_accuracy, "has_perf": has_perf,
+        "head_sha": meta.get("headRefOid") or "",
     }
 
 
@@ -383,28 +386,34 @@ def validate_code_path(data: dict) -> list[str]:
     if data.get("hardware_scope") not in HARDWARE_SCOPES:
         problems.append(
             "hardware_scope must be all_backends, all_amd, aiter, gfx950, gfx94, or other")
-    needs_action = (data.get("conclusion") == "cannot_merge"
-                    or not _behavior_ok(data.get("nvidia_behavior_identical")))
-    if needs_action and not str(data.get("owner_action") or "").strip():
-        problems.append("owner_action")
+    _bool_field(data, "guard_contains_new_behavior", problems)
     if not _behavior_ok(data.get("nvidia_behavior_identical")):
-        if not str(data.get("nvidia_diff_line") or "").strip():
-            problems.append("nvidia_diff_line")
-        if not str(data.get("nvidia_diff_why") or "").strip():
-            problems.append("nvidia_diff_why")
+        for key in ("owner_action", "nvidia_diff_line", "nvidia_diff_why"):
+            if not str(data.get(key) or "").strip():
+                problems.append(key)
+    if data.get("guard_contains_new_behavior") is False:
+        for key in ("guard_line", "guard_why", "guard_action"):
+            if not str(data.get(key) or "").strip():
+                problems.append(key)
     return problems
 
 
 def validate_test_seam(data: dict) -> list[str]:
     problems = []
-    for key in ("conclusion", "changed_behavior", "correct_seam"):
+    for key in ("conclusion", "changed_behavior", "correct_seam", "official_evidence"):
         if not str(data.get(key) or "").strip():
             problems.append(key)
+    if "official_pass" not in data:
+        problems.append("official_pass")
+    elif not isinstance(data.get("official_pass"), bool):
+        problems.append("official_pass must be a JSON boolean")
     if data.get("conclusion") not in SEAM_CONCLUSIONS:
         problems.append(
             "conclusion must be complete, mixed, past_the_seam, reimplements, or no_test")
     if data.get("conclusion") != "complete" and not str(data.get("missing_test") or "").strip():
         problems.append("missing_test")
+    if data.get("official_pass") is False and not str(data.get("official_action") or "").strip():
+        problems.append("official_action")
     return problems
 
 
@@ -453,25 +462,31 @@ def code_path_rows(cp: dict | None, error: str, uses_aiter: bool) -> list[dict]:
         scope["nvidia_diff_why"] = str(cp.get("nvidia_diff_why") or "").strip()
 
     detail = cp["hardware_scope_detail"].strip()
-    scope_ok = cp["conclusion"] == "can_merge" and _behavior_ok(behavior)
+    contained = cp.get("guard_contains_new_behavior") is True
+    aiter_sentence = (
+        "Gate the AITER import with _use_aiter. is_hip alone crashes on an "
+        "AMD machine that does not have AITER installed."
+    )
     aiter_ok = not (uses_aiter and cp["hardware_scope"] != "aiter")
-    if scope_ok and aiter_ok:
+    if contained and aiter_ok:
         guard = row("AMD Guard", PASS, f"Code path accepts this scope: {detail}.")
     else:
         parts = []
         actions = []
-        if not scope_ok:
-            parts.append(f"Code path did not accept this scope ({detail}). {summary}")
-            action = cp.get("owner_action", "").strip()
-            if action:
-                actions.append(action)
+        if not contained:
+            why = str(cp.get("guard_why") or "").strip()
+            parts.append(f"New behavior is outside this scope ({detail}). {why}")
+            actions.append(str(cp.get("guard_action") or "").strip())
         if not aiter_ok:
             parts.append(f"The diff imports AITER, but the code-path scope is {detail}.")
-            actions.append(
-                "Gate the AITER import with _use_aiter. is_hip alone crashes on an "
-                "AMD machine that does not have AITER installed."
-            )
+            actions.append(aiter_sentence)
         guard = row("AMD Guard", FAIL, " ".join(parts), " ".join(actions))
+        if not contained:
+            guard["guard_line"] = str(cp.get("guard_line") or "").strip()
+            guard["guard_why"] = str(cp.get("guard_why") or "").strip()
+            guard["guard_action"] = str(cp.get("guard_action") or "").strip()
+        if not aiter_ok:
+            guard["aiter_action"] = aiter_sentence
     return [scope, guard]
 
 
@@ -481,15 +496,27 @@ def test_rows(seam: dict | None, error: str) -> list[dict]:
             "Unit Test Quality", BLOCKED, f"Blocked: {error}.",
             "Follow /pr-test-seam and write its judgment JSON.",
         )]
-    conclusion = seam["conclusion"]
-    evidence = (
-        f"Test-seam conclusion: {conclusion}. "
-        f"Changed behavior: {seam['changed_behavior'].strip()} "
-        f"Correct seam: {seam['correct_seam'].strip()}."
-    )
-    if conclusion == "complete":
+    evidence = seam["official_evidence"].strip()
+    covered = seam["conclusion"] == "complete"
+    style_ok = seam["official_pass"] is True
+    if style_ok and covered:
         return [row("Unit Test Quality", PASS, evidence)]
-    return [row("Unit Test Quality", FAIL, evidence, seam["missing_test"].strip())]
+    parts = [evidence]
+    actions = []
+    if not style_ok:
+        action = seam.get("official_action", "").strip()
+        if action:
+            actions.append(action)
+    if not covered:
+        seam_name = seam["correct_seam"].strip()
+        parts.append(
+            f"Coverage is {seam['conclusion']} at {seam_name}. "
+            "Every changed behavior needs a test through that function."
+        )
+        missing = seam.get("missing_test", "").strip()
+        if missing:
+            actions.append(missing)
+    return [row("Unit Test Quality", FAIL, " ".join(parts), " ".join(actions))]
 
 
 def notes(a: dict) -> list[str]:
@@ -559,36 +586,25 @@ def owner_comment(pr: str, title: str, verdict: str, rows: list[dict]) -> str:
             lines.append(f"   Why: {item['nvidia_diff_why']}")
             lines.append(f"   Fix: {item['action']}")
             continue
+        if item["check"] == "AMD Guard" and item.get("guard_line"):
+            lines.append(f"   Line: {item['guard_line']}")
+            lines.append(f"   Why: {item['guard_why']}")
+            lines.append(f"   Fix: {item['guard_action']}")
+            if item.get("aiter_action"):
+                lines.append(f"   Also: {item['aiter_action']}")
+            continue
         lines.append(f"   {item['evidence']}")
         if item["action"]:
             lines.append(f"   Required: {item['action']}")
-    if verdict == SPLIT:
+    others = [item for item in failed if item["check"] != "One concern"]
+    if verdict == SPLIT and not others:
         lines.extend(["", "Split the PR before the other findings are reviewed."])
     return "\n".join(lines)
 
 
 
-CI_LINK = re.compile(
-    r"Latest PR Test \(([^)]+)\):.*?\[([^\]]+)\]\((https://github\.com/[^)\s]+)\)",
-    re.S,
-)
-
-
-def ci_links(repo: str, pr: str, body: str) -> list[str]:
-    """PR checks page, plus the summary runs recorded in the PR body."""
-    lines = [f"- [CI checks](https://github.com/{repo}/pull/{pr}/checks)"]
-    seen = set()
-    for match in CI_LINK.finditer(body or ""):
-        label, title, url = match.group(1), match.group(2), match.group(3)
-        if url in seen:
-            continue
-        seen.add(url)
-        lines.append(f"- [CI — {label} ({title})]({url})")
-    return lines
-
-
-def code_path_canvas(pr: str) -> Path:
-    name = f"pr-{pr}-code-path.canvas.tsx"
+def review_canvas(pr: str, kind: str) -> Path:
+    name = f"pr-{pr}-{kind}.canvas.tsx"
     found = sorted(Path.home().glob(f".cursor/projects/*/canvases/{name}"))
     if found:
         return found[0]
@@ -596,12 +612,46 @@ def code_path_canvas(pr: str) -> Path:
     return Path.home() / ".cursor/projects" / slug / "canvases" / name
 
 
-def link_lines(pr: str, a: dict) -> list[str]:
+def code_path_canvas(pr: str) -> Path:
+    return review_canvas(pr, "code-path")
+
+
+def unit_test_canvas(pr: str) -> Path:
+    return review_canvas(pr, "unit-test")
+
+
+def _first_hunk_line(f: dict) -> str:
+    for hunk in f.get("hunks") or []:
+        if not hunk.get("added"):
+            continue
+        match = re.search(r"\+(\d+)", hunk.get("header") or "")
+        if match:
+            return match.group(1)
+    return ""
+
+
+def test_file_links(pr: str, a: dict) -> list[str]:
+    """Blob links for changed unit tests, so the quality note has a place to edit."""
     repo = a.get("repo") or "sgl-project/sglang"
-    body = (a.get("meta") or {}).get("body") or ""
-    lines = ["", "### Links", *ci_links(repo, pr, body)]
-    canvas = code_path_canvas(pr)
-    label = f"PR {pr} code path"
+    sha = a.get("head_sha") or ""
+    lines = []
+    for f in a.get("files") or []:
+        path = f.get("path") or ""
+        if classify_path(path) != "test":
+            continue
+        name = path.rsplit("/", 1)[-1]
+        if sha:
+            url = f"https://github.com/{repo}/blob/{sha}/{path}"
+            line = _first_hunk_line(f)
+            if line:
+                url += f"#L{line}"
+        else:
+            url = f"https://github.com/{repo}/pull/{pr}/files"
+        lines.append(f"- [Unit test: {name}]({url})")
+    return lines
+
+
+def _canvas_link(canvas: Path, label: str) -> str:
     status_path = canvas.with_name(canvas.name.replace(".tsx", ".status.json"))
     missing = False
     if status_path.is_file():
@@ -610,13 +660,23 @@ def link_lines(pr: str, a: dict) -> list[str]:
         except (OSError, json.JSONDecodeError):
             missing = False
     if canvas.is_file() and not missing:
-        lines.append(f"- [{label}]({canvas})")
-    elif missing:
-        lines.append(
-            f"- [{label}]({canvas}) — host status is canvas-missing; rewrite the canvas in this session"
+        return f"- [{label}]({canvas})"
+    if missing:
+        return (
+            f"- [{label}]({canvas}) — host status is canvas-missing; "
+            "rewrite the canvas in this session"
         )
-    else:
-        lines.append(f"- [{label}]({canvas}) — canvas file is not written yet")
+    return f"- [{label}]({canvas}) — canvas file is not written yet"
+
+
+def link_lines(pr: str, a: dict) -> list[str]:
+    lines = [
+        "",
+        "### Links",
+        _canvas_link(code_path_canvas(pr), f"PR {pr} code path"),
+        _canvas_link(unit_test_canvas(pr), f"PR {pr} unit test review"),
+    ]
+    lines.extend(test_file_links(pr, a))
     return lines
 
 
@@ -657,6 +717,11 @@ def render(pr: str, a: dict, rows: list[dict], verdict: str, shape_only: bool) -
     lines.extend(["", "| Check | Verdict | Evidence |", "|---|---|---|"])
     for item in rows:
         lines.append(f"| {item['check']} | {item['verdict']} | {item['evidence']} |")
+    suggestions = [item for item in rows if item.get("suggestion")]
+    if suggestions:
+        lines.extend(["", "### Good to have"])
+        for item in suggestions:
+            lines.append(f"- **{item['check']}** — {item['suggestion']}")
     failed = [item for item in rows if item["verdict"] in (FAIL, BLOCKED) and item["action"]]
     if failed:
         lines.extend(["", "### What has to change"])
@@ -672,9 +737,60 @@ def render(pr: str, a: dict, rows: list[dict], verdict: str, shape_only: bool) -
     return "\n".join(lines)
 
 
+def calibrate() -> int:
+    """Lock Affected Scope and AMD Guard so one failure cannot copy the other."""
+    root = Path(__file__).resolve().parent / "examples"
+    cases = [
+        ("39575-code-path.json", False, PASS, PASS, ""),
+        ("scope-only-code-path.json", False, FAIL, PASS, ""),
+        ("guard-only-code-path.json", False, PASS, FAIL, ""),
+        ("both-differ-code-path.json", False, FAIL, FAIL, "distinct"),
+        ("aiter-import-code-path.json", True, PASS, FAIL, "aiter"),
+    ]
+    problems = []
+    for name, uses_aiter, scope_verdict, guard_verdict, kind in cases:
+        path = root / name
+        data, error = load_judgment(str(path), "code-path", validate_code_path)
+        if data is None:
+            problems.append(f"{name}: {error}")
+            continue
+        rows = {item["check"]: item for item in code_path_rows(data, "", uses_aiter)}
+        got = (rows["Affected Scope"]["verdict"], rows["AMD Guard"]["verdict"])
+        if got != (scope_verdict, guard_verdict):
+            problems.append(f"{name}: expected {(scope_verdict, guard_verdict)}, got {got}")
+            continue
+        comment = owner_comment("0", name, FAILED, list(rows.values()))
+        if kind == "distinct":
+            scope_why = rows["Affected Scope"].get("nvidia_diff_why", "")
+            guard_why = rows["AMD Guard"].get("guard_why", "")
+            if not scope_why or scope_why == guard_why:
+                problems.append(f"{name}: owner reasons are not distinct")
+            guard_block = comment.split("2. AMD Guard", 1)[-1]
+            if scope_why and scope_why in guard_block:
+                problems.append(f"{name}: AMD Guard repeats the NVIDIA reason")
+            if rows["Affected Scope"]["action"] == rows["AMD Guard"].get("guard_action"):
+                problems.append(f"{name}: both rows share one fix")
+        if kind == "aiter":
+            if "Gate the AITER import" not in comment:
+                problems.append(f"{name}: AITER import failure is missing from the owner comment")
+            if "Line:" in comment.split("1. AMD Guard", 1)[-1]:
+                problems.append(f"{name}: an AITER-import failure was formatted as a line escape")
+    if problems:
+        print("calibration failed")
+        for item in problems:
+            print(f"- {item}")
+        return 1
+    print("calibration ok")
+    for name, uses_aiter, scope_verdict, guard_verdict, kind in cases:
+        print(f"- {name}: Affected Scope {scope_verdict}, AMD Guard {guard_verdict}")
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("pr")
+    parser.add_argument("pr", nargs="?")
+    parser.add_argument("--calibrate", action="store_true",
+                        help="check the Affected Scope / AMD Guard examples and exit")
     parser.add_argument("--repo", default="sgl-project/sglang")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--shape", action="store_true",
@@ -684,22 +800,25 @@ def main() -> None:
     parser.add_argument("--test-seam", metavar="PATH",
                         help="/pr-test-seam judgment JSON")
     args = parser.parse_args()
+    if args.calibrate:
+        raise SystemExit(calibrate())
+    if not args.pr:
+        parser.error("pr is required unless --calibrate is set")
     pr = re.sub(r"\D", "", args.pr.split("/")[-1]) or args.pr
     data = analyse(pr, args.repo)
     rows = shape_rows(data)
-    if args.shape or data.get("oversized"):
+    # Judgment files mean the user continued past a split. Score every row.
+    # Shape-only, and an oversized PR with no judgment files, still stop here.
+    continued = bool(args.code_path or args.test_seam)
+    if args.shape or (data.get("oversized") and not continued):
         shown = rows
         verdict = SPLIT if data.get("oversized") else PROCEED
-        if args.shape or data.get("oversized"):
-            payload = {"pr": pr, "verdict": verdict, "rows": shown}
-            if args.json:
-                print(json.dumps(payload, indent=2))
-            else:
-                print(render(pr, data, shown, verdict, shape_only=True))
-            if data.get("oversized"):
-                return
-            if args.shape:
-                return
+        payload = {"pr": pr, "verdict": verdict, "rows": shown}
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(render(pr, data, shown, verdict, shape_only=True))
+        return
     code_path, code_error = load_judgment(args.code_path, "code-path", validate_code_path)
     test_seam, test_error = load_judgment(args.test_seam, "test-seam", validate_test_seam)
     rows.extend(code_path_rows(code_path, code_error, data["uses_aiter"]))

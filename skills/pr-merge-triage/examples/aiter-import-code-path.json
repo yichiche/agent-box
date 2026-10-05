@@ -1,0 +1,12 @@
+{
+  "conclusion": "cannot_merge",
+  "common_path_changed": false,
+  "nvidia_execution_identical": true,
+  "nvidia_interface_identical": true,
+  "nvidia_behavior_identical": true,
+  "hardware_scope": "all_amd",
+  "hardware_scope_detail": "all AMD (is_hip())",
+  "guard_contains_new_behavior": true,
+  "summary": "NVIDIA outputs stay the same. The new body is under is_hip().",
+  "owner_action": ""
+}

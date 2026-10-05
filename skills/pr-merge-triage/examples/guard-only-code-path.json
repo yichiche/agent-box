@@ -1,0 +1,15 @@
+{
+  "conclusion": "cannot_merge",
+  "common_path_changed": false,
+  "nvidia_execution_identical": true,
+  "nvidia_interface_identical": true,
+  "nvidia_behavior_identical": true,
+  "hardware_scope": "all_amd",
+  "hardware_scope_detail": "all AMD (is_hip()); the kernel is valid only on gfx950",
+  "guard_contains_new_behavior": false,
+  "guard_line": "python/sglang/srt/layers/attention/foo.py:120",
+  "guard_why": "The new kernel call sits under is_hip(), so MI300 executes a gfx950 kernel.",
+  "guard_action": "Move the kernel call under is_gfx95_supported().",
+  "summary": "NVIDIA outputs stay the same. The new kernel runs for every HIP device.",
+  "owner_action": ""
+}

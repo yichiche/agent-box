@@ -18,19 +18,35 @@ step moves is testing past that interface.
 
 ```bash
 python3 ~/agent-box/skills/pr-test-seam/test_seam.py N
-python3 ~/agent-box/skills/pr-test-seam/test_seam.py N --json
 ```
 
-The script lists new tests, production functions they call, production
-functions replaced by lambdas, and possible copied expressions. These are
-facts, not the verdict. The calibration case is PR 39575, recorded in
-`~/agent-box/skills/sglang-pr-review/examples.md`.
+Run that command once. The script lists new tests, production functions they
+call, production functions replaced by lambdas, and possible copied
+expressions. These are facts, not the verdict. The calibration case is PR
+39575. Do not open `examples.md`.
+
+`reenters: main` means the test spawns this file again (`--worker`,
+`torch.distributed.run`, or `subprocess`) and the production calls on `main`
+belong to that test. `oracle: reference` means the expected value is computed
+by a helper in the test file. That is reimplementation unless the helper calls
+a second production implementation. The facts include the body of each test,
+worker, and reference. Do not fetch the test diff or open the test file.
 
 ## Terms
+
+Matt Pocock's glossary, from his
+[codebase-design](https://github.com/mattpocock/skills/blob/master/skills/engineering/codebase-design/SKILL.md)
+skill:
 
 - **module** — implementation hidden behind one interface
 - **interface** — everything a caller must know to use the module correctly
 - **seam** — where the interface lives
+
+**Seam** is Michael Feathers' term (*Working Effectively with Legacy Code*): a
+place where you can alter behaviour without editing in that place. Hiding a
+lot of behaviour behind a small interface is John Ousterhout's deep module
+(*A Philosophy of Software Design*). Pocock uses that idea, and measures depth
+by how much behaviour a caller can exercise, not by lines of code.
 
 ## 1. Name the behavior under test
 
@@ -65,6 +81,20 @@ performs those steps and calls the final helper does not cover the ordering.
 **Fixture fallout**
 - adds a field, default, or lambda only because shared production setup changed
 - keeps an old test running but does not test the new behavior
+
+**Does not count as a test of the behavior**
+- `return True`, `assert True`, or any assert that still passes when the behavior changes
+- the test checks the platform, the flag, or the kernel result itself and returns
+- the test reimplements the kernel, or copies the production formula or control flow
+
+Fold these into `conclusion`. They do not add a checklist row, and they do
+not make Unit Test Quality pass. `mixed`, `past_the_seam`, `reimplements`,
+and `no_test` fail that row. Do not read or edit `triage.py`. The table in
+`/pr-merge-triage` is the score. A `return True` test leaves the behavior
+untested: `no_test`, or `mixed` when another interface test exists.
+`official_pass` is also false, because the assert does not check the result.
+A copied kernel is `reimplements`, or `mixed` when another interface test
+exists. Neither is `complete`.
 
 ## 3. Judge expected values independently
 
@@ -107,6 +137,9 @@ When `/pr-merge-triage` invoked this skill, do not print that report. Write
 
 ```json
 {
+  "official_pass": true,
+  "official_evidence": "unittest covers the change; one scenario per function; the name states the purpose; asserts check the result; tests do not share a server; the file stays under 500s.",
+  "official_action": "",
   "conclusion": "mixed",
   "changed_behavior": "one sentence a caller can observe",
   "correct_seam": "production function callers use",
@@ -114,8 +147,25 @@ When `/pr-merge-triage` invoked this skill, do not print that report. Write
 }
 ```
 
-`missing_test` is required unless `conclusion` is `complete`. For `complete`,
-set `missing_test` to `""`.
+`official_pass` is the stage-1 bar from the SGLang contribution guide and
+`test/README.md`. Set it true only when all of these hold:
+
+- the change has a corresponding unittest
+- the file uses stdlib `unittest`
+- each test function covers one scenario
+- the name states the purpose
+- asserts check the result. `return True` or an assert that cannot fail does not count
+- tests clean up and do not affect one another
+- small models, a reused server, and the file stays under 500 seconds
+
+`no_test` means `official_pass` is false. `official_action` is then required
+and names the concrete test change.
+
+`/pr-merge-triage` passes Unit Test Quality only when `official_pass` is true
+and `conclusion` is `complete`. Full coverage means every changed behavior has
+an interface test. Any other conclusion fails the row. `missing_test` is
+required unless `conclusion` is `complete`. For `complete`, set `missing_test`
+to `""`.
 
 PR 39575's conclusion is `mixed`. The write-plan tests call `_qsa_write_plan`.
 The recompress tests call `_overwrite_cross_prefix_groups` after the fixture

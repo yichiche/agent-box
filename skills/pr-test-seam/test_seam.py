@@ -15,8 +15,8 @@ import sys
 
 TEST_PATH = re.compile(r"^(test/|python/sglang/test/)")
 DEF = re.compile(r"^\s*(?:async\s+)?def\s+(\w+)\s*\(")
-TEST_DEF = re.compile(r"^def\s+(test_\w+)\s*\(")
-HELPER_DEF = re.compile(r"^def\s+(_\w+)\s*\(")
+DEF_ANY = re.compile(r"^([ \t]*)(?:async\s+)?def\s+(\w+)\s*\(")
+REENTER = re.compile(r"--worker|torch\.distributed\.run|\bsubprocess\.")
 HUNK_DEF = re.compile(r"\bdef\s+(\w+)\s*\(")
 CALL = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 SKIP_CALL = {
@@ -74,7 +74,18 @@ def production_names(files: list[dict]) -> set[str]:
     return names
 
 
+def _block_kind(name: str) -> str:
+    if name == "main":
+        return "worker"
+    if name.startswith("test_"):
+        return "test"
+    if name == "reference":
+        return "reference"
+    return "helper"
+
+
 def test_blocks(lines: list[str]) -> list[dict]:
+    """Every def starts a block. An indented def is not appended to the previous one."""
     blocks: list[dict] = []
     current = None
     for line in lines:
@@ -84,12 +95,11 @@ def test_blocks(lines: list[str]) -> list[dict]:
         if not line.startswith("+") or line.startswith("+++"):
             continue
         text = line[1:]
-        test = TEST_DEF.match(text)
-        helper = HELPER_DEF.match(text)
-        if test or helper:
+        defined = DEF_ANY.match(text)
+        if defined:
             current = {
-                "name": (test or helper).group(1),
-                "kind": "test" if test else "helper",
+                "name": defined.group(2),
+                "kind": _block_kind(defined.group(2)),
                 "body": [],
             }
             blocks.append(current)
@@ -109,6 +119,33 @@ def test_blocks(lines: list[str]) -> list[dict]:
             kept["body"].extend(extra["body"])
             blocks.remove(extra)
     return blocks
+
+
+def _calls_name(body: list[str], name: str) -> bool:
+    return any(re.search(rf"\b{name}\s*\(", line) for line in body)
+
+
+def reentered_blocks(block: dict, by_name: dict[str, dict]) -> list[dict]:
+    """A test that spawns this file again runs main. Those calls belong to the test."""
+    if block["kind"] != "test":
+        return []
+    if "main" not in by_name:
+        return []
+    text = "\n".join(block["body"])
+    if not (REENTER.search(text) or _calls_name(block["body"], "main")):
+        return []
+    found = [by_name["main"]]
+    # One level: main() often calls a helper that calls production.
+    for helper in by_name.values():
+        if helper["kind"] == "helper" and _calls_name(by_name["main"]["body"], helper["name"]):
+            found.append(helper)
+    return found
+
+
+def oracles(bodies: list[list[str]]) -> list[str]:
+    if any(_calls_name(body, "reference") for body in bodies):
+        return ["reference"]
+    return []
 
 
 def calls(body: list[str], names: set[str]) -> list[str]:
@@ -182,32 +219,50 @@ def main() -> None:
         blocks = test_blocks(file["lines"])
         if not blocks:
             continue
+        by_name = {block["name"]: block for block in blocks}
         for block in blocks:
+            entered = reentered_blocks(block, by_name)
+            bodies = [block["body"], *[item["body"] for item in entered]]
             called = calls(block["body"], names)
+            for body in bodies[1:]:
+                for name in calls(body, names):
+                    if name not in called:
+                        called.append(name)
             replaced = stubs(block["body"], names)
-            copied = copied_expressions(prod_added, block["body"])
-            records.append({
+            copied = copied_expressions(prod_added, [line for body in bodies for line in body])
+            record = {
                 "file": file["path"],
                 "name": block["name"],
                 "kind": block["kind"],
                 "calls": called,
                 "replaces": replaced,
                 "copied": copied,
-            })
+            }
+            if entered:
+                record["reenters"] = [item["name"] for item in entered]
+            oracle = oracles(bodies)
+            if oracle:
+                record["oracle"] = oracle
+            record["body"] = block["body"]
+            records.append(record)
 
     if args.json:
+        slim = [{key: value for key, value in record.items() if key != "body"} for record in records]
         print(json.dumps({
             "label": label,
             "title": title,
             "production_names": sorted(names),
-            "tests": records,
+            "tests": slim,
         }, indent=2))
         return
 
     print(f"# test-seam facts — {label}")
     if title:
         print(f"\n{title}")
-    print("\nFacts only. Decide the correct seam and whether expected values are independent.\n")
+    print(
+        "\nFacts only. Decide the correct seam and whether expected values are independent. "
+        "Test, worker, and reference bodies are below. Do not fetch the test diff.\n"
+    )
     if not records:
         print("No test file in the diff.\n")
     current = None
@@ -215,7 +270,12 @@ def main() -> None:
         if record["file"] != current:
             current = record["file"]
             print(f"## {current}\n")
-        print(f"- `{record['name']}` ({record['kind']})")
+        extra = ""
+        if record.get("reenters"):
+            extra += " reenters " + ", ".join(record["reenters"])
+        if record.get("oracle"):
+            extra += " oracle " + ", ".join(record["oracle"])
+        print(f"- `{record['name']}` ({record['kind']}{extra})")
         called = ", ".join(f"`{name}`" for name in record["calls"]) or "—"
         print(f"  - calls production: {called}")
         if record["replaces"]:
@@ -225,6 +285,14 @@ def main() -> None:
             print("  - possible copied expression:")
             for expression in record["copied"]:
                 print(f"    - `{expression}`")
+        if record["kind"] in ("test", "worker", "reference") and record.get("body"):
+            print("  - body:")
+            shown = record["body"][:100]
+            for line in shown:
+                print(f"    {line}")
+            extra_lines = len(record["body"]) - len(shown)
+            if extra_lines:
+                print(f"    … {extra_lines} more lines")
         print()
     print("## Production names touched\n")
     print(", ".join(f"`{name}`" for name in sorted(names)) or "(none)")
