@@ -45,7 +45,8 @@ python3 ~/agent-box/skills/pr-merge-triage/triage.py N --shape
 #    code you read. Do not run gh, git diff, or grep to find a line or a callee.
 #    Run test_seam.py once, without --json. It prints the test body.
 #    Do not fetch the test diff. Do not read or edit triage.py.
-#    The table below is the score. past_the_seam fails Unit Test Quality.
+#    The table below is the score. A contribution-guide miss fails Unit Test
+#    Quality. Coverage that is not complete does not.
 #    Read ~/.cursor/skills-cursor/canvas/SKILL.md once. Do not open
 #    sdk/*.d.ts, examples.md, or another PR's canvas.
 #    Do not print those reports.
@@ -80,12 +81,12 @@ hand and do not ack it.
 |---|---|---|
 | Affected Scope | `/pr-code-path` JSON | NVIDIA numerical results or original behavior are not identical |
 | AMD Guard | `/pr-code-path` JSON, plus an AITER import in the diff | the new behavior is outside the claimed guard, or AITER is imported under a scope other than `aiter` |
-| Unit Test Quality | `/pr-test-seam` JSON | the contribution-guide test bar fails, or coverage is not `complete` |
+| Unit Test Quality | `/pr-test-seam` JSON | the contribution-guide test bar fails (`official_pass` is false). Coverage other than `complete` does not fail the row |
 | Accuracy evidence | PR body, when attention, MoE, quantization, or a kernel changes | no accuracy number is present |
 | Performance evidence | PR body, when a kernel file changes | no throughput, latency, or TTFT number is present |
-| Flags | new `SGLANG_*` env bindings | a default-off hardware knob must become a hardware detection, or the owner must state the user policy it represents |
+| Flags | new `SGLANG_*` env bindings | a default-off binding whose comment is missing, incomplete, or only names the platform |
 
-Unit Test Quality has two stages. Both have to pass. Stage 1 passes when the PR follows the contribution guide and `test/README.md`:
+Unit Test Quality passes when the contribution-guide bar passes. That bar is `official_pass`. It passes when the PR follows the contribution guide and `test/README.md`:
 
 - a bugfix or feature has a corresponding unittest
 - the test uses the stdlib `unittest` framework
@@ -95,9 +96,22 @@ Unit Test Quality has two stages. Both have to pass. Stage 1 passes when the PR 
 - tests clean up and do not affect one another
 - small models, a reused server, and the file stays under 500 seconds
 
-Stage 2 is full coverage. The conclusion must be `complete`: every changed behavior has an interface test, and the expected values are independent. `mixed`, `past_the_seam`, `reimplements`, and `no_test` fail Unit Test Quality. The owner comment uses `missing_test` as the required fix. Do not read or edit `triage.py`. This table is the score.
+Coverage is recorded and does not decide the row. `mixed`, `past_the_seam`, `reimplements`, and `no_test` leave Unit Test Quality passing when `official_pass` is true. Still write `missing_test`. Do not read or edit `triage.py`. This table is the score.
 
-A test that returns True, or that reimplements the kernel inside the test, is not a new check. `return True` leaves the behavior untested, so the conclusion is `no_test` or `mixed`. A copied kernel is `reimplements` or `mixed`. Both fail this row.
+A test that returns True is not a new check. It leaves the behavior untested, so `official_pass` is false and the row fails. A copied kernel is `reimplements` or `mixed`. That coverage result does not fail the row by itself.
+
+A new `SGLANG_*` binding that defaults to `False` or is empty passes when the comment immediately above it states a user policy the code cannot infer: who sets it, when, and the choice. A comment that only names the platform, AITER, ROCm, CUDA, or a gfx check fails. So does a missing comment. The fix is then a hardware detection (`is_hip`, `use_aiter`, or a gfx check), or a comment that states the policy.
+
+```python
+# User policy: off keeps the accurate kernel. Set true only when the
+# caller accepts a lower score for higher speed. The default stays off.
+SGLANG_ALLOW_ACCURACY_LOSS = EnvBool(False)
+```
+
+```python
+# Enable on MI350 when AITER is available.
+SGLANG_USE_MXFP4_GEMM = EnvBool(False)  # fails: this is a platform check
+```
 
 A PR that is too large, or that spans more than three areas, still stops as `BLOCKED — SPLIT FIRST`. That row is shown only when it fails.
 
@@ -185,17 +199,16 @@ is required when `official_pass` is false, and it is the concrete test change.
 `official_evidence` is the sentence printed on the Unit Test Quality row.
 
 `conclusion` is `complete`, `mixed`, `past_the_seam`, `reimplements`, or
-`no_test`. This is stage 2, and it decides the row together with
-`official_pass`. Only `complete` is full coverage. Every other conclusion
-fails Unit Test Quality and requires `missing_test`, naming the production
-interface, the trigger, and the observable result.
+`no_test`. Record it. It does not fail Unit Test Quality. Only `official_pass`
+does. Every conclusion other than `complete` still requires `missing_test`,
+naming the production interface, the trigger, and the observable result.
 
 ## Calibration
 
 PR 39575 is the live calibration case. Shape, Affected Scope, and AMD Guard
-pass. The guard is `gfx950`, not all AMD. Unit Test Quality fails because
-coverage is `mixed`: the recompress tests step past `_forward_impl`. Full
-coverage is required. The verdict is `BLOCKED — REQUIREMENTS FAILED`.
+pass. The guard is `gfx950`, not all AMD. Coverage is `mixed`: the recompress
+tests step past `_forward_impl`. That does not fail Unit Test Quality, because
+`official_pass` is true. The row stays passing.
 
 `python3 ~/agent-box/skills/pr-merge-triage/triage.py --calibrate` locks the
 two rows apart:
@@ -212,6 +225,7 @@ two rows apart:
 
 ## What this skill does not do
 
-It does not decide whether the AMD math is correct, whether every forward path
-was updated, or whether CI is green. Those start only after
-`READY FOR HUMAN REVIEW`, in a human read or in `/sglang-pr-review`.
+It does not decide whether the AMD math is correct or whether every forward
+path was updated. That is `/sglang-pr-review`, and only after this checklist
+is `READY FOR HUMAN REVIEW` and `/pr-ci-watch` reports `CI clear`. This skill
+does not judge CI.

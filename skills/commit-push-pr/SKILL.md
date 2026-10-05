@@ -1,6 +1,6 @@
 ---
 name: commit-push-pr
-description: Commit, push, and create a PR in one flow — checks state at each stage, confirms push target, collects accuracy/benchmark data, drafts PR in HackMD format for review before submitting
+description: Commit, push, and create a PR in one flow — checks state at each stage, confirms push target, collects accuracy/benchmark data, drafts PR in HackMD format for review before submitting. SGLang pushes go through the /commit-push triage gate, and the PR is not opened while accuracy or performance evidence would fail.
 category: deliver
 ---
 
@@ -46,7 +46,15 @@ interactive flow; only the "ask the user" gates are replaced by CONFIG values.
 3. Commit (only if there are staged changes): `git commit -m "<commit_subject>"`.
    **Never add `Co-Authored-By` trailers** (in subject or body).
 
+3b. **SGLang triage gate, before push.** When `<repo>` is `sgl-project/sglang`, follow
+    Step 3b of `/commit-push` on this worktree. Score `git diff <base>...HEAD`.
+    Fix failing Affected Scope, AMD Guard, Unit Test Quality, and Flags rows, then
+    commit each fix and score again, at most 3 times. `BLOCKED — SPLIT FIRST` is
+    not auto-split. If a row still fails, do not push. Return
+    `{ status: fail, error: <the failing row> }`.
+
 4. Push the branch: `git push` (use `git push -u origin HEAD` if no upstream is set).
+   Only after step 3b passes for SGLang.
 
 5. PR — pick ONE path:
    - **Create** (no `update_pr`):
@@ -145,8 +153,8 @@ Ask the user to confirm or change the push remote, PR target repo, or PR base br
 
 Based on the state from Step 1, determine what is already done:
 
-- **If there are uncommitted changes**: Invoke the `/commit-push` skill (it will handle both commit and push). Wait for it to complete before proceeding to Step 4.
-- **If the working tree is clean but the branch has unpushed commits**: Invoke the `/commit-push` skill (it will skip commit and only push). Wait for it to complete before proceeding to Step 4.
+- **If there are uncommitted changes**: Invoke the `/commit-push` skill (it will handle both commit and push). Wait for it to complete before proceeding to Step 4. For SGLang, that skill runs the pre-push triage gate and fixes failing code rows before it pushes. Do not push around it.
+- **If the working tree is clean but the branch has unpushed commits**: Invoke the `/commit-push` skill (it will skip commit and only push). Wait for it to complete before proceeding to Step 4. The same triage gate still runs before that push.
 - **If the working tree is clean and the branch is already pushed and up-to-date**: Skip directly to Step 4.
 
 To check if the branch is already pushed and up-to-date:
@@ -267,6 +275,12 @@ Do NOT submit the PR until the user explicitly approves.
 ## Step 9: Submit the PR
 
 After user approval, read the draft file to get the PR body.
+
+For a PR into `sgl-project/sglang`, apply the Accuracy evidence and Performance
+evidence rows from `/pr-merge-triage` to this draft before any create attempt.
+A kernel change needs a throughput, latency, or TTFT number. An attention, MoE,
+quantization, or kernel change needs an accuracy number. "Pending" fails the
+row. Do not invent a number, and do not submit the PR. Ask for the measurement.
 
 Use the PR title and target information confirmed in Step 2 (not from the file — the file has no frontmatter).
 

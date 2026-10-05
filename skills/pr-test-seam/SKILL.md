@@ -3,7 +3,7 @@ name: pr-test-seam
 description: >-
   Judge whether tests for an sglang PR enter through the production interface
   that owns the changed behavior. Use when the user says '/pr-test-seam', or
-  when /pr-merge-triage or /sglang-pr-review needs the test-seam conclusion.
+  when /pr-merge-triage needs the test-seam conclusion.
   Facts come from test_seam.py. The conclusion is complete, mixed, past the
   seam, reimplements, or no test.
 category: deliver
@@ -87,14 +87,14 @@ performs those steps and calls the final helper does not cover the ordering.
 - the test checks the platform, the flag, or the kernel result itself and returns
 - the test reimplements the kernel, or copies the production formula or control flow
 
-Fold these into `conclusion`. They do not add a checklist row, and they do
-not make Unit Test Quality pass. `mixed`, `past_the_seam`, `reimplements`,
-and `no_test` fail that row. Do not read or edit `triage.py`. The table in
-`/pr-merge-triage` is the score. A `return True` test leaves the behavior
-untested: `no_test`, or `mixed` when another interface test exists.
-`official_pass` is also false, because the assert does not check the result.
-A copied kernel is `reimplements`, or `mixed` when another interface test
-exists. Neither is `complete`.
+Fold these into `conclusion`. They do not add a checklist row. Do not read or
+edit `triage.py`. The table in `/pr-merge-triage` is the score. A coverage
+conclusion other than `complete` does not fail Unit Test Quality. A
+`return True` test leaves the behavior untested: `no_test`, or `mixed` when
+another interface test exists. `official_pass` is also false, because the
+assert does not check the result, and that fails the row. A copied kernel is
+`reimplements`, or `mixed` when another interface test exists. Neither is
+`complete`, and neither fails the row by itself.
 
 ## 3. Judge expected values independently
 
@@ -161,11 +161,10 @@ When `/pr-merge-triage` invoked this skill, do not print that report. Write
 `no_test` means `official_pass` is false. `official_action` is then required
 and names the concrete test change.
 
-`/pr-merge-triage` passes Unit Test Quality only when `official_pass` is true
-and `conclusion` is `complete`. Full coverage means every changed behavior has
-an interface test. Any other conclusion fails the row. `missing_test` is
-required unless `conclusion` is `complete`. For `complete`, set `missing_test`
-to `""`.
+`/pr-merge-triage` passes Unit Test Quality when `official_pass` is true.
+A `conclusion` other than `complete` does not fail the row. `missing_test` is
+still required unless `conclusion` is `complete`. For `complete`, set
+`missing_test` to `""`.
 
 PR 39575's conclusion is `mixed`. The write-plan tests call `_qsa_write_plan`.
 The recompress tests call `_overwrite_cross_prefix_groups` after the fixture

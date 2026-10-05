@@ -6,9 +6,9 @@ the code. It is never a merge approval.
 
 Shape (size, flags, evidence) comes from the diff. Affected scope and the AMD
 guard come only from a /pr-code-path judgment JSON. Unit-test quality comes
-only from a /pr-test-seam judgment JSON. The contribution-guide bar and full
-coverage (`conclusion` is `complete`) both have to hold. Missing judgments
-stay BLOCKED.
+only from a /pr-test-seam judgment JSON. The contribution-guide bar
+(`official_pass`) has to hold. A coverage conclusion other than `complete`
+does not fail the row. Missing judgments stay BLOCKED.
 
     python3 triage.py 41870 --shape
     python3 triage.py 41870 --code-path /tmp/pr-41870-code-path.json \
@@ -59,7 +59,22 @@ GUARD_KINDS = (
     ("MI300", re.compile(r"\bgfx94[0-9]\b|\bgfx90a\b|(?i:mi30[025])")),
 )
 AITER_IMPORT = re.compile(r"\b(from|import)\s+aiter\b|from\s+aiter\.")
-NEW_ENV = re.compile(r"^\+\s*(SGLANG_\w+)\s*=\s*Env(\w+)\(([^)]*)\)")
+NEW_ENV = re.compile(
+    r"^\+\s*(SGLANG_\w+)\s*=\s*Env(\w+)\(([^)]*)\)\s*(?:#\s*(.*))?$"
+)
+FLAG_WHO = re.compile(r"\b(?:user|caller|operator)s?\b", re.I)
+FLAG_WHEN = re.compile(
+    r"\bwhen\b|\bonly if\b|\bonly when\b|\bset (?:this )?(?:true|false)\b|\bopt-?in\b",
+    re.I,
+)
+FLAG_WHY = re.compile(
+    r"\b(?:policy|trade-?off|accuracy|accurate|quality|speed|sacrific\w*)\b",
+    re.I,
+)
+FLAG_HARDWARE = re.compile(
+    r"\b(?:is_hip|use_aiter|aiter|gfx9\d+|mi3\d{2}|rocm|cuda|nvidia)\b",
+    re.I,
+)
 NEW_GLOBAL = re.compile(r"^\+([A-Z_][A-Z0-9_]{2,})\s*=")
 DEF_LINE = re.compile(r"^[-+]\s*(?:async\s+)?def\s+(\w+)\s*\(")
 IMPORT_LINE = re.compile(r"^[-+]\s*(from\s+[\w.]+\s+import|import\s+\w|#)")
@@ -171,8 +186,7 @@ def analyse(pr: str, repo: str) -> dict:
     partial = [f["path"] for f in edited if guard_state(f) == "partial"]
 
     added = [l for f in files for h in f["hunks"] for l in h["added"]]
-    new_envs = [(m.group(1), m.group(2), m.group(3).strip())
-                for l in added if (m := NEW_ENV.match(l))]
+    new_envs = collect_envs(files)
     # Only in *existing* shared files: a constant at the top of a brand-new
     # module is module scope, not global state leaking into everyone's path.
     new_globals = sorted({m.group(1) for f in nonamd_mod
@@ -300,6 +314,101 @@ def _areas(paths: list[str]) -> set[str]:
     return areas
 
 
+def collect_envs(files: list[dict]) -> list[dict]:
+    """New SGLANG_* bindings plus the comment immediately above them."""
+    found = []
+    for f in files:
+        for h in f["hunks"]:
+            pending: list[str] = []
+            for line in h["added"]:
+                body = line[1:].strip()
+                if not body:
+                    continue
+                if body.startswith("#"):
+                    pending.append(body[1:].strip())
+                    continue
+                match = NEW_ENV.match(line)
+                if match:
+                    inline = (match.group(4) or "").strip()
+                    parts = pending + ([inline] if inline else [])
+                    found.append({
+                        "name": match.group(1),
+                        "kind": match.group(2),
+                        "default": match.group(3).strip(),
+                        "comment": " ".join(part for part in parts if part),
+                    })
+                pending = []
+    return found
+
+
+def flag_comment_kind(comment: str) -> str:
+    """policy passes. hardware and missing fail."""
+    text = comment.strip()
+    if FLAG_WHO.search(text) and FLAG_WHEN.search(text) and FLAG_WHY.search(text):
+        return "policy"
+    if FLAG_HARDWARE.search(text):
+        return "hardware"
+    return "missing"
+
+
+def _default_off(env: dict) -> bool:
+    default = env["default"]
+    return "False" in default or default == ""
+
+
+def flag_rows(envs: list[dict]) -> list[dict]:
+    """Default-off passes only when the comment states a user policy."""
+    if not envs:
+        return [row("Flags", PASS, "No new env var.")]
+    default_off = [env for env in envs if _default_off(env)]
+    if not default_off:
+        names = ", ".join(env["name"] for env in envs[:3])
+        return [row("Flags", PASS, f"New env var(s) are not default-off: {names}.")]
+    failed = []
+    passed = []
+    for env in default_off:
+        kind = flag_comment_kind(env["comment"])
+        if kind == "policy":
+            passed.append(env)
+        else:
+            failed.append((env, kind))
+    if not failed:
+        quoted = "; ".join(
+            f"{env['name']}: {env['comment']}" for env in passed[:2]
+        )
+        return [row(
+            "Flags", PASS,
+            "Default-off env states a user policy the code cannot infer. " + quoted,
+        )]
+    parts = []
+    actions = []
+    for env, kind in failed[:3]:
+        label = f"{env['name']}={env['default'] or 'empty'}"
+        if kind == "hardware":
+            parts.append(
+                f"{label} comment names the platform: {env['comment']}"
+            )
+            actions.append(
+                f"Replace {env['name']} with is_hip, use_aiter, or a gfx check."
+            )
+        elif env["comment"]:
+            parts.append(
+                f"{label} comment does not state who sets it, when, and the choice: {env['comment']}"
+            )
+            actions.append(
+                f"Rewrite the comment above {env['name']} so it states who sets it, "
+                "when, and the choice the code cannot see."
+            )
+        else:
+            parts.append(f"{label} has no comment above the binding.")
+            actions.append(
+                f"Add a comment immediately above {env['name']} stating who sets it, "
+                "when, and the choice the code cannot see, or replace it with "
+                "is_hip, use_aiter, or a gfx check."
+            )
+    return [row("Flags", FAIL, " ".join(parts), " ".join(actions))]
+
+
 def shape_rows(a: dict) -> list[dict]:
     meta = a["meta"]
     total = meta["additions"] + meta["deletions"]
@@ -315,21 +424,7 @@ def shape_rows(a: dict) -> list[dict]:
             "kernel and its test, then the wiring, then any default change.",
         ))
 
-    default_off = [f"{name}={default}" for name, _, default in a["new_envs"]
-                   if "False" in default or default == ""]
-    if default_off:
-        rows.append(row(
-            "Flags", FAIL,
-            "New default-off env var(s): " + ", ".join(default_off[:3]),
-            "Detect the hardware and enable the path with is_hip, use_aiter, "
-            "or a gfx check. Add an env var only when the user must choose a "
-            "policy the code cannot see, and say when the default will flip.",
-        ))
-    elif a["new_envs"]:
-        names = ", ".join(name for name, _, _ in a["new_envs"][:3])
-        rows.append(row("Flags", PASS, f"New env var(s) are not default-off: {names}."))
-    else:
-        rows.append(row("Flags", PASS, "No new env var."))
+    rows.extend(flag_rows(a["new_envs"]))
 
     touched = a["kernels"] + a["amd_files"] + a["common_files"] + a["new_files"] + a["additive_files"]
     needs_accuracy = bool(a["kernels"]) or any(
@@ -497,26 +592,16 @@ def test_rows(seam: dict | None, error: str) -> list[dict]:
             "Follow /pr-test-seam and write its judgment JSON.",
         )]
     evidence = seam["official_evidence"].strip()
-    covered = seam["conclusion"] == "complete"
     style_ok = seam["official_pass"] is True
-    if style_ok and covered:
+    if style_ok:
+        if seam["conclusion"] != "complete":
+            evidence = (
+                f"{evidence} Coverage is {seam['conclusion']} at "
+                f"{seam['correct_seam'].strip()} and does not fail this row."
+            )
         return [row("Unit Test Quality", PASS, evidence)]
-    parts = [evidence]
-    actions = []
-    if not style_ok:
-        action = seam.get("official_action", "").strip()
-        if action:
-            actions.append(action)
-    if not covered:
-        seam_name = seam["correct_seam"].strip()
-        parts.append(
-            f"Coverage is {seam['conclusion']} at {seam_name}. "
-            "Every changed behavior needs a test through that function."
-        )
-        missing = seam.get("missing_test", "").strip()
-        if missing:
-            actions.append(missing)
-    return [row("Unit Test Quality", FAIL, " ".join(parts), " ".join(actions))]
+    action = seam.get("official_action", "").strip()
+    return [row("Unit Test Quality", FAIL, evidence, action)]
 
 
 def notes(a: dict) -> list[str]:

@@ -29,8 +29,9 @@ new while NVIDIA numerical behavior remains identical. That distinction is the
 main result.
 
 `/pr-merge-triage` scores how expensive the PR is to land. This skill draws the
-runtime path. Test-seam analysis lives in `/sglang-pr-review`; do not include
-it here.
+runtime path. Test-seam analysis lives in `/pr-test-seam`; do not include it
+here. `/sglang-pr-review` reads the JSON this skill already wrote and does not
+call this skill again.
 
 ## Run
 
