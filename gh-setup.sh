@@ -67,6 +67,32 @@ _gh_apply_shell_env() {
   unset GH_TOKEN
 }
 
+_gh_fix_credential_helper() {
+  # `gh auth login --git-protocol https` writes the git credential helper
+  # itself, as a bare `!<abs-path>/gh auth git-credential` with no environment.
+  # That is right for gh's default config location and wrong for ours: auth
+  # lives in a host-owned GH_CONFIG_DIR, which only ~/.bashrc exports. Any git
+  # run by a process that did not source ~/.bashrc — a non-interactive agent
+  # shell, a cron job — invoked the helper blind, got nothing back, fell
+  # through to prompting and died with:
+  #
+  #   fatal: could not read Username for 'https://github.com'
+  #
+  # which reads as "no credentials" when the credentials were there all along,
+  # in a directory the helper had not been told about. Rewrite it to carry its
+  # own environment so it depends on no shell init.
+  local host helper
+  helper="!GH_CONFIG_DIR=${GH_CONFIG_DIR} GH_TOKEN= ${GH_BIN} auth git-credential"
+  for host in "https://${GH_HOST}" "https://gist.${GH_HOST}"; do
+    git config --global --unset-all "credential.${host}.helper" 2>/dev/null || true
+    # Empty value first, so a helper inherited from /etc/gitconfig cannot also
+    # answer and win. Same convention gh itself uses.
+    git config --global --add "credential.${host}.helper" ""
+    git config --global --add "credential.${host}.helper" "$helper"
+  done
+  echo "[gh-setup] credential helper pinned to GH_CONFIG_DIR=${GH_CONFIG_DIR}"
+}
+
 _gh_auth_login() {
   local _gh_token
   if ! _gh_token="$(_gh_read_token)"; then
@@ -156,6 +182,11 @@ _gh_apply_shell_env
 
 if command -v gh >/dev/null 2>&1; then
   _gh_auth_login || echo "[gh-setup] gh auth login failed (non-fatal)"
+  # After login, because that is what writes the helper we are correcting.
+  # Unconditional: an "already logged in" run returns early from
+  # _gh_auth_login, and those are exactly the containers carrying the broken
+  # line from a previous launch.
+  _gh_fix_credential_helper || echo "[gh-setup] could not pin credential helper (non-fatal)"
   if gh auth status -h "$GH_HOST" >/dev/null 2>&1; then
     echo "[gh-setup] verified: gh auth status OK (${GH_HOST}, git protocol https)"
   else
