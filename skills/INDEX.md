@@ -65,6 +65,8 @@
 | [`/commit-push-pr`](commit-push-pr/SKILL.md) | Commit + push + PR in one flow |
 | [`/pr`](pr/SKILL.md) | Create a GitHub PR (HackMD draft first) |
 | [`/pr-merge-triage`](pr-merge-triage/SKILL.md) | The AMD-side review bar, written to share — plus a script that scores a PR: affected scope, is_hip/use_aiter guards, flags, split, merge-ease verdict |
+| [`/pr-code-path`](pr-code-path/SKILL.md) | Draw common-path edits, NVIDIA impact at execution/interface/numerical layers, and affected AMD hardware scope. When execution or the interface is not identical, prove the numerical result with a before/after value trace in code |
+| [`/pr-test-seam`](pr-test-seam/SKILL.md) | Check whether PR tests enter through the changed interface, step past the seam, or reimplement production |
 | [`/sglang-pr-review`](sglang-pr-review/SKILL.md) | Review an sglang PR for correctness: weight loading, forward-path variants, quant scales, collectives, kernels |
 | [`/ci-analysis`](ci-analysis/SKILL.md) | Triage PR CI failures: root cause vs fast-fail cascade, PR-related or not, merge verdict |
 | [`/pr-conflict-fix`](pr-conflict-fix/SKILL.md) | Resolve a conflicting PR inside a throwaway container, push the merge back |
