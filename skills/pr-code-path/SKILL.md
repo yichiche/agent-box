@@ -158,27 +158,35 @@ If a guard is inside a helper but its call is common, report both:
 The chat reply is only these two parts. Do not print the path tree, evidence
 tables, hardware table, or value-trace code in the chat.
 
-1. **Conclusion**, as bullets. One line each. No tables. The last bullet is
-   the verdict.
+1. **Final conclusion first**, then **Analysis**. No tables. Each analysis
+   label is on its own line, and its answer is the bullet under it.
 
 ```
-**Conclusion**
-- **Common path:** Yes/No. [What every backend now executes.]
-- **NVIDIA execution flow identical:** Yes/No.
-- **NVIDIA internal interface identical:** Yes/No.
-- **NVIDIA numerical results and original behavior identical:** Yes/No/Unproven.
-- **Affected hardware scope:** [All backends / All AMD (`is_hip`) / AITER-enabled AMD (`use_aiter`) / gfx950 / MI355 only (`is_gfx95_supported()`)].
-- **Final conclusion: Can merge.** [One sentence: why NVIDIA is unaffected and where the new behavior is gated.]
+Final conclusion:
+- Can merge. [One sentence: why NVIDIA is unaffected and where the new behavior is gated.]
+
+Analysis:
+Common path:
+- Yes/No. [What every backend now executes.]
+NVIDIA execution flow identical:
+- Yes/No.
+NVIDIA internal interface identical:
+- Yes/No.
+NVIDIA numerical results and original behavior identical:
+- Yes/No/Unproven.
+Affected hardware scope:
+- [All backends / All AMD (`is_hip`) / AITER-enabled AMD (`use_aiter`) / gfx950 / MI355 only (`is_gfx95_supported()`)].
 ```
 
 When the numerical layer is No or Unproven, or the new behavior is not
 contained by the guard the PR claims, the verdict is **Cannot merge**, and the
-reply must say what to change:
+reply must say what to change. Suggestions stay under Final conclusion:
 
 ```
-- **Final conclusion: Cannot merge.** [One sentence: what changes on NVIDIA or escapes the guard.]
-  - Suggestion: [the concrete code change, e.g. move `X` under `if is_gfx95_supported():`, keep the old return arity, restore the assert on non-gfx95]
-  - Suggestion: [the value trace that would prove it after the change]
+Final conclusion:
+- Cannot merge. [One sentence: what changes on NVIDIA or escapes the guard.]
+- Suggestion: [the concrete code change, e.g. move `X` under `if is_gfx95_supported():`, keep the old return arity, restore the assert on non-gfx95]
+- Suggestion: [the value trace that would prove it after the change]
 ```
 
 Extra execution or a wider internal interface alone is not a reason for

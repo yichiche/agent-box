@@ -229,7 +229,7 @@ def main() -> None:
         "\nFacts only. A guard token on an added line is not coverage of the "
         "lines around it. Decide common-path impact, NVIDIA behavior, and "
         "hardware scope in the report.\n"
-        "Chat reply is only the conclusion bullets and one canvas link. "
+        "Chat reply is Final conclusion first, then Analysis, then one canvas link. "
         "Value traces go in the canvas, not the chat. See SKILL.md Report.\n"
     )
     names = prod_names(files)

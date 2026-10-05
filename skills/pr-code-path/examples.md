@@ -3,13 +3,20 @@
 The chat reply for this PR is only the conclusion and the canvas link. The
 traces later in this file belong in the canvas, not in the chat.
 
-**Conclusion**
-- **Common path:** Yes. Every backend reads `extend_prefix_lens_cpu`, receives a wider write-plan tuple, calls a snapshot helper, and evaluates one extra condition.
-- **NVIDIA execution flow identical:** No.
-- **NVIDIA internal interface identical:** No.
-- **NVIDIA numerical results and original behavior identical:** Yes.
-- **Affected hardware scope:** gfx950 / MI355 only (`is_gfx95_supported()`).
-- **Final conclusion: Can merge.** NVIDIA keeps its original outputs and alignment assertion, and the unaligned-prefix correction runs only under `is_gfx95_supported()`.
+Final conclusion:
+- Can merge. NVIDIA keeps its original outputs and alignment assertion, and the unaligned-prefix correction runs only under `is_gfx95_supported()`.
+
+Analysis:
+Common path:
+- Yes. Every backend reads `extend_prefix_lens_cpu`, receives a wider write-plan tuple, calls a snapshot helper, and evaluates one extra condition.
+NVIDIA execution flow identical:
+- No.
+NVIDIA internal interface identical:
+- No.
+NVIDIA numerical results and original behavior identical:
+- Yes.
+Affected hardware scope:
+- gfx950 / MI355 only (`is_gfx95_supported()`).
 
 [PR 39575 code path](/home/yichiche/.cursor/projects/home-yichiche/canvases/pr-39575-code-path.canvas.tsx)
 
