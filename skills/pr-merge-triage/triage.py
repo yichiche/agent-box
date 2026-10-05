@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Classify an sgl-project/sglang PR against the merge bar in SKILL.md.
+"""Automated pre-review gate for an sgl-project/sglang PR.
 
-Answers the mechanical half of the review — affected scope, guards, new flags,
-interface churn, kernel kind, size, evidence — and prints the checklist
-pre-filled. The judgement half (is the guard the *right* one? is this one
-concern or three?) stays with the reviewer; rows the script cannot decide are
-printed as `?` rather than guessed.
+Prints a fixed checklist. A passing result means a human can start reading
+the code. It is never a merge approval.
 
-    python3 triage.py 41870 [--repo sgl-project/sglang] [--json]
+Shape (size, flags, evidence) comes from the diff. Affected scope and the AMD
+guard come only from a /pr-code-path judgment JSON. Unit-test quality comes
+only from a /pr-test-seam judgment JSON. Missing judgments stay BLOCKED.
+
+    python3 triage.py 41870 --shape
+    python3 triage.py 41870 --code-path /tmp/pr-41870-code-path.json \
+        --test-seam /tmp/pr-41870-test-seam.json
 """
 
 from __future__ import annotations
@@ -259,536 +262,389 @@ def describe_guards(a: dict) -> str:
     return "no is_hip, use_aiter, or MI355/gfx950 check in the added lines"
 
 
-# --- scoring -----------------------------------------------------------------
+# --- pre-review gate ---------------------------------------------------------
 #
-# Two mechanisms, deliberately not merged into one number:
-#
-#   GATES  — binary, and no amount of good elsewhere substitutes for them. Each
-#            one marks something that is either a crash, a silent wrong answer,
-#            or a claim nobody can check. A PR with an open gate is not "high
-#            risk", it is unreviewable until the gate is answered.
-#   POINTS — risk that trades off. Shared code, size, flags, missing tests: each
-#            costs points, and the total says how much review the PR needs.
-#
-# Routing is a third, separate thing: who has to look at it. A PR can be 0
-# points and still need a community reviewer, because it edits shared code.
+# This script does not approve a merge. PASS means the automated pre-review
+# can hand the PR to a human. Scope and guard come only from a /pr-code-path
+# judgment file. Test quality comes only from a /pr-test-seam judgment file.
+# A missing judgment is BLOCKED, never waved through.
 
-GATES = {
-    "Guard choice": "aiter import must be gated by use_aiter, not is_hip alone "
-                    "— otherwise it crashes on an AMD box without AITER",
-    "Critical risk": "a CRITICAL finding from /sglang-pr-review blocks the "
-                     "merge — wrong output, hang, crash, raise, or startup "
-                     "failure — and must be fixed, not weighed",
-}
-BANDS = ((3, "LOW"), (7, "MEDIUM"), (12, "HIGH"))
+PASS, FAIL, BLOCKED = "PASS", "FAIL", "BLOCKED"
+SPLIT = "BLOCKED — SPLIT FIRST"
+FAILED = "BLOCKED — REQUIREMENTS FAILED"
+INCOMPLETE = "BLOCKED — AUTOMATION INCOMPLETE"
+READY = "READY FOR HUMAN REVIEW"
+PROCEED = "PROCEED"
 
-# Severity lines in /sglang-pr-review output, in both the shapes it emits: the
-# findings bullets (`[bug] CRITICAL — path:line — …`) and the Risk & Scope table
-# (`| Critical | … |`). The table usually restates the bullets, so counting both
-# and taking the larger per severity avoids double-counting without losing a
-# finding that only appears in one of them.
-SEV_BULLET = re.compile(r"^\s*[-*]\s*`?\[\w+\]\s*(CRITICAL|HIGH|MEDIUM|LOW)\b", re.I)
-SEV_TABLE = re.compile(
-    r"^\s*\|\s*(Critical|High|Medium|Low)\s*\|\s*(.*?)\s*\|?\s*$", re.I)
-DECISION = re.compile(r"\b(approve|comment|request-changes)\b", re.I)
+HARDWARE_SCOPES = {"all_backends", "all_amd", "aiter", "gfx950", "gfx94", "other"}
+CODE_CONCLUSIONS = {"can_merge", "cannot_merge"}
+SEAM_CONCLUSIONS = {"complete", "mixed", "past_the_seam", "reimplements", "no_test"}
 
 
-def parse_review(text: str) -> dict:
-    """Severity counts from a /sglang-pr-review report."""
-    bullets, table = Counter(), Counter()
-    # Kept apart, not merged: the Risk & Scope table and the findings bullets are
-    # two renderings of the same findings, so appending both prints every finding
-    # twice in different words. The table wins when present — it is already the
-    # one-line, reviewer-facing phrasing.
-    det_bullet = {s: [] for s in ("CRITICAL", "HIGH", "MEDIUM", "LOW")}
-    det_table = {s: [] for s in ("CRITICAL", "HIGH", "MEDIUM", "LOW")}
-    decision = ""
-    for line in text.splitlines():
-        if m := SEV_BULLET.match(line):
-            sev = m.group(1).upper()
-            bullets[sev] += 1
-            rest = line.split("—", 1)[-1].strip() if "—" in line else line.strip()
-            if rest and rest not in det_bullet[sev]:
-                det_bullet[sev].append(rest.rstrip("`"))
-        elif m := SEV_TABLE.match(line):
-            sev = m.group(1).upper()
-            table[sev] += 1
-            cell = m.group(2).strip().strip("|").strip()
-            if cell and cell not in det_table[sev] and not set(cell) <= set("-: "):
-                det_table[sev].append(cell)
-        if line.lower().lstrip().startswith(("### decision", "**decision",
-                                             "decision:")):
-            if d := DECISION.search(line):
-                decision = d.group(1).lower()
-        elif not decision and "decision" in line.lower():
-            if d := DECISION.search(line):
-                decision = d.group(1).lower()
-    details = {s: (det_table[s] or det_bullet[s])
-               for s in ("CRITICAL", "HIGH", "MEDIUM", "LOW")}
-    counts = {s: max(bullets[s], table[s])
-              for s in ("CRITICAL", "HIGH", "MEDIUM", "LOW")}
-    counts["decision"] = decision
-    counts["source"] = "parsed"
-    counts["details"] = details
-    return counts
+def row(check: str, verdict: str, evidence: str, action: str = "") -> dict:
+    return {"check": check, "verdict": verdict, "evidence": evidence, "action": action}
 
 
-def band(points: int) -> str:
-    for limit, name in BANDS:
-        if points <= limit:
-            return name
-    return "SPLIT"
-
-
-def rows(a: dict) -> list[dict]:
-    """One dict per check: verdict, evidence, remediation, risk points, gate."""
-    m, out = a["meta"], []
-    hot, common = a["hot_common"], a["common_files"]
-    unguarded, partial, additive = a["unguarded"], a["partial"], a["additive_files"]
-
-    def row(check, vd, ev, act="", pts=0, gate=False, hard=True):
-        out.append({"check": check, "verdict": vd, "evidence": ev,
-                    "action": act, "points": pts, "gate": gate, "hard": hard})
-
-    # 1. Affected Scope — how much of the world inherits this change
-    if hot:
-        row("Affected Scope", BAD,
-            f"edits hot common code: {', '.join(hot[:3])}"
-            + (f" (+{len(hot)-3})" if len(hot) > 3 else ""),
-            "needs a community reviewer; check whether it can move behind an "
-            "AMD-only module instead", 4)
-    elif common:
-        row("Affected Scope", WARN,
-            f"edits {len(common)} shared file(s): {', '.join(common[:3])}",
-            "confirm no NVIDIA/CPU behaviour changes", 2)
-    elif additive:
-        row("Affected Scope", WARN,
-            f"shared files, additive only: {', '.join(additive[:3])}",
-            "cheap kind — nothing existing changes behaviour; say so in review", 1)
-    elif a["new_files"]:
-        row("Affected Scope", WARN,
-            f"{len(a['new_files'])} new file(s) outside an AMD path: "
-            f"{', '.join(a['new_files'][:3])}",
-            "confirm the module is only imported from an AMD-guarded call site, "
-            "or move it under an AMD-named path", 1)
-    else:
-        row("Affected Scope", OK, f"{len(a['amd_files'])} file(s), all AMD-only paths")
-
-    # 2. AMD guard — cite the guard with a line from the diff.
-    ev = describe_guards(a)
-    if not common:
-        row("AMD guard", OK, ev)
-    elif unguarded:
-        row("AMD guard", BAD,
-            f"rewrites shared code with no guard in the hunk: "
-            f"{', '.join(unguarded[:3])}. {ev}",
-            "wrap in `if _is_hip:` (all AMD GPUs), `if _use_aiter:` (needs the "
-            "AITER library), or a device check such as `is_gfx95_supported()` "
-            "(MI355 only) — or, if the bug is shared, leave it unguarded and "
-            "get a community reviewer", 3)
-    elif partial:
-        row("AMD guard", WARN,
-            f"some hunks show no guard in context: {', '.join(partial[:3])}. {ev}",
-            "read those hunks — the guard may be above the window", 1)
-    else:
-        row("AMD guard", OK, ev)
-
-    # 3. Guard choice — GATE: the wrong one is a crash, not a style problem
-    if a["uses_aiter"] and not a["uses_is_hip"]:
-        row("Guard choice", WARN, "imports aiter; no is_hip/use_aiter token added",
-            "gate with `_use_aiter` — `is_hip()` alone runs this on an AMD box "
-            "with no AITER installed", 0, gate=True)
-    # When it passes there was nothing to choose, so it is context, not a bar —
-    # a row that reads PASS on nearly every PR trains you to skim the table. It
-    # climbs back into the must-pass rows only in the branch above, where the
-    # wrong guard is a crash.
-    elif a["uses_aiter"]:
-        row("Guard choice", OK, "imports aiter, guard tokens present", hard=False)
-    elif a["uses_is_hip"]:
-        row("Guard choice", OK, "is_hip — works on all AMD GPUs", hard=False)
-    else:
-        row("Guard choice", OK,
-            "no new aiter import; nothing to choose between is_hip and use_aiter",
-            hard=False)
-
-    # 4. Flags
-    if a["new_envs"]:
-        offs = [f"{n}={d}" for n, _, d in a["new_envs"] if "False" in d or d == ""]
-        if offs:
-            row("New flags", BAD,
-                f"{len(a['new_envs'])} new env var(s), default-off: "
-                f"{', '.join(offs[:3])}",
-                "if the hardware implies it, default it on and detect with "
-                "is_hip/use_aiter — do not make users export a flag",
-                hard=False)
+def _areas(paths: list[str]) -> set[str]:
+    areas = set()
+    for path in paths:
+        parts = path.split("/")
+        if path.startswith("python/sglang/srt/") and len(parts) > 4:
+            areas.add(parts[3])
         else:
-            row("New flags", WARN,
-                f"new env var(s): {', '.join(n for n, _, _ in a['new_envs'])}",
-                "default-on is right; still ask whether the knob is needed",
-                hard=False)
-    else:
-        row("New flags", OK, "no new env var", hard=False)
+            areas.add(parts[0])
+    return areas
 
-    if a["new_globals"]:
-        row("New globals", WARN,
-            f"module-level globals in shared code: "
-            f"{', '.join(a['new_globals'][:4])}",
-            "prefer a derived constant or a config field over global state",
-            hard=False)
-    else:
-        row("New globals", OK, "no new global in shared code", hard=False)
 
-    # 5. Interface churn — GATE when a shared signature is rewritten
-    if a["sig_changed"]:
-        row("Interface churn", WARN,
-            f"signature changed: {', '.join(a['sig_changed'][:3])}",
-            "verify every caller is updated in this PR; prefer a keyword arg "
-            "with a behaviour-preserving default", hard=False)
-    else:
-        row("Interface churn", OK, "no shared signature rewritten", hard=False)
-
-    # 6. Kernel kind
-    if a["new_kernels"]:
-        row("Kernel", WARN, f"new kernel file(s): {', '.join(a['new_kernels'][:3])}",
-            "needs a reference-correctness test and a benchmark; check the "
-            "non-AMD fallback still exists", hard=False)
-    elif a["kernels"]:
-        row("Kernel", WARN, f"modifies {len(a['kernels'])} existing kernel file(s)",
-            "needs before/after numbers on the same shapes", hard=False)
-    else:
-        row("Kernel", OK, "no kernel source touched", hard=False)
-
-    # 7. Size / splittability
-    tot = m["additions"] + m["deletions"]
-    areas = {p.split("/")[3] if p.startswith("python/sglang/srt/") and
-             len(p.split("/")) > 4 else p.split("/")[0]
-             for p in a["amd_files"] + a["common_files"] + a["new_files"]
-             + a["additive_files"]}
-    a["oversized"] = tot > 800 or len(areas) > 3
+def shape_rows(a: dict) -> list[dict]:
+    meta = a["meta"]
+    total = meta["additions"] + meta["deletions"]
+    paths = (a["amd_files"] + a["common_files"] + a["new_files"] + a["additive_files"])
+    a["oversized"] = total > 800 or len(_areas(paths)) > 3
+    rows = []
     if a["oversized"]:
-        row("Size", BAD, f"+{m['additions']}/-{m['deletions']} across {len(areas)} areas",
-            "split: one concern per PR (kernel / wiring / default flip)", hard=False)
-    elif tot > 300:
-        row("Size", WARN, f"+{m['additions']}/-{m['deletions']}",
-            "reviewable, but check it is one concern", hard=False)
-    else:
-        row("Size", OK, f"+{m['additions']}/-{m['deletions']}", hard=False)
+        rows.append(row(
+            "One concern", FAIL,
+            f"+{meta['additions']}/-{meta['deletions']} across "
+            f"{len(_areas(paths))} areas",
+            "Split this PR before review. Land one concern at a time: "
+            "kernel and its test, then the wiring, then any default change.",
+        ))
 
-    # 8. Evidence — GATE when numerics moved and nothing was measured
-    need_acc = bool(a["kernels"]) or any(
-        re.search(r"quant|moe|attention", p, re.I)
-        for p in a["amd_files"] + a["common_files"] + a["new_files"]
-        + a["additive_files"])
-    if need_acc and not a["has_accuracy"]:
-        row("Evidence", BAD, "numerics touched, no accuracy number in body",
-            "ask for GSM8K (or equivalent) before/after", hard=False)
-    elif a["kernels"] and not a["has_perf"]:
-        row("Evidence", WARN, "kernel change, no perf number in body",
-            "ask for before/after on the shapes it targets", hard=False)
+    default_off = [f"{name}={default}" for name, _, default in a["new_envs"]
+                   if "False" in default or default == ""]
+    if default_off:
+        rows.append(row(
+            "Flags", FAIL,
+            "New default-off env var(s): " + ", ".join(default_off[:3]),
+            "Detect the hardware and enable the path with is_hip, use_aiter, "
+            "or a gfx check. Add an env var only when the user must choose a "
+            "policy the code cannot see, and say when the default will flip.",
+        ))
+    elif a["new_envs"]:
+        names = ", ".join(name for name, _, _ in a["new_envs"][:3])
+        rows.append(row("Flags", PASS, f"New env var(s) are not default-off: {names}."))
     else:
-        row("Evidence", OK,
-            f"accuracy={a['has_accuracy']} perf={a['has_perf']}", hard=False)
+        rows.append(row("Flags", PASS, "No new env var."))
 
-    # 9. Tests
-    if a["buckets"].get("test"):
-        row("Tests", OK, f"{a['buckets']['test']} test file(s) touched")
+    touched = a["kernels"] + a["amd_files"] + a["common_files"] + a["new_files"] + a["additive_files"]
+    needs_accuracy = bool(a["kernels"]) or any(
+        re.search(r"quant|moe|attention", path, re.I) for path in touched)
+    if needs_accuracy and not a["has_accuracy"]:
+        rows.append(row(
+            "Accuracy evidence", FAIL,
+            "Numerics are touched and the PR body has no accuracy number.",
+            "Add a GSM8K (or equivalent) before/after result before human review.",
+        ))
+    elif needs_accuracy:
+        rows.append(row("Accuracy evidence", PASS, "The PR body reports an accuracy result."))
     else:
-        row("Tests", WARN, "no test file in the diff",
-            "AMD-only tests belong in test/registered/amd/", 2)
+        rows.append(row("Accuracy evidence", PASS, "No quantization, MoE, attention, or kernel path is touched."))
 
-    # 10. Correctness — GATE, and the only row this script cannot derive. It is
-    # fed from /sglang-pr-review: that skill finds the bugs, this one decides
-    # what they mean for merging. Absent a review, the row stays `?` and the
-    # verdict refuses to say "merge" — triage measures cost to land, never
-    # correctness.
-    rv = a.get("review")
-    if not rv:
-        # `?`, not PASS. An unrun review is an open question, and the verdict
-        # treats it as one — otherwise "nobody looked" reads the same as "clean".
-        row("Critical risk", UNK,
-            "not assessed — /sglang-pr-review has not read this diff",
-            "run /sglang-pr-review and feed it back with --review", gate=True)
-    elif rv["CRITICAL"]:
-        detail = "; ".join((rv.get("details") or {}).get("CRITICAL") or [])
-        row("Critical risk", BAD,
-            f"{rv['CRITICAL']} CRITICAL" + (f" — {detail}" if detail else ""),
-            "must be fixed before merge — a CRITICAL blocks the merge "
-            "(wrong output, hang, crash, raise, or startup failure), "
-            "not a risk to weigh", 0, gate=True)
+    if a["kernels"] and not a["has_perf"]:
+        rows.append(row(
+            "Performance evidence", FAIL,
+            "A kernel file changed and the PR body has no performance number.",
+            "Add before/after throughput, latency, or TTFT on the shapes this kernel targets.",
+        ))
+    elif a["kernels"]:
+        rows.append(row("Performance evidence", PASS, "The PR body reports a performance result."))
     else:
-        row("Critical risk", OK,
-            f"none — 0 critical ({rv['HIGH']} high, {rv['MEDIUM']} medium, "
-            f"{rv['LOW']} low)")
+        rows.append(row("Performance evidence", PASS, "No kernel source is touched."))
+    return rows
 
-    # High/Medium/Low are context, not a bar: they shape the review conversation
-    # and never block on their own.
-    if rv and (rv["HIGH"] or rv["MEDIUM"] or rv["LOW"]):
-        det = rv.get("details") or {}
-        parts = [f"{n} {lab}: {'; '.join(det.get(k) or []) or 'see report'}"
-                 for lab, k, n in (("high", "HIGH", rv["HIGH"]),
-                                   ("medium", "MEDIUM", rv["MEDIUM"]),
-                                   ("low", "LOW", rv["LOW"])) if n]
-        pts = min(3 * rv["HIGH"], 6) + min(rv["MEDIUM"], 3)
-        row("Other findings", WARN if rv["HIGH"] else OK, ". ".join(parts),
-            "High findings crash or degrade under specific configurations — "
-            "resolve them or get the author's rationale on record"
-            if rv["HIGH"] else "", pts, hard=False)
+
+def _bool_field(data: dict, key: str, problems: list[str]) -> None:
+    if key not in data:
+        problems.append(key)
+    elif not isinstance(data[key], bool):
+        problems.append(f"{key} must be a JSON boolean")
+
+
+def _behavior_ok(value) -> bool:
+    return value is True
+
+
+def validate_code_path(data: dict) -> list[str]:
+    problems = []
+    for key in ("conclusion", "hardware_scope", "hardware_scope_detail", "summary"):
+        if not str(data.get(key) or "").strip():
+            problems.append(key)
+    for key in ("common_path_changed", "nvidia_execution_identical",
+                "nvidia_interface_identical"):
+        _bool_field(data, key, problems)
+    if "nvidia_behavior_identical" not in data:
+        problems.append("nvidia_behavior_identical")
+    elif data["nvidia_behavior_identical"] not in (True, False, "unproven"):
+        problems.append('nvidia_behavior_identical must be true, false, or "unproven"')
+    if data.get("conclusion") not in CODE_CONCLUSIONS:
+        problems.append("conclusion must be can_merge or cannot_merge")
+    if data.get("hardware_scope") not in HARDWARE_SCOPES:
+        problems.append(
+            "hardware_scope must be all_backends, all_amd, aiter, gfx950, gfx94, or other")
+    needs_action = (data.get("conclusion") == "cannot_merge"
+                    or not _behavior_ok(data.get("nvidia_behavior_identical")))
+    if needs_action and not str(data.get("owner_action") or "").strip():
+        problems.append("owner_action")
+    return problems
+
+
+def validate_test_seam(data: dict) -> list[str]:
+    problems = []
+    for key in ("conclusion", "changed_behavior", "correct_seam"):
+        if not str(data.get(key) or "").strip():
+            problems.append(key)
+    if data.get("conclusion") not in SEAM_CONCLUSIONS:
+        problems.append(
+            "conclusion must be complete, mixed, past_the_seam, reimplements, or no_test")
+    if data.get("conclusion") != "complete" and not str(data.get("missing_test") or "").strip():
+        problems.append("missing_test")
+    return problems
+
+
+def load_judgment(path: str | None, kind: str, validate) -> tuple[dict | None, str]:
+    if not path:
+        return None, f"{kind} judgment JSON was not provided"
+    try:
+        data = json.loads(open(path, encoding="utf-8").read())
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"{kind} judgment JSON could not be read: {exc}"
+    if not isinstance(data, dict):
+        return None, f"{kind} judgment JSON must be an object"
+    problems = validate(data)
+    if problems:
+        return None, f"{kind} judgment JSON is incomplete: {', '.join(problems)}"
+    return data, ""
+
+
+def _layer(same: bool) -> str:
+    return "identical" if same else "not identical"
+
+
+def code_path_rows(cp: dict | None, error: str, uses_aiter: bool) -> list[dict]:
+    if cp is None:
+        blocked = f"Blocked: {error}."
+        action = "Follow /pr-code-path and write its judgment JSON."
+        return [
+            row("Affected Scope", BLOCKED, blocked, action),
+            row("AMD Guard", BLOCKED, blocked, action),
+        ]
+    behavior = cp["nvidia_behavior_identical"]
+    summary = cp["summary"].strip()
+    layers = (
+        f"Common path changed: {'yes' if cp['common_path_changed'] else 'no'}. "
+        f"NVIDIA execution flow {_layer(cp['nvidia_execution_identical'])}; "
+        f"internal interface {_layer(cp['nvidia_interface_identical'])}; "
+        f"numerical results and original behavior "
+        f"{'identical' if behavior is True else 'not identical' if behavior is False else 'unproven'}. "
+        f"{summary}"
+    )
+    if _behavior_ok(behavior):
+        scope = row("Affected Scope", PASS, layers)
+    else:
+        scope = row("Affected Scope", FAIL, layers, cp.get("owner_action", "").strip())
+
+    detail = cp["hardware_scope_detail"].strip()
+    scope_ok = cp["conclusion"] == "can_merge" and _behavior_ok(behavior)
+    aiter_ok = not (uses_aiter and cp["hardware_scope"] != "aiter")
+    if scope_ok and aiter_ok:
+        guard = row("AMD Guard", PASS, f"Code path accepts this scope: {detail}.")
+    else:
+        parts = []
+        actions = []
+        if not scope_ok:
+            parts.append(f"Code path did not accept this scope ({detail}). {summary}")
+            action = cp.get("owner_action", "").strip()
+            if action:
+                actions.append(action)
+        if not aiter_ok:
+            parts.append(f"The diff imports AITER, but the code-path scope is {detail}.")
+            actions.append(
+                "Gate the AITER import with _use_aiter. is_hip alone crashes on an "
+                "AMD machine that does not have AITER installed."
+            )
+        guard = row("AMD Guard", FAIL, " ".join(parts), " ".join(actions))
+    return [scope, guard]
+
+
+def test_rows(seam: dict | None, error: str) -> list[dict]:
+    if seam is None:
+        return [row(
+            "Unit Test Quality", BLOCKED, f"Blocked: {error}.",
+            "Follow /pr-test-seam and write its judgment JSON.",
+        )]
+    conclusion = seam["conclusion"]
+    evidence = (
+        f"Test-seam conclusion: {conclusion}. "
+        f"Changed behavior: {seam['changed_behavior'].strip()} "
+        f"Correct seam: {seam['correct_seam'].strip()}."
+    )
+    if conclusion == "complete":
+        return [row("Unit Test Quality", PASS, evidence)]
+    return [row("Unit Test Quality", FAIL, evidence, seam["missing_test"].strip())]
+
+
+def notes(a: dict) -> list[str]:
+    title = a["meta"].get("title") or ""
+    if re.search(r"bugfix|bug[- ]fix|\[fix\]", title, re.I):
+        kind = "The title marks an existing-bug fix. Human review should confirm it is live on main."
+    elif re.search(r"\[feat|feature", title, re.I):
+        kind = "The title marks a new feature. It must not change behavior that already ships."
+    else:
+        kind = "The title does not say whether this is a new feature or a live bug fix."
+    out = [kind]
+    if a["new_kernels"]:
+        out.append("Kernel: new kernel file(s): " + ", ".join(a["new_kernels"][:3]) + ".")
+    elif a["kernels"]:
+        out.append(f"Kernel: modifies {len(a['kernels'])} existing kernel file(s).")
+    else:
+        out.append("Kernel: no kernel source is touched.")
+    if a["sig_changed"]:
+        out.append("Interface: shared signature rewritten: " + ", ".join(a["sig_changed"][:3]) + ".")
+    if a["new_globals"]:
+        out.append("Globals: new shared global(s): " + ", ".join(a["new_globals"][:3]) + ".")
     return out
 
 
-def apply_ack(a: dict, rs: list[dict]) -> None:
-    """Let the reviewer close a CHECK row they have read.
-
-    Only a CHECK — a FAIL is a defect, and `Critical risk` is the one row whose
-    whole purpose is that it cannot be waved through. Acking is recorded in the
-    evidence so the table never claims the script verified something a human
-    asserted.
-    """
-    for r in rs:
-        if r["check"].lower() not in a.get("ack", []):
-            continue
-        if r["check"] == "Critical risk" or r["verdict"] == BAD:
-            r["evidence"] += " · ack refused — this row cannot be waved through"
-            continue
-        r["verdict"], r["points"] = OK, 0
-        r["evidence"] += " · reviewer acked"
+DISPLAY_ORDER = (
+    "Affected Scope",
+    "AMD Guard",
+    "Unit Test Quality",
+    "Accuracy evidence",
+    "Performance evidence",
+    "Flags",
+)
 
 
-def verdict(a: dict, rs: list[dict]) -> dict:
-    open_gates = [r["check"] for r in rs if r["gate"] and r["verdict"] != OK]
-    points = sum(r["points"] for r in rs if r.get("hard"))
-    b = band(points)
-    needs_community = bool(a["hot_common"]) or bool(a["unguarded"])
-    not_pass = [r["check"] for r in rs if r.get("hard") and r["verdict"] != OK]
-
-    if a.get("oversized"):
-        name, why = "SPLIT FIRST", (
-            "too much in one PR to review as a unit — see the risk picture")
-    elif open_gates:
-        name, why = "BLOCKED ON AUTHOR", (f"open gate(s): {', '.join(open_gates)} — "
-                                          f"no score substitutes for these")
-    elif needs_community:
-        name, why = "NEEDS COMMUNITY REVIEWER", (
-            f"{points} risk points ({b}), but it changes code every vendor "
-            f"inherits — an AMD-side review cannot land it")
-    elif not_pass:
-        name, why = "NOT ALL PASS", (
-            "hard row(s) still open: " + ", ".join(not_pass)
-            + " — every row in the table has to pass before merge")
-    elif not a.get("review"):
-        # Cheap-to-land is not the same as correct. Saying "merge" off the diff
-        # shape alone is exactly the mistake this pairing exists to prevent.
-        name, why = "TRIAGE CLEAR — NEEDS CORRECTNESS REVIEW", (
-            "every hard row passes, but nothing has read it for bugs yet: "
-            "run /sglang-pr-review")
-    elif b == "LOW":
-        name, why = "LOW RISK — MERGE", (f"{points} risk points, no open gate, "
-                                         f"no CRITICAL finding — AMD-side "
-                                         f"review is enough")
-    else:
-        name, why = f"{b} RISK — REVIEW", (f"{points} risk points; read the "
-                                           f"flagged rows before approving")
-    # Whatever else the verdict says, never let "nobody has read this for bugs"
-    # fall off the end of the sentence.
-    if not a.get("review") and name != "TRIAGE CLEAR — NEEDS CORRECTNESS REVIEW":
-        why += " · correctness not reviewed yet — run /sglang-pr-review"
-    return {"name": name, "why": why, "points": points, "band": b,
-            "open_gates": open_gates, "needs_community": needs_community,
-            "reviewed": bool(a.get("review"))}
+def order_rows(rows: list[dict]) -> list[dict]:
+    by_name = {item["check"]: item for item in rows}
+    ordered = []
+    concern = by_name.get("One concern")
+    if concern is not None and concern["verdict"] != PASS:
+        ordered.append(concern)
+    ordered.extend(by_name[name] for name in DISPLAY_ORDER if name in by_name)
+    return ordered
 
 
-PASS_VERDICT = "LOW RISK — MERGE"
+def verdict_of(rows: list[dict]) -> str:
+    by_name = {item["check"]: item for item in rows}
+    if by_name.get("One concern", {}).get("verdict") == FAIL:
+        return SPLIT
+    if any(item["verdict"] == BLOCKED for item in rows):
+        return INCOMPLETE
+    if any(item["verdict"] == FAIL for item in rows):
+        return FAILED
+    return READY
 
 
-def approval(a: dict, rs: list[dict], pr: str) -> str:
-    """One paragraph for the approving comment. Printed only on a clean pass.
-
-    Assembled from rows that already passed, so it cannot claim something the
-    table did not check: what the PR does, how far it reaches, what was
-    measured, and what the review found.
-    """
-    m, by = a["meta"], {r["check"]: r for r in rs}
-    s = [f"#{pr} {m['title'].split('] ')[-1].rstrip('.')} — "
-         f"+{m['additions']}/-{m['deletions']} across {m['changedFiles']} files."]
-
-    if a["common_files"] or a["additive_files"]:
-        shared = (a["common_files"] + a["additive_files"])[:2]
-        s.append("It reaches shared code only additively ("
-                 + ", ".join(p.rsplit("/", 1)[-1] for p in shared)
-                 + "), so nothing that already ships changes behaviour;")
-    else:
-        s.append("Every file it touches is on the AMD path, so no other vendor "
-                 "inherits the change;")
-    s.append(by["AMD guard"]["evidence"].rstrip(".") + ".")
-
-    quiet = []
-    if not a["new_envs"]:
-        quiet.append("no new env var")
-    if not a["new_globals"]:
-        quiet.append("no new global")
-    if not a["sig_changed"]:
-        quiet.append("no shared signature rewritten")
-    if quiet:
-        s.append("There is " + ", ".join(quiet) + ".")
-
-    rv = a.get("review") or {}
-    tail = (f" ({rv.get('HIGH', 0)} high, {rv.get('MEDIUM', 0)} medium, "
-            f"{rv.get('LOW', 0)} low — none blocking)"
-            if any(rv.get(k) for k in ("HIGH", "MEDIUM", "LOW")) else "")
-    s.append(f"/sglang-pr-review found no CRITICAL{tail}, "
-             + ("the PR body carries accuracy and perf numbers, "
-                if a["has_accuracy"] and a["has_perf"] else "")
-             + ("and a test lands in the diff."
-                if a["buckets"].get("test") else "and the bar is otherwise clean."))
-    return " ".join(s) + " LGTM."
-
-
-def risk_picture(a: dict, rs: list[dict]) -> list[tuple[str, str]]:
-    """Answers for the reviewer. These do not have to pass for the PR to land."""
-    by = {r["check"]: r for r in rs}
-    title = a["meta"].get("title") or ""
-    if re.search(r"bugfix|bug[- ]fix|\[fix\]", title, re.I):
-        kind = ("Existing bug — the title marks it as a fix. "
-                "Confirm it is already live on main.")
-    elif re.search(r"\[feat|feature", title, re.I):
-        kind = ("New feature — the title marks it as a feature. "
-                "It must not change behaviour that already ships.")
-    else:
-        kind = ("The title does not say. Decide: new feature, or a fix for a "
-                "bug that is already live on main.")
-
-    if a["unguarded"] or (a["hot_common"] and a["common_files"]):
-        plat = ("Shared code is rewritten. If the same bug happens on NVIDIA, "
-                "the fix stays in the common path and needs a community reviewer. "
-                "An is_hip wrapper would leave it live for everyone else.")
-    elif a["amd_files"] and not a["common_files"]:
-        plat = ("AMD-only path. Confirm the bug does not also reproduce on "
-                "NVIDIA; if it does, this fix is in the wrong place.")
-    else:
-        plat = ("The diff touches shared code. Confirm whether the bug is "
-                "AMD-only or hits every vendor before deciding the guard.")
-
-    kern = by["Kernel"]["evidence"]
-    if a["new_kernels"]:
-        kern += ". New kernel, not an upgrade of an existing one."
-    elif a["kernels"]:
-        kern += ". Upgrade of an existing kernel, not a new one."
-    else:
-        kern += ". No new kernel and no upgrade of an existing kernel."
-
-    if a["new_envs"]:
-        flags = (by["New flags"]["evidence"]
-                 + ". A hardware default belongs on is_hip / use_aiter, "
-                 "not a knob the user has to export.")
-    else:
-        flags = "No new env var."
-    if a["new_globals"]:
-        flags += " " + by["New globals"]["evidence"] + "."
-    else:
-        flags += " No new global in shared code."
-
-    notes = [
-        ("Feature or bug", kind),
-        ("AMD-only or both", plat),
-        ("Kernel", kern),
-        ("Flags and globals", flags),
+def owner_comment(pr: str, title: str, verdict: str, rows: list[dict]) -> str:
+    failed = [item for item in rows if item["verdict"] == FAIL]
+    lines = [
+        f"Pre-review blocked #{pr} — {title}.",
+        "",
+        "This is an automated requirements check. Human review has not started.",
+        "",
+        "Failed checks:",
     ]
-    if a["sig_changed"]:
-        notes.append(("Interface", by["Interface churn"]["evidence"]
-                      + ". Every caller has to be updated in this PR."))
-    if by["Evidence"]["verdict"] != OK:
-        notes.append(("Evidence", by["Evidence"]["evidence"]))
-    size = by["Size"]["evidence"]
-    if a.get("oversized"):
-        notes.append(("One concern", size + ". Split before review."))
+    for index, item in enumerate(failed, 1):
+        lines.append(f"{index}. {item['check']}")
+        lines.append(f"   {item['evidence']}")
+        if item["action"]:
+            lines.append(f"   Required: {item['action']}")
+    if verdict == SPLIT:
+        lines.extend(["", "Split the PR before the other findings are reviewed."])
+    return "\n".join(lines)
+
+
+def render(pr: str, a: dict, rows: list[dict], verdict: str, shape_only: bool) -> str:
+    meta = a["meta"]
+    lines = [
+        f"## PR #{pr} — pre-review",
+        "",
+        f"**{meta['title']}** — @{meta['author']['login']}, "
+        f"+{meta['additions']}/-{meta['deletions']} over {meta['changedFiles']} files"
+        + (" (DRAFT)" if meta["isDraft"] else ""),
+        "",
+        f"**Verdict: {verdict if not shape_only else (SPLIT if a.get('oversized') else PROCEED)}**",
+        "",
+    ]
+    shown = verdict if not shape_only else (SPLIT if a.get("oversized") else PROCEED)
+    if shown == READY:
+        lines.append(
+            "Automated checks passed. Human review can start. "
+            "This is not a merge approval and it is not an LGTM."
+        )
+    elif shown == PROCEED:
+        lines.append(
+            "Shape checks passed. Write the code-path and test-seam judgment "
+            "files, then re-run without --shape."
+        )
+    elif shown == INCOMPLETE:
+        lines.append(
+            "The automated check could not finish. Do not treat any PASS row "
+            "as permission to skip the blocked rows."
+        )
     else:
-        notes.append(("One concern", size + ". Small enough to review as one PR."))
-    return notes
+        lines.append(
+            "Automated pre-review blocked this PR. Send the owner comment. "
+            "Do not start a full code review until the failed checks are fixed."
+        )
+    lines.extend(["", "| Check | Verdict | Evidence |", "|---|---|---|"])
+    for item in rows:
+        lines.append(f"| {item['check']} | {item['verdict']} | {item['evidence']} |")
+    failed = [item for item in rows if item["verdict"] in (FAIL, BLOCKED) and item["action"]]
+    if failed:
+        lines.extend(["", "### What has to change"])
+        for index, item in enumerate(failed, 1):
+            lines.append(f"{index}. **{item['check']}** — {item['action']}")
+    if shown in (SPLIT, FAILED):
+        lines.extend(["", "### Owner comment", "", "```",
+                      owner_comment(pr, meta["title"], shown, rows), "```"])
+    if not shape_only:
+        lines.extend(["", "### Notes"])
+        lines.extend(f"- {note}" for note in notes(a))
+    lines.append("")
+    return "\n".join(lines)
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("pr")
-    ap.add_argument("--repo", default="sgl-project/sglang")
-    ap.add_argument("--json", action="store_true")
-    ap.add_argument("--review", metavar="PATH",
-                    help="/sglang-pr-review report to fold in ('-' for stdin)")
-    ap.add_argument("--critical", type=int, default=None,
-                    help="severity counts by hand, instead of --review")
-    ap.add_argument("--high", type=int, default=0)
-    ap.add_argument("--medium", type=int, default=0)
-    ap.add_argument("--low", type=int, default=0)
-    ap.add_argument("--ack", action="append", metavar="ROW",
-                    help="mark a CHECK row as read and accepted, e.g. "
-                         "--ack 'Affected Scope'. Refused on FAIL rows and on "
-                         "Critical risk — those are not yours to wave through")
-    a = ap.parse_args()
-    pr = re.sub(r"\D", "", a.pr.split("/")[-1]) or a.pr
-
-    review = None
-    if a.review:
-        text = sys.stdin.read() if a.review == "-" else open(a.review).read()
-        review = parse_review(text)
-    elif a.critical is not None:
-        review = {"CRITICAL": a.critical, "HIGH": a.high, "MEDIUM": a.medium,
-                  "LOW": a.low, "decision": "", "source": "manual",
-                  "details": {s: [] for s in ("CRITICAL", "HIGH", "MEDIUM", "LOW")}}
-
-    data = analyse(pr, a.repo)
-    data["review"] = review
-    data["ack"] = [s.strip().lower() for s in (a.ack or [])]
-    rs = rows(data)
-    apply_ack(data, rs)
-    v = verdict(data, rs)
-
-    if a.json:
-        print(json.dumps({"pr": pr, **v, "rows": rs}, indent=2))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("pr")
+    parser.add_argument("--repo", default="sgl-project/sglang")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--shape", action="store_true",
+                        help="shape checks only; stop before code-path and test-seam")
+    parser.add_argument("--code-path", metavar="PATH",
+                        help="/pr-code-path judgment JSON")
+    parser.add_argument("--test-seam", metavar="PATH",
+                        help="/pr-test-seam judgment JSON")
+    args = parser.parse_args()
+    pr = re.sub(r"\D", "", args.pr.split("/")[-1]) or args.pr
+    data = analyse(pr, args.repo)
+    rows = shape_rows(data)
+    if args.shape or data.get("oversized"):
+        shown = rows
+        verdict = SPLIT if data.get("oversized") else PROCEED
+        if args.shape or data.get("oversized"):
+            payload = {"pr": pr, "verdict": verdict, "rows": shown}
+            if args.json:
+                print(json.dumps(payload, indent=2))
+            else:
+                print(render(pr, data, shown, verdict, shape_only=True))
+            if data.get("oversized"):
+                return
+            if args.shape:
+                return
+    code_path, code_error = load_judgment(args.code_path, "code-path", validate_code_path)
+    test_seam, test_error = load_judgment(args.test_seam, "test-seam", validate_test_seam)
+    rows.extend(code_path_rows(code_path, code_error, data["uses_aiter"]))
+    rows.extend(test_rows(test_seam, test_error))
+    rows = order_rows(rows)
+    verdict = verdict_of(rows)
+    if args.json:
+        print(json.dumps({"pr": pr, "verdict": verdict, "rows": rows}, indent=2))
         return
-
-    m = data["meta"]
-    mark = {OK: "- [x]", WARN: "- [ ]", BAD: "- [ ]", UNK: "- [ ]"}
-    print(f"## PR #{pr} — merge triage\n")
-    print(f"**{m['title']}** — @{m['author']['login']}, "
-          f"+{m['additions']}/-{m['deletions']} over {m['changedFiles']} files"
-          f"{' (DRAFT)' if m['isDraft'] else ''}\n")
-    # One table. The `Must pass` column keeps the distinction that matters —
-    # a row that blocks the merge vs a row that only tells you how the PR sits
-    # — without splitting the reader's attention across three places.
-    print("`Must pass = yes` rows block the merge. `context` rows describe how "
-          "the PR sits; they are not extra gates.\n")
-    print("| | Check | Must pass | Verdict | Evidence |")
-    print("|---|---|---|---|---|")
-    for r in rs:
-        if not r.get("hard"):
-            continue
-        g = " **GATE**" if r["gate"] and r["verdict"] != OK else ""
-        print(f"| {mark[r['verdict']]} | {r['check']}{g} | yes | {r['verdict']} "
-              f"| {r['evidence']} |")
-    # risk_picture() already states flags, globals, kernel, size and evidence
-    # in reviewer language; printing the raw rows too would say each twice.
-    for r in rs:
-        if r.get("hard") or r["check"] not in ("Guard choice", "Other findings"):
-            continue
-        print(f"| | {r['check']} | context | {r['verdict']} | {r['evidence']} |")
-    for title, body in risk_picture(data, rs):
-        print(f"| | {title} | context | — | {body} |")
-    print(f"\n**Verdict: {v['name']}** — {v['why']}\n")
-    if v["name"] == PASS_VERDICT:
-        # The only output that is meant to be pasted verbatim onto the PR.
-        print("### Approval comment\n")
-        print(approval(data, rs, pr) + "\n")
-    if v["open_gates"]:
-        print("### Gates (must be answered — nothing else buys these off)")
-        for g in v["open_gates"]:
-            print(f"- **{g}** — {GATES[g]}")
-        print()
-    acts = [r for r in rs if r.get("hard") and r["action"]
-            and r["verdict"] in (BAD, WARN)]
-    if acts:
-        print("### Ask the author")
-        for i, r in enumerate(acts, 1):
-            print(f"{i}. **{r['check']}** — {r['action']}")
-        print()
+    print(render(pr, data, rows, verdict, shape_only=False))
 
 
 if __name__ == "__main__":

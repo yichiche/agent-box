@@ -1,0 +1,11 @@
+{
+  "conclusion": "can_merge",
+  "common_path_changed": true,
+  "nvidia_execution_identical": false,
+  "nvidia_interface_identical": false,
+  "nvidia_behavior_identical": true,
+  "hardware_scope": "gfx950",
+  "hardware_scope_detail": "gfx950 / MI355 only (is_gfx95_supported())",
+  "summary": "NVIDIA keeps its original outputs and alignment assertion. The unaligned-prefix correction runs only under is_gfx95_supported().",
+  "owner_action": ""
+}

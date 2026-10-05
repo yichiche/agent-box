@@ -81,84 +81,14 @@ Apply analysis patterns from [references/analysis-patterns.md](references/analys
 
 ### Test seam
 
-Judge test design on every review. The facts come from:
+Follow [`/pr-test-seam`](../pr-test-seam/SKILL.md). Run
+`python3 ~/agent-box/skills/pr-test-seam/test_seam.py $N`, classify the seam
+there, and quote its conclusion under **Tests & Benchmarks**.
 
-```bash
-python3 ~/agent-box/skills/sglang-pr-review/test_seam.py $N
-python3 ~/agent-box/skills/sglang-pr-review/test_seam.py https://github.com/sgl-project/sglang/pull/$N
-```
-
-The script lists new tests, production functions they call, production
-functions replaced by lambdas, and possible copied expressions. These are
-facts, not the verdict. The calibration case is [examples.md](examples.md)
-(PR 39575). When the user asks for a visual result, render the test-entry map
-as its own canvas. Do not add it to `/pr-code-path`'s hardware-path canvas.
-
-Use these terms:
-
-- **module** — implementation hidden behind one interface
-- **interface** — everything a caller must know to use the module correctly
-- **seam** — where the interface lives
-
-The interface is the test surface. Callers and tests should cross the same seam.
-A test that must change whenever implementation details move is testing past the
-interface.
-
-#### 1. Name the behavior under test
-
-State the regression in caller-visible terms. Then identify the highest
-production interface whose single call should exercise it.
-
-If the bug is ordering in a caller — snapshot before store, validate before
-commit, acquire before publish — the caller is the seam. A test that manually
-performs those steps and calls the final helper does not cover the ordering.
-
-#### 2. Classify every test
-
-**Interface test**
-- calls the production interface at the changed seam
-- asserts an observable result, error, or invariant
-- survives an internal refactor
-
-**Past the seam**
-- calls a private helper below the interface
-- manually performs steps that production is responsible for ordering
-- can stay green if the caller forgets or reorders one of those steps
-
-**Reimplements**
-- computes the expected answer with the same formula or control flow as production
-- production and test can share the same mistake
-
-**Adapter at an internal seam**
-- replaces a collaborator such as a pool, filesystem, or kernel
-- acceptable when the production interface still performs the orchestration
-- not evidence that an outer seam was exercised
-
-**Fixture fallout**
-- adds a field, default, or lambda only because shared production setup changed
-- keeps an old test running but does not test the new behavior
-
-#### 3. Judge expected values independently
-
-Good expected values:
-- literal values derived from the behavior specification
-- invariants over the production function's own outputs
-- one production implementation compared with another
-
-Not independent:
-- the same clamp, index, mask, or arithmetic expression copied from production
-- a helper in the test that recreates the new algorithm
-
-#### 4. State the missing test
-
-For each `Past the seam` result, name one concrete interface-level test:
-
-> Call `[interface]` with `[trigger]` and assert `[observable result]`, allowing
-> production itself to perform `[ordering or hidden steps]`.
-
-A `Past the seam`, `Reimplements`, or `No test` result is a Medium finding in
-**Tests & Benchmarks**. It is Critical only when that gap leaves a correctness
-bug on the shipped path able to stay green.
+A conclusion other than `complete` is a Medium finding. It is Critical only
+when that gap leaves a correctness bug on the shipped path able to stay green.
+The facts script's old path, `sglang-pr-review/test_seam.py`, forwards to
+`/pr-test-seam`.
 
 ## SGLang Architecture Context
 

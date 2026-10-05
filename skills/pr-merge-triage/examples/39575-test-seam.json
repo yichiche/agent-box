@@ -1,0 +1,6 @@
+{
+  "conclusion": "mixed",
+  "changed_behavior": "For an unaligned cached prefix, snapshot prefix-side keys before project_qk overwrites their pending-ring slots, then recompress the crossing group.",
+  "correct_seam": "_forward_impl",
+  "missing_test": "Call _forward_impl with an unaligned prefix and assert the stored compressed key. Let production itself snapshot the old ring, call project_qk, and perform the overwrite."
+}

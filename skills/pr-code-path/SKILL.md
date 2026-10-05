@@ -201,9 +201,21 @@ and correctness of the AMD math are separate gates.
    calibration traces are in [examples.md](examples.md). Canvas file:
    `~/.cursor/projects/<workspace>/canvases/pr-<number>-code-path.canvas.tsx`.
 
+
+## When called from /pr-merge-triage
+
+Do the same analysis, including the value trace when execution flow or the
+internal interface is not identical. Do not print the chat report and do not
+create the canvas. Write `/tmp/pr-<number>-code-path.json` using the schema in
+`/pr-merge-triage`. `nvidia_behavior_identical` is `true` only when that trace
+shows the original outputs unchanged. Use `"unproven"` when the trace was not
+done. `owner_action` is one concrete code change when the conclusion is
+`cannot_merge` or the numerical result is not identical.
+
 ## Related
 
 | Skill | Question it answers |
 |---|---|
-| [`/pr-merge-triage`](../pr-merge-triage/SKILL.md) | How expensive is this to land? |
-| [`/sglang-pr-review`](../sglang-pr-review/SKILL.md) | Is the behavior correct, and do tests enter through the changed interface? |
+| [`/pr-merge-triage`](../pr-merge-triage/SKILL.md) | Automated pre-review gate. Consumes this skill's JSON. |
+| [`/pr-test-seam`](../pr-test-seam/SKILL.md) | Do the tests enter through the owning interface? |
+| [`/sglang-pr-review`](../sglang-pr-review/SKILL.md) | Is the AMD behavior correct, after pre-review passes? |
