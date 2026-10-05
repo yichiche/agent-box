@@ -19,13 +19,31 @@ TARGETS=(
 REMOVE=0
 [[ "${1:-}" == "--remove" ]] && REMOVE=1
 
-# Skills = top-level dirs with a SKILL.md; skip _shared and hidden dirs.
-skills=()
-for d in "$SKILLS_SRC"/*/; do
+# A skill is a directory with SKILL.md. Most are top-level. A group folder
+# (no SKILL.md of its own) holds related skills one level down, e.g. skills/ci/.
+skills_names=()
+skills_paths=()
+consider() {
+    local d="$1" name child cname
     name="$(basename "$d")"
-    [[ "$name" == _* || "$name" == .* ]] && continue
-    [[ -f "$d/SKILL.md" ]] || continue
-    skills+=("$name")
+    [[ "$name" == _* || "$name" == .* ]] && return 0
+    if [[ -f "$d/SKILL.md" ]]; then
+        skills_names+=("$name")
+        skills_paths+=("${d%/}")
+        return 0
+    fi
+    for child in "$d"/*/; do
+        [[ -d "$child" ]] || continue
+        cname="$(basename "$child")"
+        [[ "$cname" == _* || "$cname" == .* ]] && continue
+        [[ -f "$child/SKILL.md" ]] || continue
+        skills_names+=("$cname")
+        skills_paths+=("${child%/}")
+    done
+}
+for d in "$SKILLS_SRC"/*/; do
+    [[ -d "$d" ]] || continue
+    consider "$d"
 done
 
 rc=0
@@ -46,19 +64,20 @@ for entry in "${TARGETS[@]}"; do
     done
 
     if (( ! REMOVE )); then
-        for name in "${skills[@]}"; do
+        for i in "${!skills_names[@]}"; do
+            name="${skills_names[$i]}"
             link="$dest_dir/$name"
             if [[ -e "$link" && ! -L "$link" ]]; then
                 echo "WARN $label: $link exists and is not a symlink — leaving it alone" >&2
                 skipped=$((skipped + 1)); rc=1
                 continue
             fi
-            ln -sfn "$SKILLS_SRC/$name" "$link"
+            ln -sfn "${skills_paths[$i]}" "$link"
             linked=$((linked + 1))
         done
     fi
     echo "OK  $label: $dest_dir  linked=$linked pruned=$pruned skipped=$skipped"
 done
 
-(( REMOVE )) || echo "Skills available: ${#skills[@]} (restart claude / codex to pick up changes)"
+(( REMOVE )) || echo "Skills available: ${#skills_names[@]} (restart claude / codex to pick up changes)"
 exit "$rc"

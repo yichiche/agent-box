@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print test-entry facts for /pr-test-seam; the skill writes the verdict."""
+"""Print test-entry facts for the test-seam section of /sglang-pr-review."""
 
 from __future__ import annotations
 

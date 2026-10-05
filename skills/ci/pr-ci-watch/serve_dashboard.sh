@@ -43,9 +43,13 @@ curl -sf -o /dev/null -m 3 "http://127.0.0.1:$PORT/" \
 # Print a literal username, never $USER: the tunnel is usually run from
 # PowerShell on Windows, which does not expand $USER and silently turns the
 # destination into "@host" -> ssh prints its usage text.
-# Derive from the agent-box location (…/<user>/agent-box/skills/pr-ci-watch), not
-# $HOME: inside a container $HOME is /root and the tunnel would say root@host.
-SSH_USER="${PR_CI_WATCH_SSH_USER:-$(basename "$(cd "$HERE/../../.." && pwd)")}"
+# Parent of the agent-box checkout is the host username. $HOME is /root
+# inside a container, so walk up to the agent-box directory instead.
+dir="$HERE"
+while [ "$dir" != "/" ] && [ "$(basename "$dir")" != "agent-box" ]; do
+  dir="$(dirname "$dir")"
+done
+SSH_USER="${PR_CI_WATCH_SSH_USER:-$(basename "$(dirname "$dir")")}"
 HOST_NAME="${PR_CI_WATCH_SSH_HOST:-$(hostname -f 2>/dev/null || hostname)}"
 HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 # Forward to a high local port. Windows reserves dynamic TCP ranges for

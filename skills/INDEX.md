@@ -1,10 +1,11 @@
 # Skills Index
 
-> Category routing for all slash-command skills. Skill dirs stay **flat**
-> (`skills/<name>/SKILL.md`) because Claude Code only registers slash commands from that
-> one level — categorization is metadata, not folders. Each SKILL.md carries a
-> `category:` (and, for `research`, a `data_sources:`) frontmatter field; this file is the
-> grouped view. External data sources are registered in
+> Category routing for all slash-command skills. A skill is a directory with
+> `SKILL.md`. Most sit directly under `skills/`. Related skills can sit one
+> level down in a group folder that has no `SKILL.md` of its own
+> (`skills/ci/ci-analysis/`). Each SKILL.md carries a `category:` (and, for
+> `research`, a `data_sources:`) frontmatter field; this file is the grouped
+> view. External data sources are registered in
 > [`_shared/data-sources.md`](_shared/data-sources.md).
 
 ## Categories
@@ -66,11 +67,10 @@
 | [`/pr`](pr/SKILL.md) | Create a GitHub PR (HackMD draft first) |
 | [`/pr-merge-triage`](pr-merge-triage/SKILL.md) | The AMD-side review bar, written to share — plus a script that scores a PR: affected scope, is_hip/use_aiter guards, flags, split, merge-ease verdict |
 | [`/pr-code-path`](pr-code-path/SKILL.md) | Draw common-path edits, NVIDIA impact at execution/interface/numerical layers, and affected AMD hardware scope. When execution or the interface is not identical, prove the numerical result with a before/after value trace in code |
-| [`/pr-test-seam`](pr-test-seam/SKILL.md) | Check whether PR tests enter through the changed interface, step past the seam, or reimplement production |
-| [`/sglang-pr-review`](sglang-pr-review/SKILL.md) | Review an sglang PR for correctness: weight loading, forward-path variants, quant scales, collectives, kernels |
-| [`/ci-analysis`](ci-analysis/SKILL.md) | Triage PR CI failures: root cause vs fast-fail cascade, PR-related or not, merge verdict |
-| [`/pr-conflict-fix`](pr-conflict-fix/SKILL.md) | Resolve a conflicting PR inside a throwaway container, push the merge back |
-| [`/pr-ci-watch`](pr-ci-watch/SKILL.md) | Watch a PR list on two cadences: `/ci-analysis`-gated NVIDIA CI re-runs + once-per-SHA conflict notice, with a local dashboard |
+| [`/sglang-pr-review`](sglang-pr-review/SKILL.md) | Review an sglang PR for correctness, confirm scope with `/pr-code-path`, and judge whether tests enter through the changed interface |
+| [`/ci-analysis`](ci/ci-analysis/SKILL.md) | Triage PR CI failures: root cause vs fast-fail cascade, PR-related or not, merge verdict |
+| [`/pr-conflict-fix`](ci/pr-conflict-fix/SKILL.md) | Resolve a conflicting PR inside a throwaway container, push the merge back |
+| [`/pr-ci-watch`](ci/pr-ci-watch/SKILL.md) | Watch a PR list on two cadences: `/ci-analysis`-gated NVIDIA CI re-runs + once-per-SHA conflict notice, with a local dashboard |
 
 ## infra — GPU / container / environment
 
@@ -97,7 +97,8 @@
 ## Conventions
 
 - **Add a skill:** create `skills/<name>/SKILL.md` with `category:` frontmatter, then add a
-  row to the matching section here.
+  row to the matching section here. Related skills that are one workflow may live
+  under a group folder: `skills/<group>/<name>/SKILL.md`.
 - **`category`** is a single controlled value from the table above.
 - **`research` skills** additionally declare `data_sources: [key, ...]` matching
   [`_shared/data-sources.md`](_shared/data-sources.md).

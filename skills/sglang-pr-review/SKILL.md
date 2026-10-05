@@ -1,6 +1,13 @@
 ---
 name: sglang-pr-review
-description: Specialized PR review for sgl-project/sglang, an LLM inference engine. Use when reviewing PRs in sgl-project/sglang or similar CUDA/Python ML inference codebases. Covers Python runtime, CUDA/Triton kernels, scheduling, memory management, model serving, and MoE patterns.
+description: >-
+  Specialized PR review for sgl-project/sglang, an LLM inference engine. Use
+  when reviewing PRs in sgl-project/sglang or similar CUDA/Python ML inference
+  codebases, or when asked whether a unit test calls the real interface.
+  Covers Python runtime, CUDA/Triton kernels, scheduling, memory management,
+  model serving, and MoE patterns. Confirms common path, NVIDIA impact, and
+  hardware scope by following /pr-code-path, and judges whether tests enter
+  through the changed interface, step past the seam, or reimplement production.
 category: deliver
 ---
 
@@ -24,6 +31,26 @@ export GH_PAGER=cat GIT_PAGER=cat
 gh pr view $N --repo sgl-project/sglang --json title,body,author,files,additions,deletions,commits,state
 gh pr diff $N --repo sgl-project/sglang
 ```
+
+### Confirm with `/pr-code-path`
+
+Follow [`/pr-code-path`](../pr-code-path/SKILL.md) on this same PR before the
+correctness verdict. Run its script, then write that skill's report (final
+conclusion, analysis, and canvas):
+
+```bash
+python3 ~/agent-box/skills/pr-code-path/path_cover.py $N
+```
+
+Use that conclusion to confirm three things this review does not re-derive:
+
+- what every backend now executes on the common path
+- whether NVIDIA execution flow, internal interface, and numerical behavior stay identical
+- which hardware the guard actually enables
+
+A `/pr-code-path` **Cannot merge** is `[bug] CRITICAL` here and forces
+**request-changes**. Quote its final conclusion under **Code path**. Do not
+redraw its path tree or value traces in this report.
 
 ### Phase 2: Structural Analysis
 
@@ -49,8 +76,89 @@ Apply analysis patterns from [references/analysis-patterns.md](references/analys
 ### Phase 4: Cross-cutting Concerns
 
 - **Interaction with other PRs**: If the PR description mentions related PRs, check for merge conflicts and ordering dependencies
-- **Platform guards**: If the change is platform-specific (AMD/HIP, CUDA, CPU), verify other platforms are unaffected
+- **Platform guards**: Take the affected-hardware answer from the `/pr-code-path` conclusion. Do not invent a second scope.
 - **Quantization compatibility**: If weights or activations change, verify FP8/FP4/INT4/BF16 paths
+
+### Test seam
+
+Judge test design on every review. The facts come from:
+
+```bash
+python3 ~/agent-box/skills/sglang-pr-review/test_seam.py $N
+python3 ~/agent-box/skills/sglang-pr-review/test_seam.py https://github.com/sgl-project/sglang/pull/$N
+```
+
+The script lists new tests, production functions they call, production
+functions replaced by lambdas, and possible copied expressions. These are
+facts, not the verdict. The calibration case is [examples.md](examples.md)
+(PR 39575). When the user asks for a visual result, render the test-entry map
+as its own canvas. Do not add it to `/pr-code-path`'s hardware-path canvas.
+
+Use these terms:
+
+- **module** — implementation hidden behind one interface
+- **interface** — everything a caller must know to use the module correctly
+- **seam** — where the interface lives
+
+The interface is the test surface. Callers and tests should cross the same seam.
+A test that must change whenever implementation details move is testing past the
+interface.
+
+#### 1. Name the behavior under test
+
+State the regression in caller-visible terms. Then identify the highest
+production interface whose single call should exercise it.
+
+If the bug is ordering in a caller — snapshot before store, validate before
+commit, acquire before publish — the caller is the seam. A test that manually
+performs those steps and calls the final helper does not cover the ordering.
+
+#### 2. Classify every test
+
+**Interface test**
+- calls the production interface at the changed seam
+- asserts an observable result, error, or invariant
+- survives an internal refactor
+
+**Past the seam**
+- calls a private helper below the interface
+- manually performs steps that production is responsible for ordering
+- can stay green if the caller forgets or reorders one of those steps
+
+**Reimplements**
+- computes the expected answer with the same formula or control flow as production
+- production and test can share the same mistake
+
+**Adapter at an internal seam**
+- replaces a collaborator such as a pool, filesystem, or kernel
+- acceptable when the production interface still performs the orchestration
+- not evidence that an outer seam was exercised
+
+**Fixture fallout**
+- adds a field, default, or lambda only because shared production setup changed
+- keeps an old test running but does not test the new behavior
+
+#### 3. Judge expected values independently
+
+Good expected values:
+- literal values derived from the behavior specification
+- invariants over the production function's own outputs
+- one production implementation compared with another
+
+Not independent:
+- the same clamp, index, mask, or arithmetic expression copied from production
+- a helper in the test that recreates the new algorithm
+
+#### 4. State the missing test
+
+For each `Past the seam` result, name one concrete interface-level test:
+
+> Call `[interface]` with `[trigger]` and assert `[observable result]`, allowing
+> production itself to perform `[ordering or hidden steps]`.
+
+A `Past the seam`, `Reimplements`, or `No test` result is a Medium finding in
+**Tests & Benchmarks**. It is Critical only when that gap leaves a correctness
+bug on the shipped path able to stay green.
 
 ## SGLang Architecture Context
 
@@ -119,6 +227,11 @@ Key patterns:
 - [ ] Fused communication kernels have proper fallback
 - [ ] `except Exception: pass` never silently swallows errors — at minimum `logger.debug`
 
+### Tests
+- [ ] Each changed behavior is tested through the production interface that owns it
+- [ ] Expected values are literals, invariants, or another production implementation
+- [ ] A test that orders the steps itself does not count as covering that ordering
+
 ### Code Quality
 - [ ] Follows existing codebase patterns
 - [ ] No unnecessary variable renames that add diff noise
@@ -153,11 +266,25 @@ Key patterns:
 - `[docs] path:line — missing documentation`
 - `[question] path:line — needs clarification from author`
 
+### Code path
+Quote the `/pr-code-path` final conclusion and its analysis bullets.
+A Cannot merge is also a Critical finding above.
+
 ### Tests & Benchmarks
-- Test coverage assessment (what's tested, what's missing)
-- GSM8K / MMMU accuracy results (if applicable)
-- Throughput / latency / TTFT benchmarks (if applicable)
-- Compare before/after numbers and flag regressions
+Test-seam report:
+
+**Test-seam conclusion:** Complete | Mixed | Past the seam | Reimplements | No test
+**Changed behavior:** [caller-visible regression]
+**Correct seam:** [production interface callers use]
+
+Test entry map: ASCII path from each test to production.
+
+| Test | Seam it calls | Expected value source | Verdict |
+|---|---|---|---|
+
+**Missing interface test:** one concrete test, or None.
+
+Then, when present: GSM8K / MMMU accuracy, throughput / latency / TTFT, and before/after regressions.
 
 ### Risk & Scope
 | Risk | Detail |
@@ -205,13 +332,14 @@ limited to silent wrong outputs, and a review can contain more than one.
 
 - **CRITICAL**: Blocks the merge. Includes a silent wrong answer, a hang, a crash, a `raise`, a startup failure, or any other bug on the path this PR ships. Always `request-changes`. Each Critical is its own Risk row and its own Decision **Blocking lines** entry, as `[bug] CRITICAL — path:line — …`.
 - **High**: Real damage on a specific configuration, but it does not by itself refuse the merge (triage scores it, it does not open the gate). If you would not merge until it is fixed, label it Critical instead.
-- **Medium**: Edge cases, fragile patterns, missing tests. `comment`.
+- **Medium**: Edge cases, fragile patterns, missing tests, a test that steps past the seam or reimplements production. `comment`.
 - **Low**: Style, docs, minor cleanup. `comment` or `approve`. Does not affect the merge.
 
 ## Additional Resources
 
 - For detailed analysis patterns by change type, see [references/analysis-patterns.md](references/analysis-patterns.md)
+- [`/pr-code-path`](../pr-code-path/SKILL.md) — required confirmation inside this review, not a substitute for it. Follow that skill and quote its conclusion under **Code path**
 - [`/pr-merge-triage`](../pr-merge-triage/SKILL.md) — run it **before** this skill to see whether the PR should be split first (reviewing a PR that needs splitting is wasted work), and **after** to turn these findings into a merge verdict
-- CI red on the PR you are reviewing? That is [`/ci-analysis`](../ci-analysis/SKILL.md), not this skill — attributing a failure to the PR is a separate procedure
+- CI red on the PR you are reviewing? That is [`/ci-analysis`](../ci/ci-analysis/SKILL.md), not this skill — attributing a failure to the PR is a separate procedure
 - Reviewing a kernel change for *performance* rather than correctness? Pair with
   [`/kernel-profile-triage`](../kernel-profile-triage/SKILL.md) and [`/validate-pr`](../validate-pr/SKILL.md)

@@ -52,7 +52,7 @@ ADMIN_RE = re.compile(
 EXTRA_SKIP_RE = re.compile(r"sgl-router", re.I)
 
 # Jobs that aggregate other jobs rather than running tests. Same taxonomy as
-# skills/ci-analysis/SKILL.md Phase 2.5. A workflow whose only in-scope failures
+# skills/ci/ci-analysis/SKILL.md Phase 2.5. A workflow whose only in-scope failures
 # are these has no root cause *here* — the real failure is in a skipped job or
 # an out-of-scope vendor workflow, and re-running the gate just re-fails it.
 ROLLUP_RE = re.compile(r"(-finish$|\bpr-gate\b|Standard Test Results|^finish$)", re.I)
@@ -130,7 +130,10 @@ SWEEP_DEDUP_MINUTES = 30
 MERGEABLE_RETRY_DELAYS = (5, 10, 20, 30)
 ACTIONS = ("re-run", "code-fix", "merge-main", "wait-upstream", "out-of-scope")
 
-PRIORITIES = ("P0", "P1", "P2")
+# L is low priority: a rank label, not a sweep cadence. row_order sinks every
+# L row past P0–P2, and past verdict and merge state — "L" sorts before "P0"
+# as text, so the leading flag in row_order is what actually puts it last.
+PRIORITIES = ("P0", "P1", "P2", "L")
 # A track is a sweep cadence, and nothing else. Draft-ness is a live property of
 # the PR, read fresh every sweep — filing it as a track meant the watchlist held
 # a second, staler copy of a fact GitHub already answers authoritatively.
@@ -433,18 +436,27 @@ def ci_action(s: dict) -> str:
 
 def row_order(st: dict):
     """Display order, shared by the dashboard table and the report block so the
-    two can never drift: Pass first (those are the ones you can go merge), then
-    P0 -> P2, conflicts last within a priority, then your manual order, then
-    PR number."""
+    two can never drift.
+
+    L (low priority) is always last. A Pass verdict, a clean merge, or any
+    other status does not lift it above P0–P2. Everyone else is Pass first
+    (those are the ones you can go merge), then P0 -> P2, conflicts last
+    within a rank, then your manual order, then PR number. The same secondary
+    keys still order rows *within* L.
+    """
     def key(kv):
         pr, meta = kv
         s = st.get(pr, {})
+        pri = priority_of(meta)
         return (
+            # Dominates verdict and merge. Without it, "L" < "P0" as text and
+            # a passing L row would sit above a failing P2.
+            1 if pri == "L" else 0,
             0 if ci_verdict(s) == "Pass" else 1,
-            priority_of(meta),
-            # Conflicts sink to the bottom of their priority: nothing can
+            pri,
+            # Conflicts sink to the bottom of their rank: nothing can
             # progress on them until the author rebases, so they are the least
-            # useful thing to read first.
+            # useful thing to read first. This never promotes an L row.
             1 if s.get("mergeable") == "CONFLICTING" else 0,
             meta.get("order", 0),  # manual nudge, only within the same bucket
             int(pr),

@@ -72,24 +72,44 @@ def first_sentence(desc: str, limit: int) -> str:
     return cut
 
 
+def _add_skill(skills: list[dict], entry_dir: str) -> None:
+    sk = os.path.join(entry_dir, "SKILL.md")
+    if not os.path.isfile(sk):
+        return
+    name = os.path.basename(entry_dir)
+    fm = parse_frontmatter(sk)
+    skills.append(
+        {
+            "name": fm.get("name") or name,
+            "dir": name,
+            "category": fm.get("category") or "uncategorized",
+            "description": fm.get("description", ""),
+        }
+    )
+
+
 def discover() -> list[dict]:
+    """Top-level skills, plus one extra level inside a group folder.
+
+    A group folder (for example skills/ci/) has no SKILL.md of its own and
+    holds related skills directly underneath it.
+    """
     skills = []
     for entry in sorted(os.listdir(SKILLS_ROOT)):
+        if entry.startswith((".", "_")):
+            continue
         d = os.path.join(SKILLS_ROOT, entry)
-        sk = os.path.join(d, "SKILL.md")
-        if not os.path.isdir(d) or entry.startswith((".", "_")):
+        if not os.path.isdir(d):
             continue
-        if not os.path.isfile(sk):
+        if os.path.isfile(os.path.join(d, "SKILL.md")):
+            _add_skill(skills, d)
             continue
-        fm = parse_frontmatter(sk)
-        skills.append(
-            {
-                "name": fm.get("name") or entry,
-                "dir": entry,
-                "category": fm.get("category") or "uncategorized",
-                "description": fm.get("description", ""),
-            }
-        )
+        for child in sorted(os.listdir(d)):
+            if child.startswith((".", "_")):
+                continue
+            child_dir = os.path.join(d, child)
+            if os.path.isdir(child_dir):
+                _add_skill(skills, child_dir)
     return skills
 
 

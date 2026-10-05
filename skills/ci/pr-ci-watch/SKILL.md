@@ -170,7 +170,7 @@ workflows, including `PR Test Extra (AMD)` while keeping `PR Test Extra`.
 ### Phase A — gather
 
 ```bash
-python3 ~/agent-box/skills/pr-ci-watch/watch.py sweep --track high --apply
+python3 ~/agent-box/skills/ci/pr-ci-watch/watch.py sweep --track high --apply
 ```
 
 Per watched PR it: reads `state / mergeable / mergeStateStatus / headRefOid /
@@ -421,7 +421,7 @@ To actually fix one: [`/pr-conflict-fix <PR> --image <tag>`](../pr-conflict-fix/
 ## Dashboard
 
 ```bash
-bash ~/agent-box/skills/pr-ci-watch/serve_dashboard.sh [--port 8812]
+bash ~/agent-box/skills/ci/pr-ci-watch/serve_dashboard.sh [--port 8812]
 ```
 
 Stdlib HTTP server, no dependencies, loopback only (both `127.0.0.1` and `::1`,
@@ -467,7 +467,7 @@ to re-run CI, merge main into a PR, or start a Claude turn on your machine.
 `do_POST` rejects a request whose `Origin` is not a loopback host. A *missing*
 `Origin` is allowed: that is `curl`, not a forgery.
 
-Columns: Pri, PR + title + author, group, track, merge state, Verdict, Action,
+Columns: Rank, PR + title + author, group, track, merge state, Verdict, Action,
 Auto, Status, last swept (Taiwan time). Auto-refreshes every 60s (every 15s
 while a `Triage now` is in flight).
 
@@ -601,7 +601,7 @@ Two matching silences, same principle — don't restate `Pass`:
   green PR it is history, not status.
 
 Column widths are pinned by a `<colgroup>` under `table-layout: fixed`. That is
-load-bearing, not cosmetic: with auto layout the knobs in Pri / Group / Track
+load-bearing, not cosmetic: with auto layout the knobs in Rank / Group / Track
 claim their intrinsic width first and squeeze **Status** into a
 two-words-per-line ribbon. The knobs are capped at the width of the control
 (`td.knob`, `select.mini`); Status gets 29%.
@@ -738,8 +738,11 @@ first run or re-run) / `Fail`. A red *aggregation gate* never makes it `Fail`: a
 gate is not a job, it is mirroring a vendor workflow this tool excludes, so
 calling that Fail would report someone else's failure as this PR's NVIDIA
 result. Rows are ordered **Pass first** (those are the ones you can go merge), then
-P0 → P2, then **conflicts last within each priority** (nothing can progress on
-them until the author rebases), then your manual drag order, then PR number. **Action** is what to do — `CI re-run` (one is in flight),
+P0 → P2, then **conflicts last within each rank** (nothing can progress on
+them until the author rebases), then your manual drag order, then PR number.
+**L (low priority) is always last**, after every P0–P2 row, whether it is
+Pass, pending, conflicting, or any other status. The Rank column is the old
+Pri column, with `L` added. **Action** is what to do — `CI re-run` (one is in flight),
 `Solve conflict`, `Merge main`, `Code fix`, `Triage`, `Wait upstream`, or `-`.
 **Status** carries the job counts (`29 pass, 2 fail, 3 running, 6 queued`), the conflict
 notice proof, and the triage reason; it flags the counts as stale when they

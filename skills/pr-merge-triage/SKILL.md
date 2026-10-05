@@ -440,8 +440,8 @@ it launders a shape check into an approval.
 | Skill | When |
 |---|---|
 | [`/sglang-pr-review`](../sglang-pr-review/SKILL.md) | after triage says it is mergeable — the deep correctness pass (weight loading, forward-path variants, scales, collectives) |
-| [`/ci-analysis`](../ci-analysis/SKILL.md) | the PR's CI is red and you need to know whose fault it is |
-| [`/pr-ci-watch`](../pr-ci-watch/SKILL.md) | keep watching a set of PRs and re-run CI that deserves it |
+| [`/ci-analysis`](../ci/ci-analysis/SKILL.md) | the PR's CI is red and you need to know whose fault it is |
+| [`/pr-ci-watch`](../ci/pr-ci-watch/SKILL.md) | keep watching a set of PRs and re-run CI that deserves it |
 | [`/validate-pr`](../validate-pr/SKILL.md) | you need the accuracy/throughput numbers the Evidence row is asking for |
 
 Typical flow for a PR landing from the AMD side:

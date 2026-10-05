@@ -24,7 +24,13 @@ if [ -n "${PR_CI_WATCH_ONLY_HOUR:-}" ]; then
 fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HOST_HOME="$(cd "$HERE/../../.." && pwd)"
+# Parent of the agent-box checkout is the host user home. $HOME is /root
+# inside a container, so walk up to the agent-box directory instead.
+dir="$HERE"
+while [ "$dir" != "/" ] && [ "$(basename "$dir")" != "agent-box" ]; do
+  dir="$(dirname "$dir")"
+done
+HOST_HOME="$(dirname "$dir")"
 LOG_DIR="${PR_CI_WATCH_DIR:-${AGENT_SCRATCH_DIR:-$HOST_HOME/agent-scratch}/pr-ci-watch}"
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/cron.log"

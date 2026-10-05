@@ -29,8 +29,8 @@ new while NVIDIA numerical behavior remains identical. That distinction is the
 main result.
 
 `/pr-merge-triage` scores how expensive the PR is to land. This skill draws the
-runtime path. `/pr-test-seam` separately judges whether tests enter through the
-right interface; do not include test-seam analysis here.
+runtime path. Test-seam analysis lives in `/sglang-pr-review`; do not include
+it here.
 
 ## Run
 
@@ -205,6 +205,5 @@ and correctness of the AMD math are separate gates.
 
 | Skill | Question it answers |
 |---|---|
-| [`/pr-test-seam`](../pr-test-seam/SKILL.md) | Do tests call the right interface without reimplementing it? |
 | [`/pr-merge-triage`](../pr-merge-triage/SKILL.md) | How expensive is this to land? |
-| [`/sglang-pr-review`](../sglang-pr-review/SKILL.md) | Is the behavior correct? |
+| [`/sglang-pr-review`](../sglang-pr-review/SKILL.md) | Is the behavior correct, and do tests enter through the changed interface? |

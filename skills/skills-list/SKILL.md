@@ -6,7 +6,7 @@ category: meta
 
 # skills-list — table of every local skill + its usage
 
-Prints all skills under the skills root (`agent-box/skills/<name>/SKILL.md`) as a
+Prints all skills under the skills root (`agent-box/skills/<name>/SKILL.md`, or one level down in a group folder such as `agent-box/skills/ci/<name>/SKILL.md`) as a
 compact table: `/<name>` + one-line usage, grouped by `category`. It reads each
 skill's own frontmatter, so it stays correct as skills are added/removed — nothing
 to hand-maintain. Purpose: a quick cheat-sheet when the CLI has no slash-command

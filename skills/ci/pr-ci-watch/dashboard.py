@@ -380,6 +380,13 @@ PAGE = """<!doctype html>
   #reportsrc {{ position:absolute; left:-9999px; width:1px; height:1px; }}
   .banner {{ padding:9px 13px; border-radius:6px; font-size:13px;
     border:1px solid currentColor; margin-bottom:14px; }}
+  /* Finished notices (Not sent, last refresh, a completed Run) stay until
+     dismissed. The button sits in the corner so the summary can still open. */
+  .closable {{ position:relative; }}
+  .closable > form.x {{ position:absolute; top:6px; right:8px; margin:0; }}
+  .banner.closable {{ padding-right:84px; }}
+  details.closable > summary {{ padding-right:76px; }}
+  button.dismiss {{ padding:2px 8px; font-size:12px; line-height:1.4; }}
 </style></head><body>
 
 <div class="bar">
@@ -413,7 +420,7 @@ PAGE = """<!doctype html>
     <option value="high">high &middot; every 2h</option>
   </select>
   <select name="priority">
-    <option value="">priority: auto</option>
+    <option value="">rank: auto</option>
     {prio_options}
   </select>
   <button class="primary" type="submit">Watch</button>
@@ -571,9 +578,10 @@ the ON/OFF switch. Data: <span class="mono">{data}</span></div>
       }});
       tr.addEventListener('dragover', e => {{
         if (!dragged || dragged === tr) return;
-        // Pass-first / priority / conflict-last decide the buckets; manual
-        // order is only a tiebreaker inside one. Refusing the drop is honest —
-        // accepting it would just spring the row back on reload.
+        // L is always its own tail. Within a rank, Pass-first / conflict-last
+        // decide the buckets; manual order is only a tiebreaker inside one.
+        // Refusing the drop is honest — accepting it would just spring the
+        // row back on reload.
         if (tr.dataset.bucket !== dragged.dataset.bucket) {{
           tr.classList.add('nodrop');
           return;
@@ -1057,10 +1065,13 @@ def notify_button(pr: str, s: dict) -> str:
 
 
 def prio_cell(pr: str, meta: dict) -> str:
-    opts = "".join(
-        f'<option value="{p}"{" selected" if priority_of(meta) == p else ""}>{p}</option>'
-        for p in PRIORITIES
-    )
+    # No backslash inside an f-string expression: this host is Python 3.10.
+    parts = []
+    for p in PRIORITIES:
+        sel = " selected" if priority_of(meta) == p else ""
+        title = ' title="Low priority"' if p == "L" else ""
+        parts.append(f'<option value="{p}"{sel}{title}>{p}</option>')
+    opts = "".join(parts)
     return (
         f'<form class="inline" method="post" action="/api/priority">'
         f'<input type="hidden" name="pr" value="{esc(pr)}">'
@@ -1088,13 +1099,14 @@ def report_html(wl: dict, st: dict, group: str | None = None) -> str:
 def bucket_of(st: dict, pr: str, meta: dict) -> str:
     """The part of the sort a drag cannot cross.
 
-    Manual order is only a tiebreaker: Pass-first, priority and conflict-last
-    still decide the buckets, so a row dropped into another bucket would
-    silently snap back. The row carries this as `data-bucket` and the drag
-    refuses a drop when the two differ — a rejected drop is honest, a drop that
-    springs back reads as a bug.
+    Manual order is only a tiebreaker: L-last, Pass-first, rank and
+    conflict-last still decide the buckets, so a row dropped into another
+    bucket would silently snap back. The row carries this as `data-bucket`
+    and the drag refuses a drop when the two differ — a rejected drop is
+    honest, a drop that springs back reads as a bug.
     """
-    return "|".join(str(x) for x in row_order(st)((pr, meta))[:3])
+    # First four keys: L-last, Pass, rank, conflict. Manual order is the fifth.
+    return "|".join(str(x) for x in row_order(st)((pr, meta))[:4])
 
 
 def reorder_rows(wl: dict, st: dict, prs: list[str]) -> None:
@@ -1299,7 +1311,7 @@ def render_table(wl: dict, st: dict, tab: str = "") -> str:
     # again. The floor is held by `table { min-width }` instead.
     widths = (
         3,    # grip   — leftmost, where a drag handle is looked for
-        5,    # Pri    — a <select>; see note below
+        5,    # Rank  — a <select> of P0/P1/P2/L; see note below
         16,   # PR + title + author
         6,    # Group
         6,    # Track  — a <select>
@@ -1317,7 +1329,7 @@ def render_table(wl: dict, st: dict, tab: str = "") -> str:
     # written down twice — a stale literal here silently misaligns every row.
     span = len(widths)
     head = (
-        "<tr><th></th><th>Pri</th><th>PR</th><th>Group</th><th>Track</th><th>Merge</th>"
+        "<tr><th></th><th>Rank</th><th>PR</th><th>Group</th><th>Track</th><th>Merge</th>"
         "<th>Verdict</th><th>Action</th><th>Auto</th><th>Act now</th><th>Status</th>"
         "<th>Swept (TW)</th><th></th></tr>"
     )
@@ -1366,6 +1378,18 @@ def render_table(wl: dict, st: dict, tab: str = "") -> str:
     )
 
 
+def dismiss_button(what: str, pr: str = "") -> str:
+    """Clear one finished notice. Not inside <summary>: a click there toggles
+    the disclosure instead of submitting."""
+    hidden = (f'<input type="hidden" name="pr" value="{esc(pr)}">' if pr else "")
+    return (
+        f'<form class="x" method="post" action="/api/dismiss">'
+        f'<input type="hidden" name="what" value="{esc(what)}">{hidden}'
+        f'<button class="dismiss" type="submit" title="remove this notice">'
+        f'Dismiss</button></form>'
+    )
+
+
 def render_run_status() -> str:
     """What the Triage now clicks are doing, and what the finished ones decided.
 
@@ -1395,10 +1419,11 @@ def render_run_status() -> str:
         body = (j.get("output") or "").strip()
         head_ = body.splitlines()[-1] if body else "no output"
         out.append(
-            f'<details class="panel"><summary class="{cls}">'
+            f'<details class="panel closable"><summary class="{cls}">'
             f'<b>Run #{esc(pr)}</b> <span class="dim">{esc(tw(j.get("finished")))}'
             f'</span> &middot; <span class="mono">{esc(head_[:200])}</span>'
-            f'</summary><pre class="mono" style="white-space:pre-wrap; '
+            f'</summary>{dismiss_button("run", pr)}'
+            f'<pre class="mono" style="white-space:pre-wrap; '
             f'margin:10px 0 0;">{esc(body[-6000:])}</pre></details>')
     return "".join(out)
 
@@ -1561,9 +1586,10 @@ def render_notice() -> str:
     body = esc(NOTICE["text"])
     # Linkify the comment URL the command prints on success.
     body = re.sub(r"(https://\S+)", r'<a href="\1" target="_blank">\1</a>', body)
-    return (f'<div class="banner {cls}"><b>{label}</b> &middot; '
+    return (f'<div class="banner closable {cls}"><b>{label}</b> &middot; '
             f'{esc(tw(NOTICE["at"]))}<br>'
-            f'<span class="mono">{body}</span></div>')
+            f'<span class="mono">{body}</span>'
+            f'{dismiss_button("notice")}</div>')
 
 
 def render_refresh_status() -> str:
@@ -1579,9 +1605,10 @@ def render_refresh_status() -> str:
         return ""
     cls = "ok" if s["rc"] == 0 else "bad"
     return (
-        f'<details class="panel"><summary class="{cls}">'
+        f'<details class="panel closable"><summary class="{cls}">'
         f'<b>Last refresh {esc(s["finished"])}</b> '
         f'<span class="dim">(read-only — click to see what it found)</span></summary>'
+        f'{dismiss_button("refresh")}'
         f'<pre class="mono" style="white-space:pre-wrap; margin:10px 0 0;">'
         f'{esc(s["output"][-6000:])}</pre></details>'
     )
@@ -1771,6 +1798,22 @@ class Handler(BaseHTTPRequestHandler):
                      "--pr", pr],
                     capture_output=True, text=True, timeout=300, cwd=str(here),
                 )
+            elif self.path == "/api/dismiss":
+                # In-memory only: these banners are not on disk, so a reload
+                # would otherwise put back whatever the last click left.
+                what = form.get("what", "")
+                if what == "notice":
+                    NOTICE.update(at="", ok=False, text="")
+                elif what == "refresh":
+                    with SWEEP_LOCK:
+                        if not SWEEP["running"]:
+                            SWEEP.update(finished="", output="", rc=None)
+                elif what == "run":
+                    pr = form.get("pr", "")
+                    with JOBS_LOCK:
+                        job = JOBS.get(pr)
+                        if job and not job.get("running"):
+                            JOBS.pop(pr, None)
             elif self.path == "/api/refresh":
                 with SWEEP_LOCK:
                     if not SWEEP["running"]:

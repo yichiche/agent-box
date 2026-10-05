@@ -46,7 +46,7 @@ Read off: **head repo owner** (the fork to push back to), **head branch**, **bas
 ## Step 2 — Launch the container
 
 ```bash
-bash ~/agent-box/skills/pr-conflict-fix/boot.sh up <image> --pr <PR> [--fast] [--no-gpu]
+bash ~/agent-box/skills/ci/pr-conflict-fix/boot.sh up <image> --pr <PR> [--fast] [--no-gpu]
 ```
 
 Prints the container name — hold onto it, call it `$C`. The container is `--rm` and
@@ -60,7 +60,7 @@ global pre-push hook into the container.
 Run everything after this through:
 
 ```bash
-bash ~/agent-box/skills/pr-conflict-fix/boot.sh sh "$C" '<command>'
+bash ~/agent-box/skills/ci/pr-conflict-fix/boot.sh sh "$C" '<command>'
 ```
 
 which presets `GH_TOKEN=""`, `GH_CONFIG_DIR`, and `PATH`.
@@ -206,7 +206,7 @@ GH_TOKEN="" gh pr view <PR> --json mergeable,mergeStateStatus
 it means review/CI gating, **not** a merge problem — report it as such and don't chase it.
 
 ```bash
-bash ~/agent-box/skills/pr-conflict-fix/boot.sh down "$C"
+bash ~/agent-box/skills/ci/pr-conflict-fix/boot.sh down "$C"
 ```
 
 Tear down even on failure — the container is `--rm`, so leaving it costs a running

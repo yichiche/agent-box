@@ -37,8 +37,18 @@ link_skills "$CURSOR_DIR" "Cursor" || rc=1
 link_skills "$CLAUDE_DIR" "Claude" || rc=1
 
 echo
-count="$(find "$SKILLS_SRC" -mindepth 1 -maxdepth 1 -type d ! -name '.*' ! -name '_*' \
-    -exec test -f '{}/SKILL.md' \; -print | wc -l)"
+count=0
+for d in "$SKILLS_SRC"/*/; do
+    name="$(basename "$d")"
+    [[ "$name" == _* || "$name" == .* ]] && continue
+    if [[ -f "$d/SKILL.md" ]]; then
+        count=$((count + 1))
+        continue
+    fi
+    for child in "$d"/*/; do
+        [[ -f "$child/SKILL.md" ]] && count=$((count + 1))
+    done
+done
 echo "Skills available: $count (each with SKILL.md)"
 echo
 echo "In Cursor:"
