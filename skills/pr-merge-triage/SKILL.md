@@ -31,16 +31,22 @@ the implementation. Do not write `MERGE`, `LGTM`, or `approve`.
 ## Procedure
 
 The chat reply is the final script output and nothing else. Do not paste the
-code-path report, the test-seam report, or a canvas into the chat.
+code-path report or the test-seam report. The script output includes the CI
+links and the code-path canvas link; do not omit them.
 
 ```bash
 # 1. Shape. Stop if it says SPLIT FIRST.
 python3 ~/agent-box/skills/pr-merge-triage/triage.py N --shape
 
 # 2. Judgment files. Follow the two skills, including their value trace and
-#    seam classification. Write only the JSON files; do not print their reports.
+#    seam classification. Write the JSON files and the code-path canvas.
+#    Do not print those reports.
 #    ~/agent-box/skills/pr-code-path/SKILL.md
 #    ~/agent-box/skills/pr-test-seam/SKILL.md
+#    Canvas: ~/.cursor/projects/<workspace>/canvases/pr-N-code-path.canvas.tsx
+#    Write that canvas with the editor in this session. A disk-only file, or
+#    a sidecar status of canvas-missing, opens as canvas not found. If the
+#    user reports that, edit the .canvas.tsx again; do not only repeat the link.
 
 # 3. The only user-facing report.
 python3 ~/agent-box/skills/pr-merge-triage/triage.py N \
@@ -104,6 +110,17 @@ that fails Affected Scope.
 `all_backends`, `all_amd`, `aiter`, `gfx950`, `gfx94`, `other`.
 `owner_action` is required when `conclusion` is `cannot_merge` or
 `nvidia_behavior_identical` is not `true`. It is one concrete code change.
+
+When `nvidia_behavior_identical` is not `true`, Affected Scope fails and the
+owner comment must name the cause. Also set:
+
+- `nvidia_diff_line`: PR-head `path:line` of the statement that changes NVIDIA
+  behavior. One line, the one a reviewer can open.
+- `nvidia_diff_why`: one sentence on why that line behaves differently on
+  NVIDIA than the code it replaced.
+
+The owner comment prints these as `Line`, `Why`, and `Fix` (`owner_action`).
+Do not leave the line number out of `nvidia_diff_line`.
 
 ## Test-seam JSON
 

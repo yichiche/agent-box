@@ -205,12 +205,20 @@ and correctness of the AMD math are separate gates.
 ## When called from /pr-merge-triage
 
 Do the same analysis, including the value trace when execution flow or the
-internal interface is not identical. Do not print the chat report and do not
-create the canvas. Write `/tmp/pr-<number>-code-path.json` using the schema in
+internal interface is not identical. Do not print the chat report. Do write
+the canvas to `~/.cursor/projects/<workspace>/canvases/pr-<number>-code-path.canvas.tsx`
+with the editor Write tool in this session, so the canvas host registers it.
+A file that is only on disk, or a sidecar status of `canvas-missing`, opens
+as canvas not found. If the user reports that, edit the `.canvas.tsx` again
+in this session; repeating the link does not register it. Write `/tmp/pr-<number>-code-path.json` using the schema in
 `/pr-merge-triage`. `nvidia_behavior_identical` is `true` only when that trace
 shows the original outputs unchanged. Use `"unproven"` when the trace was not
 done. `owner_action` is one concrete code change when the conclusion is
-`cannot_merge` or the numerical result is not identical.
+`cannot_merge` or the numerical result is not identical. When
+`nvidia_behavior_identical` is not `true`, also set `nvidia_diff_line` to the
+PR-head `path:line` that changes NVIDIA behavior, and `nvidia_diff_why` to one
+sentence on why that line differs on NVIDIA. The owner comment prints them as
+Line, Why, and Fix.
 
 ## Related
 

@@ -22,6 +22,7 @@ import re
 import subprocess
 import sys
 from collections import Counter
+from pathlib import Path
 
 # A path is AMD-only if its *name* says so. This is the whole basis of the
 # affected-scope check: a file nobody else builds or runs cannot break anybody
@@ -386,6 +387,11 @@ def validate_code_path(data: dict) -> list[str]:
                     or not _behavior_ok(data.get("nvidia_behavior_identical")))
     if needs_action and not str(data.get("owner_action") or "").strip():
         problems.append("owner_action")
+    if not _behavior_ok(data.get("nvidia_behavior_identical")):
+        if not str(data.get("nvidia_diff_line") or "").strip():
+            problems.append("nvidia_diff_line")
+        if not str(data.get("nvidia_diff_why") or "").strip():
+            problems.append("nvidia_diff_why")
     return problems
 
 
@@ -443,6 +449,8 @@ def code_path_rows(cp: dict | None, error: str, uses_aiter: bool) -> list[dict]:
         scope = row("Affected Scope", PASS, layers)
     else:
         scope = row("Affected Scope", FAIL, layers, cp.get("owner_action", "").strip())
+        scope["nvidia_diff_line"] = str(cp.get("nvidia_diff_line") or "").strip()
+        scope["nvidia_diff_why"] = str(cp.get("nvidia_diff_why") or "").strip()
 
     detail = cp["hardware_scope_detail"].strip()
     scope_ok = cp["conclusion"] == "can_merge" and _behavior_ok(behavior)
@@ -542,18 +550,74 @@ def owner_comment(pr: str, title: str, verdict: str, rows: list[dict]) -> str:
     lines = [
         f"Pre-review blocked #{pr} — {title}.",
         "",
-        "This is an automated requirements check. Human review has not started.",
-        "",
         "Failed checks:",
     ]
     for index, item in enumerate(failed, 1):
         lines.append(f"{index}. {item['check']}")
+        if item["check"] == "Affected Scope" and item.get("nvidia_diff_line"):
+            lines.append(f"   Line: {item['nvidia_diff_line']}")
+            lines.append(f"   Why: {item['nvidia_diff_why']}")
+            lines.append(f"   Fix: {item['action']}")
+            continue
         lines.append(f"   {item['evidence']}")
         if item["action"]:
             lines.append(f"   Required: {item['action']}")
     if verdict == SPLIT:
         lines.extend(["", "Split the PR before the other findings are reviewed."])
     return "\n".join(lines)
+
+
+
+CI_LINK = re.compile(
+    r"Latest PR Test \(([^)]+)\):.*?\[([^\]]+)\]\((https://github\.com/[^)\s]+)\)",
+    re.S,
+)
+
+
+def ci_links(repo: str, pr: str, body: str) -> list[str]:
+    """PR checks page, plus the summary runs recorded in the PR body."""
+    lines = [f"- [CI checks](https://github.com/{repo}/pull/{pr}/checks)"]
+    seen = set()
+    for match in CI_LINK.finditer(body or ""):
+        label, title, url = match.group(1), match.group(2), match.group(3)
+        if url in seen:
+            continue
+        seen.add(url)
+        lines.append(f"- [CI — {label} ({title})]({url})")
+    return lines
+
+
+def code_path_canvas(pr: str) -> Path:
+    name = f"pr-{pr}-code-path.canvas.tsx"
+    found = sorted(Path.home().glob(f".cursor/projects/*/canvases/{name}"))
+    if found:
+        return found[0]
+    slug = str(Path.cwd().resolve()).lstrip("/").replace("/", "-")
+    return Path.home() / ".cursor/projects" / slug / "canvases" / name
+
+
+def link_lines(pr: str, a: dict) -> list[str]:
+    repo = a.get("repo") or "sgl-project/sglang"
+    body = (a.get("meta") or {}).get("body") or ""
+    lines = ["", "### Links", *ci_links(repo, pr, body)]
+    canvas = code_path_canvas(pr)
+    label = f"PR {pr} code path"
+    status_path = canvas.with_name(canvas.name.replace(".tsx", ".status.json"))
+    missing = False
+    if status_path.is_file():
+        try:
+            missing = json.loads(status_path.read_text()).get("status") == "canvas-missing"
+        except (OSError, json.JSONDecodeError):
+            missing = False
+    if canvas.is_file() and not missing:
+        lines.append(f"- [{label}]({canvas})")
+    elif missing:
+        lines.append(
+            f"- [{label}]({canvas}) — host status is canvas-missing; rewrite the canvas in this session"
+        )
+    else:
+        lines.append(f"- [{label}]({canvas}) — canvas file is not written yet")
+    return lines
 
 
 def render(pr: str, a: dict, rows: list[dict], verdict: str, shape_only: bool) -> str:
@@ -589,6 +653,7 @@ def render(pr: str, a: dict, rows: list[dict], verdict: str, shape_only: bool) -
             "Automated pre-review blocked this PR. Send the owner comment. "
             "Do not start a full code review until the failed checks are fixed."
         )
+    lines.extend(link_lines(pr, a))
     lines.extend(["", "| Check | Verdict | Evidence |", "|---|---|---|"])
     for item in rows:
         lines.append(f"| {item['check']} | {item['verdict']} | {item['evidence']} |")
