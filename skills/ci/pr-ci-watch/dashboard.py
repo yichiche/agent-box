@@ -43,6 +43,8 @@ import auth as ghauth  # noqa: E402
 from auth import DEVICE_URL, SCOPES  # noqa: E402
 from watch import (  # noqa: E402
     AUTO_FIELDS,
+    LANDED_GRACE_DAYS,
+    landed,
     DATA_DIR,
     PRIORITIES,
     auto_on,
@@ -339,6 +341,14 @@ PAGE = """<!doctype html>
      the one cell carrying information should be the one that reads first. */
   .pill.draft {{ color:#fff; background:var(--dim); border-color:var(--dim);
     font-weight:600; }}
+  /* Filled, like draft: on a landed row this pill is the whole point of the
+     row, so it should read before anything else in it. */
+  .pill.merged {{ color:#fff; background:#8957e5; border-color:#8957e5;
+    font-weight:600; }}
+  .pill.closed {{ color:#fff; background:var(--bad); border-color:var(--bad);
+    font-weight:600; }}
+  /* A landed row is still readable, just visibly done with. */
+  tr.landed td {{ opacity:.72; }}
   .mono {{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }}
   .empty {{ color:var(--dim); padding:28px; text-align:center; }}
   /* No ch cap any more: the column is sized by the colgroup, so capping the
@@ -700,7 +710,32 @@ def esc(x) -> str:
     return html.escape(str(x if x is not None else ""))
 
 
+def landed_days_left(s: dict) -> int | None:
+    """Whole days before a sweep drops this landed row. None if unknowable."""
+    from datetime import datetime, timedelta, timezone
+
+    from watch import parse_ts
+
+    at = parse_ts(s.get("landed_at"))
+    if not at:
+        return None
+    left = timedelta(days=LANDED_GRACE_DAYS) - (datetime.now(timezone.utc) - at)
+    return max(0, left.days + (1 if left.seconds else 0))
+
+
 def merge_cell(s: dict) -> str:
+    # Landed wins over everything, including draft. GitHub stops computing
+    # mergeability the moment a PR merges, so `mergeable` falls back to
+    # UNKNOWN and this column used to render the amber "GitHub had not
+    # finished computing mergeability" pill — flatly wrong, and the only hint
+    # the row gave that anything had changed.
+    if landed(s):
+        state = (s.get("state") or "").lower()
+        when = tw(s.get("landed_at"))
+        cls = "merged" if state == "merged" else "closed"
+        return (f'<span class="pill {cls}" title="{esc(state)} {esc(when)} '
+                f'&mdash; CI is history; the row drops after '
+                f'{LANDED_GRACE_DAYS} days">{esc(state)}</span>')
     # Draft wins over the merge state. "clean" on a draft invites you to read
     # the row as ready-to-land, and this column is the only place on the row
     # that still has something true to say about a PR we do not check.
@@ -908,6 +943,18 @@ def status_cell(pr: str, s: dict) -> str:
     "no NVIDIA failure to act on", and their stored hint and verdict only
     restate that at length — on a Pass row the whole cell is the job counts.
     """
+    if landed(s):
+        # The whole cell, replacing the CI prose: those counts are from before
+        # it landed and reading them as current is exactly the confusion this
+        # change exists to remove. Say when it landed and when it will go.
+        state = (s.get("state") or "").lower()
+        left = landed_days_left(s)
+        gone = ("drops from the list on the next sweep" if left is None or left <= 0
+                else f"drops from the list in ~{left}d")
+        return (f'<div><b>{esc(state)}</b> {esc(tw(s.get("landed_at")))}</div>'
+                f'<div class="dim">CI below is history, not current &mdash; '
+                f"{gone}. Use &times; to clear it now.</div>"
+                + history_toggle(pr))
     action = s.get("last_action", "")
     quiet = action in QUIET_ACTIONS
     if action in SILENT_ACTIONS:
@@ -1105,8 +1152,9 @@ def bucket_of(st: dict, pr: str, meta: dict) -> str:
     and the drag refuses a drop when the two differ — a rejected drop is
     honest, a drop that springs back reads as a bug.
     """
-    # First four keys: L-last, Pass, rank, conflict. Manual order is the fifth.
-    return "|".join(str(x) for x in row_order(st)((pr, meta))[:4])
+    # First five keys: landed-last, L-last, Pass, rank, conflict. Manual order
+    # is the sixth — and the only one a drag is allowed to change.
+    return "|".join(str(x) for x in row_order(st)((pr, meta))[:5])
 
 
 def reorder_rows(wl: dict, st: dict, prs: list[str]) -> None:
@@ -1235,6 +1283,16 @@ def act_cell(pr: str, meta: dict, s: dict) -> str:
     these are an *action* ("this PR, now"), and they were unreadable stacked
     together: `re-run` appeared twice in one cell meaning two different things.
     """
+    if landed(s):
+        # Every button here acts on CI or on the branch, and a landed PR has
+        # neither left to act on. Offering them was the actual bug: the row
+        # sat there with a live `Re-run CI` and `Update branch` on a PR that
+        # had merged an hour earlier.
+        state = (s.get("state") or "landed").lower()
+        return ('<div class="actbox">'
+                f'<button class="act" disabled title="#{esc(pr)} is {esc(state)} '
+                f'&mdash; nothing left to triage, re-run or merge">'
+                f"{esc(state)}</button></div>")
     bits = []
     with JOBS_LOCK:
         job = dict(JOBS.get(pr) or {})
@@ -1340,7 +1398,8 @@ def render_table(wl: dict, st: dict, tab: str = "") -> str:
         other = "regular" if track == "high" else "high"
         url = s.get("url") or f"https://github.com/{meta.get('repo', '')}/pull/{pr}"
         rows.append(
-            f'<tr data-pr="{esc(pr)}" data-bucket="{esc(bucket_of(st, pr, meta))}">'
+            f'<tr data-pr="{esc(pr)}" data-bucket="{esc(bucket_of(st, pr, meta))}"'
+            f'{" class=landed" if landed(s) else ""}>'
             f'<td class="knob">{grip_cell()}</td>'
             f'<td class="knob">{prio_cell(pr, meta)}</td>'
             f'<td><a href="{esc(url)}" target="_blank"><b>#{esc(pr)}</b></a>'

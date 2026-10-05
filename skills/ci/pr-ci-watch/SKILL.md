@@ -181,6 +181,44 @@ conflict case (below); otherwise classifies in-scope failed checks into
 A PR swept in the last 30 minutes is skipped (so the daily track does not redo a
 high sweep that just ran). `--force` or `--pr N` overrides.
 
+### A merged or closed PR stays visible for 3 days
+
+Landing used to be the one thing this tool could not report. The sweep deleted
+a non-`OPEN` PR from the watchlist on sight, and only under `--apply` — so
+between the merge and the next applying sweep the row was **actively wrong**
+(`Pass`, the pre-merge job counts, and live `Re-run CI` / `Update branch`
+buttons on a PR that had already landed), and after it the row simply vanished,
+indistinguishable from one you removed by hand or never added.
+
+`mergeable` makes it worse: GitHub stops computing it once a PR merges, so the
+Merge column rendered the amber *"GitHub had not finished computing
+mergeability"* pill — the only hint anything had changed, and a wrong one.
+
+Now a landed PR keeps its row for `LANDED_GRACE_DAYS` (3), and says so:
+
+| | |
+|---|---|
+| Merge | a filled `merged` (purple) or `closed` (red) pill, winning over draft/clean/conflict |
+| Verdict / Action | `—` and `-` — same rule as a draft: nothing is claimed about CI that cannot change, and nothing is asked of anyone |
+| Act now | one disabled button naming the state. Re-run and Update branch are meaningless here, and offering them was the bug |
+| Status | `merged <when>` plus when the row drops, and that the counts below are history |
+| Sort | below everything, including `L` — it is the one row that wants nothing from you |
+| Status block | `<merged>` / `<closed>` token instead of `<CI clear>`, keeping the PR's perf claim on line 2 — which is what makes it a standup line |
+
+The sweep **stops fetching CI and `behind_by`** for a landed PR: those cannot
+change, and re-reading them each sweep spends API calls redrawing a row nobody
+can act on.
+
+`landed_at` is GitHub's `mergedAt`/`closedAt`, not when we noticed — a PR that
+merges while nobody sweeps must not get a fresh 3 days from the next sweep.
+First detection writes one line to `sweep.log` (`#28650 merged at …`), which is
+what the `▸ history` panel reads, so the landing survives the row being dropped.
+That flag keys off `landed_at`, **not** `state`: the old code already wrote
+`state` before deleting, so keying on it would mean a PR that merged before this
+existed never got its history line.
+
+`×` clears a landed row immediately if 3 days is too patient.
+
 ### Drafts are skipped
 
 A draft PR is still being written: its CI is the author's own scratchpad and its

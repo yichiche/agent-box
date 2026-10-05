@@ -157,7 +157,24 @@ CI_TOKEN_OVERRIDE = {
 VERDICT_TOKEN = {"Pass": "CI clear", "Pending": "CI running",
                  "Fail": "CI red", "\u2014": "CI ?"}
 
-AGENT_BOX = Path(__file__).resolve().parents[2]
+def _agent_box() -> Path:
+    """Walk up to the `agent-box` directory rather than counting parents.
+
+    `parents[2]` was right while this lived at `skills/pr-ci-watch/`, and
+    silently wrong the day it moved to `skills/ci/pr-ci-watch/`: it resolved to
+    `agent-box/skills`, so HOST_HOME became `…/agent-box` and the dashboard
+    read an empty `agent-box/agent-scratch/pr-ci-watch` — a blank watchlist,
+    no tabs, and nothing to say it was looking in the wrong place. Same walk as
+    cron-sweep.sh, so the two agree on where the data is.
+    """
+    here = Path(__file__).resolve()
+    for p in here.parents:
+        if p.name == "agent-box":
+            return p
+    return here.parents[2]  # not under agent-box (vendored?) — old behaviour
+
+
+AGENT_BOX = _agent_box()
 HOST_HOME = Path(os.environ.get("AGENT_BOX_HOST_HOME", AGENT_BOX.parent))
 DATA_DIR = Path(
     os.environ.get("PR_CI_WATCH_DIR")
@@ -261,6 +278,11 @@ def priority_of(meta: dict) -> str:
 def ci_token(s: dict) -> str:
     """Report token. Derived from the same Verdict the table shows, so a row
     cannot say `Pass` in one place and `CI n/a` in the other."""
+    # Before the conflict branch: GitHub leaves `mergeable` stale on a merged
+    # PR, and a standup line reading `<conflict>` next to something that
+    # landed yesterday is the worst version of this bug, not the mildest.
+    if landed(s):
+        return "merged" if s.get("state") == "MERGED" else "closed"
     if s.get("mergeable") == "CONFLICTING":
         return "conflict"
     override = CI_TOKEN_OVERRIDE.get(s.get("last_action", ""))
@@ -337,8 +359,24 @@ def verdict_still_covers(judged_fp: str, current_fp: str) -> bool:
     return bool(current) and current <= judged
 
 
+# How long a merged/closed PR keeps its row before a sweep drops it. The row
+# is the only place a landing is ever reported, so deleting on sight — which is
+# what this used to do — made "did my work land?" unanswerable from the page.
+LANDED_GRACE_DAYS = 3
+LANDED_STATES = ("MERGED", "CLOSED")
+
+
+def landed(s: dict) -> bool:
+    return s.get("state") in LANDED_STATES
+
+
 def ci_verdict(s: dict) -> str:
     """Current in-scope CI state, not our internal bookkeeping."""
+    # A landed PR's CI is history. Whatever the last sweep saw, nothing is
+    # being claimed about it now and nothing can change it — same reasoning as
+    # the draft case below. The Merge column carries `merged` / `closed`.
+    if landed(s):
+        return "—"
     # A draft has no CI verdict to give. Its checks are the author's scratchpad
     # and we deliberately do not read them, so anything but "—" would be a
     # claim we have not earned. The Merge column carries `draft` instead.
@@ -394,6 +432,11 @@ def ci_verdict(s: dict) -> str:
 
 def ci_action(s: dict) -> str:
     """What needs doing about it."""
+    # Nothing is asked of anyone about a PR that has already landed, and the
+    # buttons this column justifies (re-run, update branch) are all nonsense
+    # on one. Said first so no later branch can revive them.
+    if landed(s):
+        return "-"
     action = s.get("last_action")
     # Two different problems that must not share a label:
     #   Solve conflict -> the branch has git conflicts with main; the author has
@@ -449,6 +492,10 @@ def row_order(st: dict):
         s = st.get(pr, {})
         pri = priority_of(meta)
         return (
+            # Below everything, including L: a landed PR is the one row on the
+            # table that wants nothing from you. Keeps the top of the table
+            # "things still in flight".
+            1 if landed(s) else 0,
             # Dominates verdict and merge. Without it, "L" < "P0" as text and
             # a passing L row would sit above a failing P2.
             1 if pri == "L" else 0,
@@ -692,7 +739,8 @@ def pr_snapshot(pr: str, repo: str) -> dict:
     # extracted from it here and only the one-line result is stored, so
     # state.json does not grow a copy of every PR description.
     fields = (
-        "state,mergeable,mergeStateStatus,headRefOid,headRefName,baseRefName,"
+        "state,mergeable,mergeStateStatus,mergedAt,closedAt,"
+        "headRefOid,headRefName,baseRefName,"
         "author,title,url,isDraft,body,labels"
     )
     data = json.loads(gh(["pr", "view", pr, "--repo", repo, "--json", fields]))
@@ -908,10 +956,42 @@ def cmd_sweep(a) -> None:
         row = {"pr": pr, "title": s["title"], "author": author, "sha": sha[:8]}
 
         if snap.get("state") != "OPEN":
-            print(f"#{pr}  {snap.get('state')} — dropping from watchlist")
-            if a.apply:
-                wl.pop(pr, None)
-            row["outcome"] = f"closed:{snap.get('state')}"
+            state = snap.get("state") or "CLOSED"
+            # GitHub's own timestamp, not when we noticed: a PR that merged
+            # while nobody swept would otherwise get its grace period counted
+            # from the next sweep and linger days past its welcome.
+            when = snap.get("mergedAt") or snap.get("closedAt") or now()
+            # Keyed on `landed_at`, not on `state`: the old sweep already wrote
+            # `state` before deciding to drop the row, so a PR that merged
+            # before this code existed would look "already seen" and never get
+            # its one history line.
+            first = not s.get("landed_at")
+            s["state"] = state
+            s["landed_at"] = s.get("landed_at") or when
+            if first:
+                # The one place a landing is ever recorded. Written on a dry
+                # run too — the sweep persists `state` either way, so this is
+                # reporting a fact GitHub already decided, not taking an
+                # action. It is what the ▸ history panel reads.
+                log_line(f"#{pr} {state.lower()} at {s['landed_at']}")
+            age = datetime.now(timezone.utc) - (parse_ts(s["landed_at"])
+                                                or datetime.now(timezone.utc))
+            left = timedelta(days=LANDED_GRACE_DAYS) - age
+            if left.total_seconds() <= 0:
+                print(f"#{pr}  {state} {tw(s['landed_at'])} — "
+                      f"past the {LANDED_GRACE_DAYS}d grace, dropping")
+                if a.apply:
+                    wl.pop(pr, None)
+                    log_line(f"#{pr} dropped — {state.lower()} "
+                             f"{LANDED_GRACE_DAYS}d ago")
+                row["outcome"] = f"closed:{state}"
+            else:
+                # Deliberately no CI fetch below this point: a landed PR's
+                # checks cannot change, and re-reading them every sweep spends
+                # API calls to redraw a row nobody can act on.
+                print(f"#{pr}  {state} {tw(s['landed_at'])} — keeping the row "
+                      f"for {left.days}d {left.seconds // 3600}h")
+                row["outcome"] = f"landed:{state}"
             report.append(row)
             continue
 
