@@ -243,50 +243,76 @@ for host rules. Do not open `sdk/*.d.ts`, `examples.md`, or another PR's
 canvas. This section is the layout.
 
 Use `Stack`, `Grid`, `Row`, `H1`, `H2`, `Text`, `Stat`, `Callout`, `Table`,
-`Card`, `CardHeader`, `CardBody`, `DiffView`, `DiffStats`, `Pill`, `Swatch`,
-and `useHostTheme`. Colors come from `useHostTheme()`. No hardcoded hex.
+`Card`, `CardHeader`, `CardBody`, `Divider`, `DiffView`, `DiffStats`, `Pill`,
+`Swatch`, and `useHostTheme`. Colors come from `useHostTheme()`. No hardcoded hex.
 
 Put the sections in this order:
 
 1. `H1` `PR N code path`, then one `Text tone="secondary"` naming the PR and
    where the new statements live.
-2. `Grid columns={5}` of `Stat`, in this order: Common path changed,
-   NVIDIA execution identical, NVIDIA interface identical, NVIDIA behavior
-   identical, Hardware scope. Behavior is the numerical-result layer: Yes
-   only when original NVIDIA outputs are unchanged. The scope value is a
-   short token (`AITER`, `gfx950`, `All backends`). `tone="success"` when
-   that answer leaves NVIDIA behavior unchanged. `tone="warning"` or
-   `"danger"` when it does not.
-3. `Callout`. Title is `Can merge on this code-path question` or
-   `Cannot merge on this code-path question`. One paragraph: why the NVIDIA
-   outputs stay the same or what changes, and the guard.
-4. `Who runs the new statements`. One svg, two columns. Left is the NVIDIA
-   or common path. Right is the path that runs the new statements. A `Row`
-   legend uses `Swatch`. Each node is a rect with a title and a one-line
-   subtitle; put the PR-head line number in the title. Draw an edge only
-   for a real caller-to-callee step. Do not connect unrelated chains.
+2. `Grid columns="2fr 1fr"` of two cards. The behavior answer and the
+   hardware guard are separate questions, so they do not share a stat row.
+   Left `CardHeader` is `Affected Scope`. One `Stat`, NVIDIA behavior
+   identical. Yes only when original NVIDIA outputs are unchanged.
+   `tone="success"` when Yes, `tone="danger"` when No or Unproven. That is
+   the only colored stat on this card. The card shows the stat only. Then
+   `Divider`, a `Text` reading `Trace`, and `Grid columns={3}` of `Stat`
+   with no tone: Common path changed, NVIDIA execution identical, NVIDIA
+   interface identical. A No in the trace stays uncolored.
+   Right `CardHeader` is `AMD Guard`. One `Stat`, Hardware scope, a short
+   token (`AITER`, `gfx950`, `All backends`). `tone="success"` when the
+   guard contains the new behavior, `tone="danger"` when it does not. That
+   tone does not follow the behavior stat. The card shows the stat only,
+   centered horizontally and vertically in the card body.
+3. Do not put a Can merge callout above the trace, and do not put a
+   sentence under either stat. A Cannot merge callout still goes at the
+   end, with the concrete code change.
+4. `H2` `Who runs the new statements`. One svg, two columns, in the same
+   shape as a caller graph. A `Row` legend uses `Swatch`: green
+   `NVIDIA, unchanged`, orange `Common path NVIDIA also runs`, blue
+   `New gfx950 path`. Column headers name the side. Each node is a rect
+   with a title `function · line` and a one-line subtitle. Draw an edge
+   only for a real caller-to-callee step. Do not connect unrelated chains.
    Unchanged NVIDIA nodes use `theme.category.green`. A common path NVIDIA
-   also executes uses `theme.category.orange`. The new guarded path uses
+   also executes uses `theme.category.orange`, including a node whose
+   original outputs stay the same while it computes new values. The subtitle
+   names the added values first. The new guarded path uses
    `theme.accent.primary`. Fill is `theme.bg.elevated`. Text uses
    `theme.text.primary`, `theme.text.secondary`, and `theme.text.tertiary`.
-5. `H2` `Statements this PR adds`, then a `Table` with columns Function,
-   Line, Who executes it, What changes. One row per added statement.
-6. `DiffView` cards of the added and removed lines. `CardHeader` trailing
-   `DiffStats` counts must match the lines in that `DiffView`. Put peer
-   edits in a `Grid columns={2}`. Use a full-width card when one edit needs
-   a sentence of context.
-7. When execution flow or the internal interface is not identical, one `H2`
-   per such edit, named for that input. A `Text` states the input values.
-   A `Grid columns={2}` holds two cards: `Base condition` with `Pill`
-   `before`, and `Head condition` with `Pill` `after`. State the values,
-   whether the `if` is true, and what is stored. Do not put the trace in a
-   code comment. Then state the same `if` with the hardware values that
-   make the new branch run.
-8. `H2` `Guard`. One paragraph: the narrowest condition, which hardware it
+   One `Text` under the svg: edges are real calls, which chains do not call
+   each other, and what NVIDIA does instead of the right-hand path.
+   Every node is clickable. Wrap its rect in a `<g>` with
+   `style={{ cursor: "pointer" }}` and an `onClick` that calls
+   `document.getElementById(id)?.scrollIntoView({ behavior: "smooth" })`.
+   Each section in step 5 starts with `<div id={id} />` before its `H2`. A
+   right-hand node jumps to the section of the function it lives in.
+5. The behavior proof. One `Text` states the single
+   NVIDIA input. Then one `H2` per graph node, in edge order, titled with
+   that node's `function · line`. The first section is the top node. Its
+   before/after is that node's own statements, and the first sentence names
+   the callee, which is the next `H2`. Each `H2` starts with the code, then
+   the tables. The code stays:
+   a `Grid columns={2}` of two cards. The left card is `Pill` `before` and the
+   base statements in a `DiffView` (`type: "unchanged"`). The right card is
+   `Pill` `after` and the head statements; kept lines are `unchanged`, new
+   lines are `added`. Show the same region on both sides so the old lines
+   line up with the new ones. Then:
+   - `Argument`, `Before`, `After`, `Read by the old store?` — one row per
+     original argument and one row per new argument. Original rows show the
+     same value on both sides. New rows say `absent` under Before.
+   - `New argument`, `Value`, `The if`, `Why the old store is unchanged` —
+     one row per new argument. Name the `if` and its NVIDIA value. Same
+     result only when that `if` is false, or it is true and the value is an
+     identity (`maximum(group_locs, member_rows + 0) == group_locs`).
+   Then one table, `Same if on gfx950`, with columns `Argument`, `NVIDIA`,
+   `gfx950`, using the values that make those `if`s true.
+   Do not add a statement inventory. The caller graph, the side-by-side
+   code, and the tables are the trace.
+6. `H2` `Guard`. One paragraph: the narrowest condition, which hardware it
    includes, and any added statement outside it.
-9. When the verdict is Cannot merge, a `Callout` with the concrete code
+7. When the verdict is Cannot merge, a `Callout` with the concrete code
    change.
-10. `Text tone="tertiary" size="small"` citing the PR-head paths and lines.
+8. `Text tone="tertiary" size="small"` citing the PR-head paths and lines.
 
 ## Related
 
