@@ -28,6 +28,8 @@ import subprocess
 import threading
 import time
 
+import watch
+
 HOST = "github.com"
 # What this dashboard actually needs: `repo` to re-run workflows and call
 # update-branch, `read:org` so `gh` can resolve org membership on private
@@ -57,10 +59,11 @@ LOGIN_TIMEOUT = 13 * 60
 
 
 def _gh(args: list[str], **kw) -> subprocess.CompletedProcess:
-    # GH_TOKEN is cleared for the same reason every other call here clears it:
-    # a PAT in the environment silently wins over the OAuth token and this repo
-    # rejects it. See _shared/repo-config.md.
-    env = dict(os.environ, GH_TOKEN="", GITHUB_TOKEN="")
+    # Same widened PATH and cleared GH_TOKEN as every other gh call — see
+    # watch.gh_env. Without the PATH this panel reports "gh is not installed"
+    # on a host where it is installed, just not on the PATH a detached server
+    # inherited, which sends you looking for the wrong problem.
+    env = watch.gh_env(GITHUB_TOKEN="")
     return subprocess.run(["gh", *args], capture_output=True, text=True,
                           env=env, timeout=kw.pop("timeout", 60), **kw)
 

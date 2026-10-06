@@ -43,6 +43,8 @@ import auth as ghauth  # noqa: E402
 from auth import DEVICE_URL, SCOPES  # noqa: E402
 from watch import (  # noqa: E402
     AUTO_FIELDS,
+    TOOL_PATH,
+    TOOL_PATH_DIRS,
     LANDED_GRACE_DAYS,
     landed,
     DATA_DIR,
@@ -129,10 +131,11 @@ JOBS_LOCK = threading.Lock()
 # RUN_PATH is also handed to the turn itself: the triage prompt shells out to
 # `gh`, so a claude we found by widening PATH would otherwise fail one level
 # deeper for the same reason.
-EXTRA_PATH = [str(Path.home() / ".local/bin"), str(HOST_HOME / "bin"),
-              "/root/.local/bin", "/usr/local/bin"]
-RUN_PATH = os.pathsep.join(
-    dict.fromkeys(EXTRA_PATH + os.environ.get("PATH", "").split(os.pathsep)))
+# Shared with every `gh` call rather than defined twice: watch.gh_env() uses
+# the same list, so `claude` and `gh` can never be looked for in different
+# places.
+EXTRA_PATH = TOOL_PATH_DIRS
+RUN_PATH = TOOL_PATH
 
 
 def _resolve_claude() -> str:
@@ -1134,8 +1137,13 @@ def report_html(wl: dict, st: dict, group: str | None = None) -> str:
     for e in report_entries(wl, st, group):
         # A real nested <ul> so a rich paste lands in Teams as a proper list.
         note = (f'<ul><li>{esc(e["note"])}</li></ul>' if e["note"] else "")
+        token = esc(e["token"])
+        # Only the clear token is bold: it is the one a standup reader acts on,
+        # and <b> survives the rich-text paste into Teams.
+        if e["token"] == "CI clear":
+            token = f"<b>{token}</b>"
         out.append(
-            f'<li>&lt;{esc(e["pri"])}&gt;&lt;{esc(e["token"])}&gt;'
+            f'<li>&lt;{esc(e["pri"])}&gt;&lt;{token}&gt;'
             f'&lt;<a href="{esc(e["url"])}" target="_blank">PR{esc(e["pr"])}</a>&gt;'
             f'{esc(e["title"])}{note}</li>'
         )

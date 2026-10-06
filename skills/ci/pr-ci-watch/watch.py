@@ -563,17 +563,57 @@ def log_line(msg: str) -> None:
         fh.write(f"{now()} {msg}\n")
 
 
-def gh(args: list[str], check: bool = True) -> str:
-    """Run gh with GH_TOKEN cleared.
+# Everything here is routinely started without shell init — cron, a detached
+# `setsid nohup` dashboard, an editor task — and `gh` lives in a per-user bin
+# dir that a bare PATH does not contain. This is the third time that has bitten:
+# cron-sweep.sh exports a PATH because every sweep died on
+# `FileNotFoundError: 'gh'`, and the dashboard widens one because `claude` was
+# not found either. Resolve it once, here, where every `gh` call funnels, so no
+# future caller has to rediscover it.
+TOOL_PATH_DIRS = [str(Path.home() / ".local/bin"), str(HOST_HOME / "bin"),
+                  "/root/.local/bin", "/usr/local/bin"]
+TOOL_PATH = os.pathsep.join(
+    dict.fromkeys(TOOL_PATH_DIRS + os.environ.get("PATH", "").split(os.pathsep)))
 
-    The GH_TOKEN in the environment is a fine-grained PAT that the LMSYS
-    enterprise blocks on token lifetime; clearing it falls through to the OAuth
-    token from `gh auth login`. See _shared/repo-config.md.
+GH_MISSING = (f"`gh` is not installed or not on PATH. Looked in: {TOOL_PATH}")
+
+
+# Where agent-box keeps gh's credentials: a host-owned dir, so a login
+# survives the container being destroyed (see agent-box/gh-setup.sh, which
+# picks the same default). Only ~/.bashrc exports it, so a detached server
+# gets gh's default `~/.config/gh` instead — which on these containers is
+# empty. Finding gh and then not finding its login is the same bug twice: it
+# made the dashboard report "Not signed in to GitHub" on a host that was, and
+# it is what broke `git push` through gh's credential helper.
+GH_CONFIG_DIR = HOST_HOME / ".gh"
+
+
+def gh_env(**extra) -> dict:
+    """The environment every `gh` call gets.
+
+    GH_TOKEN is cleared because the one in the environment is a fine-grained
+    PAT that the LMSYS enterprise blocks on token lifetime; clearing it falls
+    through to the OAuth token from `gh auth login`. See
+    _shared/repo-config.md.
     """
-    env = dict(os.environ, GH_TOKEN="")
-    proc = subprocess.run(
-        ["gh", *args], capture_output=True, text=True, env=env, timeout=180
-    )
+    env = dict(os.environ, PATH=TOOL_PATH, GH_TOKEN="")
+    # Only as a default: an explicit GH_CONFIG_DIR is someone choosing a
+    # different login (the auth tests rely on that), and a host that never set
+    # one up should keep gh's own default rather than be pointed at nothing.
+    if not env.get("GH_CONFIG_DIR") and GH_CONFIG_DIR.is_dir():
+        env["GH_CONFIG_DIR"] = str(GH_CONFIG_DIR)
+    env.update(extra)
+    return env
+
+
+def gh(args: list[str], check: bool = True) -> str:
+    try:
+        proc = subprocess.run(
+            ["gh", *args], capture_output=True, text=True, env=gh_env(),
+            timeout=180
+        )
+    except FileNotFoundError:
+        die(GH_MISSING)
     if check and proc.returncode != 0:
         die(f"gh {' '.join(args[:3])}… failed: {proc.stderr.strip()}")
     return proc.stdout
@@ -582,9 +622,14 @@ def gh(args: list[str], check: bool = True) -> str:
 def gh_try(args: list[str]) -> tuple[int, str, str]:
     """gh that reports failure instead of exiting — for calls with expected
     non-fatal errors, e.g. re-running a workflow that is still in progress."""
-    env = dict(os.environ, GH_TOKEN="")
-    p = subprocess.run(["gh", *args], capture_output=True, text=True,
-                       env=env, timeout=180)
+    try:
+        p = subprocess.run(["gh", *args], capture_output=True, text=True,
+                           env=gh_env(), timeout=180)
+    except FileNotFoundError:
+        # "Reports failure instead of exiting" has to include this one. Letting
+        # it raise is what put a Python traceback on the dashboard in place of
+        # a sentence, when `Update branch` was clicked on a host without gh.
+        return 127, "", GH_MISSING
     return p.returncode, p.stdout, p.stderr.strip()
 
 
