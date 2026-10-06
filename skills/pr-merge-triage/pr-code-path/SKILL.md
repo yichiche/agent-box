@@ -111,30 +111,24 @@ The trace has three code blocks:
 
 1. **Before**, only the statements that ran, with values.
 2. **After** on that same input, with values. Mark statements NVIDIA newly executes.
-3. **Consumers.** Follow each new argument, return value, or field to the `if`
-
-The first lines of every before, after, and consumer block name the file and
-the line, taken from that side's revision (before = base, after = PR head):
-
-```python
-# qwen_sparse_attn_backend.py · _qsa_build_write_plan · line 562
-# qsa_indexer.py · _forward_impl · line 691
-```
-
-The unit is one function. A scenario that crosses functions is split, and
-each piece is headed by `file · function · line`. The canvas card title uses
-the same `file · function`.
-   that reads it. Show the NVIDIA values of that condition, then the variables
-   the old path still uses (`group_locs`, `source_keys`, the original return
-   slots). A new value proves “same result” only when one of these is visible
-   in the code:
+3. **Consumers.** Follow each new name to the statement that loads the stored
+   field and the statement that uses it. A line number in a table is not the
+   consumer. Show those lines. A new value proves “same result” only when one
+   of these is visible in the code:
 
 - the `if` is false, so the new value is not read
 - the `if` is true but the default is an identity on the old variable
   (`maximum(group_locs, member_rows + 0) == group_locs`)
 
-Then show the same `if`s with the hardware-specific values that make them true,
-so the scope of the new behavior is the value of the guard, not a separate claim.
+The unit is one function, titled `function · line`, the same string as the
+canvas node. Before lines are the base revision. After and consumer lines are
+PR head.
+
+When the read is gated, keep one NVIDIA input for the before/after. Show the
+gate in order: the flag, the function that returns None while the flag is
+false, then the load and use lines. Put the guarded input’s values in the
+last column of that reader table. Do not add a second trace, and do not add
+a closing Guard section.
 
 Answer **Yes, identical** only when that trace shows:
 
@@ -243,80 +237,69 @@ for host rules. Do not open `sdk/*.d.ts`, `examples.md`, or another PR's
 canvas. This section is the layout.
 
 Use `Stack`, `Grid`, `Row`, `H1`, `H2`, `Text`, `Stat`, `Callout`, `Table`,
-`Card`, `CardHeader`, `CardBody`, `Divider`, `DiffView`, `DiffStats`, `Pill`,
-`Swatch`, and `useHostTheme`. Colors come from `useHostTheme()`. No hardcoded hex.
+`Card`, `CardHeader`, `CardBody`, `Divider`, `DiffView`, `Pill`, `Swatch`,
+`CollapsibleSection`, and `useHostTheme`. Colors come from `useHostTheme()`.
+No hardcoded hex. `Swatch` `color` is a palette name (`green`, `orange`,
+`blue`), not a hex. `CardHeader` takes children, not `title`. Put `key` on
+the `<g>`, not on a custom node component.
 
-Put the sections in this order:
+The canvas shows why NVIDIA behavior is identical: original outputs stay, and
+each new name is either unread or an identity. Extra execution and a wider
+interface are Trace stats. Hardware is the other card. One NVIDIA input for
+the before/after. The guarded input appears only as the last column beside
+the lines that use the new names.
 
 1. `H1` `PR N code path`, then one `Text tone="secondary"` naming the PR and
    where the new statements live.
-2. `Grid columns="2fr 1fr"` of two cards. The behavior answer and the
-   hardware guard are separate questions, so they do not share a stat row.
-   Left `CardHeader` is `Affected Scope`. One `Stat`, NVIDIA behavior
-   identical. Yes only when original NVIDIA outputs are unchanged.
-   `tone="success"` when Yes, `tone="danger"` when No or Unproven. That is
-   the only colored stat on this card. The card shows the stat only. Then
-   `Divider`, a `Text` reading `Trace`, and `Grid columns={3}` of `Stat`
-   with no tone: Common path changed, NVIDIA execution identical, NVIDIA
-   interface identical. A No in the trace stays uncolored.
-   Right `CardHeader` is `AMD Guard`. One `Stat`, Hardware scope, a short
-   token (`AITER`, `gfx950`, `All backends`). `tone="success"` when the
-   guard contains the new behavior, `tone="danger"` when it does not. That
-   tone does not follow the behavior stat. The card shows the stat only,
-   centered horizontally and vertically in the card body.
-3. Do not put a Can merge callout above the trace, and do not put a
-   sentence under either stat. A Cannot merge callout still goes at the
-   end, with the concrete code change.
-4. `H2` `Who runs the new statements`. One svg, two columns, in the same
-   shape as a caller graph. A `Row` legend uses `Swatch`: green
-   `NVIDIA, unchanged`, orange `Common path NVIDIA also runs`, blue
-   `New gfx950 path`. Column headers name the side. Each node is a rect
-   with a title `function · line` and a one-line subtitle. Draw an edge
-   only for a real caller-to-callee step. Do not connect unrelated chains.
-   Unchanged NVIDIA nodes use `theme.category.green`. A common path NVIDIA
-   also executes uses `theme.category.orange`, including a node whose
-   original outputs stay the same while it computes new values. The subtitle
-   names the added values first. The new guarded path uses
-   `theme.accent.primary`. Fill is `theme.bg.elevated`. Text uses
-   `theme.text.primary`, `theme.text.secondary`, and `theme.text.tertiary`.
-   One `Text` under the svg: edges are real calls, which chains do not call
-   each other, and what NVIDIA does instead of the right-hand path.
-   Every node is clickable. Wrap its rect in a `<g>` with
-   `style={{ cursor: "pointer" }}` and an `onClick` that calls
-   `document.getElementById(id)?.scrollIntoView({ behavior: "smooth" })`.
-   Each section in step 5 starts with `<div id={id} />` before its `H2`. A
-   right-hand node jumps to the section of the function it lives in.
-5. The behavior proof. Interface changes come first: a wider return, a new
-   argument, a new field. For each added name, the next table follows it to
-   the statement that reads it and names the `if`. If that `if` is false
-   unless a gfx or AITER check is true, say so in the row. A caller that
-   only forwards the value, or a helper that returns before the new work on
-   NVIDIA, goes below that follow-through under `Does not change the NVIDIA
-   store`. One `Text` states the single
-   NVIDIA input. Each `H2` is the graph node's `function · line`. Its
-   before/after is that node's own statements. Each `H2` starts with the
-   code, then the tables. The code stays:
-   a `Grid columns={2}` of two cards. The left card is `Pill` `before` and the
-   base statements in a `DiffView` (`type: "unchanged"`). The right card is
-   `Pill` `after` and the head statements; kept lines are `unchanged`, new
-   lines are `added`. Show the same region on both sides so the old lines
-   line up with the new ones. Then:
-   - `Argument`, `Before`, `After`, `Read by the old store?` — one row per
-     original argument and one row per new argument. Original rows show the
-     same value on both sides. New rows say `absent` under Before.
-   - `New argument`, `Value`, `The if`, `Why the old store is unchanged` —
-     one row per new argument. Name the `if` and its NVIDIA value. Same
-     result only when that `if` is false, or it is true and the value is an
-     identity (`maximum(group_locs, member_rows + 0) == group_locs`).
-   Then one table, `Same if on gfx950`, with columns `Argument`, `NVIDIA`,
-   `gfx950`, using the values that make those `if`s true.
-   Do not add a statement inventory. The caller graph, the side-by-side
-   code, and the tables are the trace.
-6. `H2` `Guard`. One paragraph: the narrowest condition, which hardware it
-   includes, and any added statement outside it.
-7. When the verdict is Cannot merge, a `Callout` with the concrete code
-   change.
-8. `Text tone="tertiary" size="small"` citing the PR-head paths and lines.
+2. `Grid columns="2fr 1fr"`. Left card `Affected Scope`: one colored `Stat`,
+   NVIDIA behavior identical (`success` on Yes, `danger` on No or Unproven).
+   Then `Divider`, `Text` `Trace`, and three uncolored stats: Common path
+   changed, NVIDIA execution identical, NVIDIA interface identical. Right
+   card `AMD Guard`: one `Stat`, Hardware scope (`AITER`, `gfx950`, `All
+   backends`). `success` when the guard contains the new behavior, `danger`
+   when it does not. Center that stat in the card body, both axes. No
+   sentence under either stat. No Can-merge callout here.
+3. `H2` `Who runs the new statements`. Two-column caller svg. Legend:
+   `NVIDIA, unchanged` / `Common path NVIDIA also runs` / `New gfx950 path`
+   (rename the blue label to this PR’s guard). Edges are real calls only.
+   Green (`theme.category.green`) only when the node computes nothing new.
+   Orange (`theme.category.orange`) when NVIDIA runs it and it computes new
+   values, even if the original outputs stay; the subtitle names the
+   additions first. Blue (`theme.accent.primary`) is the guarded path.
+   Fill `theme.bg.elevated`. Text from `theme.text`. One `Text` under the
+   svg says which chains do not call each other. Each node is a `<g
+   style={{ cursor: "pointer" }}>` whose `onClick` scrolls to
+   `document.getElementById(id)`.
+4. One `CollapsibleSection` per graph node, titled `function · line`, the
+   same string as the node. `<div id={id} style={{ scrollMarginTop: 16 }} />`
+   sits before the section, not inside it. A right-hand node jumps to the
+   section of the function it lives in. The interface section (wider return,
+   new argument, or new field) is first and `defaultOpen`. Every other node
+   starts closed, so a closed header is the boundary of that node. Order
+   after the interface: the function that stores the new names, then the
+   function that reads them. A caller that only forwards the value, and a
+   helper that returns before the new work on NVIDIA, go under `Does not
+   change the NVIDIA store`.
+5. Inside a node: side-by-side `DiffView`. Left is base, every line
+   `unchanged`. Right is head, kept lines `unchanged` and new lines `added`,
+   same region so the old lines line up. Then the argument table
+   (`Argument`, `Before`, `After`, `Read by the old store?`). New rows say
+   `absent` under Before. For each new name, the next section is the
+   consumer, not another copy of the return. When the read is gated, show
+   three steps as code before any summary table:
+   - Step 1, the flag.
+   - Step 2, the function that returns None while the flag is false. Name
+     that return.
+   - Step 3, one card per name, titled `name · loaded at LINE, used at
+     LINE`, containing the load and the use. Then a table: the name, that
+     use, `not executed` on NVIDIA, and the value on the guarded input.
+   Same result only when that `if` is false, or it is true and the value is
+   an identity.
+6. Cannot merge: a `Callout` at the end with the concrete code change.
+7. `Text tone="tertiary" size="small"` citing the PR-head paths and lines.
+
+Do not add a statement inventory, a second-input comparison table, or a
+closing Guard paragraph. Hardware scope stays in the AMD Guard card.
 
 ## Related
 

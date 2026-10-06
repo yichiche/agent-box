@@ -61,9 +61,14 @@ python3 triage.py N --shape
 #    python3 pr-code-path/path_cover.py N
 #    python3 pr-test-seam/test_seam.py N
 #    Canvas: ~/.cursor/projects/<workspace>/canvases/pr-N-code-path.canvas.tsx
-#    Write that canvas with the editor in this session. A disk-only file, or
-#    a sidecar status of canvas-missing, opens as canvas not found. If the
-#    user reports that, edit the .canvas.tsx again; do not only repeat the link.
+#    Write that canvas with the editor in this session. Layout is the Canvas
+#    section of pr-code-path/SKILL.md: two cards, a clickable caller graph,
+#    one foldable section per node titled function · line. Interface changes
+#    open first. Follow each new name to the lines that load and use it,
+#    through the gate that keeps NVIDIA from reading them.
+#    A disk-only file, or a sidecar status of canvas-missing, opens as canvas
+#    not found. If the user reports that, edit the .canvas.tsx again; do not
+#    only repeat the link.
 
 # 3. The only user-facing report. Pass the judgment files even when step 1
 #    said SPLIT FIRST and the user asked to continue.
