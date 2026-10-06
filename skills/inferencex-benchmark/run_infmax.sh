@@ -145,7 +145,11 @@ log "arm       $ARM_NAME"
 log "recipe    $RECIPE"
 log "image(CI) $IMAGE   <- CI runs the recipe in this image; you are running it in the current container"
 
-CONCURRENCIES="${CONCURRENCIES:-$CONC_LIST}"
+# srt_agentic.sh reads an inherited CONC_LIST as a multi-node batch of points
+# against one server, so the arm's list must never reach a client.
+ARM_CONC_LIST="$CONC_LIST"
+unset CONC_LIST
+CONCURRENCIES="${CONCURRENCIES:-$ARM_CONC_LIST}"
 log "tp=$TP ep=$EP_SIZE spec=$SPEC_DECODING conc=[$CONCURRENCIES]"
 
 if [ "$MODE" = agent ]; then
@@ -207,15 +211,15 @@ else
   # benchmark_lib.sh rejects a mismatch: KV_OFFLOAD_BACKEND is the plain backend
   # name, KV_OFFLOAD_BACKEND_METADATA its JSON, both empty when KV stays on GPU.
   export KV_OFFLOADING KV_OFFLOAD_BACKEND KV_OFFLOAD_BACKEND_METADATA
-  mem_kb=$(awk '/MemTotal/{print $2}' /proc/meminfo)
-  util="${DRAM_UTILIZATION:-0.80}"
-  export TOTAL_CPU_DRAM_GB=$(awk -v k="$mem_kb" -v u="$util" 'BEGIN{printf "%d", k*1024*u/1e9}')
+  # infx/matrix/generate.py agentic_dram_offload_gb: 0 unless KV goes to DRAM,
+  # then node DRAM x dram-utilization x this point's share of the node's GPUs.
+  export TOTAL_CPU_DRAM_GB=0
   if [ "$KV_OFFLOADING" = dram ]; then
-    # HiCache pushes KV into host DRAM. Concurrent slots each believe they own
-    # TOTAL_CPU_DRAM_GB, so N slots oversubscribe host RAM N-fold.
-    log "HiCache: KV_OFFLOAD_BACKEND=$KV_OFFLOAD_BACKEND, TOTAL_CPU_DRAM_GB=$TOTAL_CPU_DRAM_GB"
-    [ "${ALLOW_PARALLEL_HICACHE:-0}" = 1 ] || \
-      log "NOTE: do not run several HiCache slots at once on this node (host DRAM is shared and not partitioned)"
+    mem_kb=$(awk '/MemTotal/{print $2}' /proc/meminfo)
+    util="${DRAM_UTILIZATION:-0.80}"
+    TOTAL_CPU_DRAM_GB=$(awk -v k="$mem_kb" -v u="$util" -v g="$GPU_COUNT" -v n="${GPUS_PER_NODE:-8}" \
+      'BEGIN{printf "%d", k*1024*u*g/n/1e9}')
+    log "HiCache: KV_OFFLOAD_BACKEND=$KV_OFFLOAD_BACKEND, TOTAL_CPU_DRAM_GB=$TOTAL_CPU_DRAM_GB (this point's GPU share)"
   fi
   export DURATION="${DURATION:-$([ "$FULL" = 1 ] && echo 3600 || echo 1200)}"
   [ "$DURATION" -ge 900 ] || die "DURATION=$DURATION is below 900s; aiperf would add --unsafe-override and the run would not be a valid submission"
