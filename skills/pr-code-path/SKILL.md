@@ -203,17 +203,9 @@ Extra execution or a wider internal interface alone is not a reason for
 Cannot merge. This verdict covers only the code-path question; CI, approvals,
 and correctness of the AMD math are separate gates.
 
-2. **Visualize link.** One canvas link, nothing else after it. Put the path
-   picture, guard quotes, and value traces in that canvas. When execution flow
-   or the internal interface is **No**, the canvas must contain one three-block
-   trace per such edit (before, after on the same input, consumers, then the
-   same `if`s with the hardware-specific values that make them true). That
-   paragraph is the whole trace. Canvas file:
-   `~/.cursor/projects/<workspace>/canvases/pr-<number>-code-path.canvas.tsx`.
-   Read `~/.cursor/skills-cursor/canvas/SKILL.md` once. Use `Stack`, `H1`,
-   `H2`, `Text`, `Table`, `Card`, and `Callout` from `cursor/canvas`. Colors
-   come from `useHostTheme()`. Do not open `sdk/*.d.ts`, `examples.md`, or
-   another PR's canvas.
+2. **Visualize link.** One canvas link, nothing else after it. The canvas
+   is the path picture, the diffs, and the value traces. Follow **Canvas**
+   below. Do not print those sections in the chat.
 
 
 ## When called from /pr-merge-triage
@@ -222,10 +214,8 @@ Do the same analysis, including the value trace when execution flow or the
 internal interface is not identical. The only production code you read is
 `/tmp/pr-<number>-src/focus.md`. Do not run `gh`, `git diff`, or `grep` to
 find a line or a callee. Do not print the chat report. Do not read or edit
-`triage.py`. Read `~/.cursor/skills-cursor/canvas/SKILL.md` once, then write
-the canvas with `Stack`, `H1`, `H2`, `Text`, `Table`, `Card`, and `Callout`
-from `cursor/canvas`. Do not open `sdk/*.d.ts`, `examples.md`, or another
-PR's canvas. Do write
+`triage.py`. Write the canvas by the **Canvas** section below. Do not open
+`sdk/*.d.ts`, `examples.md`, or another PR's canvas. Do write
 the canvas to `~/.cursor/projects/<workspace>/canvases/pr-<number>-code-path.canvas.tsx`
 with the editor Write tool in this session, so the canvas host registers it.
 A file that is only on disk, or a sidecar status of `canvas-missing`, opens
@@ -243,6 +233,60 @@ new behavior runs inside `hardware_scope`. When it is false, set `guard_line`,
 `guard_why`, and `guard_action`. Do not copy the NVIDIA line, reason, or fix
 into those fields. Triage prints each failed row as its own Line, Why, and Fix.
 `conclusion` does not decide either row.
+
+## Canvas
+
+Write `~/.cursor/projects/<workspace>/canvases/pr-<number>-code-path.canvas.tsx`
+with the editor Write tool. Import only from `cursor/canvas`. Default-export
+the top-level component. Read `~/.cursor/skills-cursor/canvas/SKILL.md` once
+for host rules. Do not open `sdk/*.d.ts`, `examples.md`, or another PR's
+canvas. This section is the layout.
+
+Use `Stack`, `Grid`, `Row`, `H1`, `H2`, `Text`, `Stat`, `Callout`, `Table`,
+`Card`, `CardHeader`, `CardBody`, `DiffView`, `DiffStats`, `Pill`, `Swatch`,
+and `useHostTheme`. Colors come from `useHostTheme()`. No hardcoded hex.
+
+Put the sections in this order:
+
+1. `H1` `PR N code path`, then one `Text tone="secondary"` naming the PR and
+   where the new statements live.
+2. `Grid columns={5}` of `Stat`, in this order: Common path changed,
+   NVIDIA execution identical, NVIDIA interface identical, NVIDIA behavior
+   identical, Hardware scope. Behavior is the numerical-result layer: Yes
+   only when original NVIDIA outputs are unchanged. The scope value is a
+   short token (`AITER`, `gfx950`, `All backends`). `tone="success"` when
+   that answer leaves NVIDIA behavior unchanged. `tone="warning"` or
+   `"danger"` when it does not.
+3. `Callout`. Title is `Can merge on this code-path question` or
+   `Cannot merge on this code-path question`. One paragraph: why the NVIDIA
+   outputs stay the same or what changes, and the guard.
+4. `Who runs the new statements`. One svg, two columns. Left is the NVIDIA
+   or common path. Right is the path that runs the new statements. A `Row`
+   legend uses `Swatch`. Each node is a rect with a title and a one-line
+   subtitle; put the PR-head line number in the title. Draw an edge only
+   for a real caller-to-callee step. Do not connect unrelated chains.
+   Unchanged NVIDIA nodes use `theme.category.green`. A common path NVIDIA
+   also executes uses `theme.category.orange`. The new guarded path uses
+   `theme.accent.primary`. Fill is `theme.bg.elevated`. Text uses
+   `theme.text.primary`, `theme.text.secondary`, and `theme.text.tertiary`.
+5. `H2` `Statements this PR adds`, then a `Table` with columns Function,
+   Line, Who executes it, What changes. One row per added statement.
+6. `DiffView` cards of the added and removed lines. `CardHeader` trailing
+   `DiffStats` counts must match the lines in that `DiffView`. Put peer
+   edits in a `Grid columns={2}`. Use a full-width card when one edit needs
+   a sentence of context.
+7. When execution flow or the internal interface is not identical, one `H2`
+   per such edit, named for that input. A `Text` states the input values.
+   A `Grid columns={2}` holds two cards: `Base condition` with `Pill`
+   `before`, and `Head condition` with `Pill` `after`. State the values,
+   whether the `if` is true, and what is stored. Do not put the trace in a
+   code comment. Then state the same `if` with the hardware values that
+   make the new branch run.
+8. `H2` `Guard`. One paragraph: the narrowest condition, which hardware it
+   includes, and any added statement outside it.
+9. When the verdict is Cannot merge, a `Callout` with the concrete code
+   change.
+10. `Text tone="tertiary" size="small"` citing the PR-head paths and lines.
 
 ## Related
 

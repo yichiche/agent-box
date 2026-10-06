@@ -1,6 +1,6 @@
 ---
 name: commit-push
-description: Commit (if needed) and push to the user's fork, with repo-aware remote selection and user confirmation before push. Changes under ~/agent-box take a standing-authorization fast path — commit and push straight to main with no confirmation. Before pushing SGLang, run the /pr-merge-triage code checks on the local branch and fix failing rows.
+description: Commit (if needed) and push to the user's fork, with repo-aware remote selection and user confirmation before push. Changes under ~/agent-box take a standing-authorization fast path — commit and push straight to main with no confirmation. Only a push to SGLang runs the /pr-merge-triage code checks. Every other repo skips them.
 category: deliver
 ---
 
@@ -53,6 +53,7 @@ git push -u origin main
 - No pre-commit config exists in agent-box; skip Step 2 there.
 - Still never commit secrets, and still never force-push.
 - Report the message and the pushed hash afterwards rather than asking beforehand.
+- Do not use `/pr-merge-triage` on this repo.
 
 Then skip to Step 7. Steps 1–6 below apply to every **other** repo, where the
 confirmation gate stays in force.
@@ -86,14 +87,16 @@ cd <repo-root> && pre-commit run --all-files
 Check if there are uncommitted changes (modified files, staged changes, or relevant untracked files):
 
 - **If there are uncommitted changes**: Invoke the `/commit` skill. Wait for it to complete successfully before proceeding.
-- **If the working tree is clean** (existing commits on the branch): Skip the commit and go to Step 3b. A clean tree still has to pass the SGLang triage gate before it is pushed.
+- **If the working tree is clean** (existing commits on the branch): Skip the commit. Go to Step 3b only when the push target is SGLang. Every other repo goes to Step 4. Do not run `/pr-merge-triage`.
 - **If HEAD is detached with no changes**: Warn the user there is nothing to push.
 
 ## Step 3b: SGLang pre-push triage
 
-Skip this step unless the repo is SGLang (`sgl-project/sglang` or the fork
-`yichiche/sglang`). `~/agent-box` already left at Step 0b. Every other repo
-skips it.
+Run this step only when the push target is SGLang: `sgl-project/sglang` or the
+fork `yichiche/sglang`. `~/agent-box` already left at Step 0b.
+
+For every other repo, do not use `/pr-merge-triage`. Do not read that skill,
+and do not run `path_cover.py` or `test_seam.py`. Skip to Step 4.
 
 Run it after Step 3 and before Step 5. Do not push until it passes.
 
@@ -122,7 +125,8 @@ Apply the rows in `~/agent-box/skills/pr-merge-triage/SKILL.md` to that diff:
 
 Accuracy and performance need measured numbers. Do not invent them, and do
 not block this push on a PR body that has not been written.
-`/commit-push-pr` still refuses to open the PR while those rows would fail.
+`/commit-push-pr` still refuses to open a SGLang PR while those rows would fail.
+It does not apply those rows to any other repo.
 
 When Affected Scope, AMD Guard, Unit Test Quality, or Flags fails, edit the
 code to the fix that row names. Then run pre-commit on the files you changed,
@@ -160,6 +164,8 @@ After user confirms, and only after Step 3b has passed for a SGLang repo:
 ```bash
 git push -u <remote> <branch-name>
 ```
+
+A non-SGLang repo does not wait on Step 3b. Push after the user confirms.
 
 ## Step 7: Verify and report
 
