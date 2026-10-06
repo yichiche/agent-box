@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """Resolve an InferenceX benchmark arm into the env block its recipe expects.
 
-This is the local stand-in for what CI does in two places:
-  utils/matrix_logic/generate_sweep_configs.py  (arm -> matrix entry)
-  runners/launch_mi355x-amds.sh:307-314          (matrix entry -> recipe path)
-
-It reads configs/amd-master.yaml and prints `export VAR=...` lines, so the
-runner can `eval` it. Nothing here re-expresses a server or client flag; the
-recipe owns those.
+This is the local stand-in for the matrix step CI runs before
+runners/slurm_utils.sh launch_srt_single_node (arm -> matrix entry -> the row's
+srt-recipe). It reads configs/amd-master.yaml and prints `export VAR=...` lines,
+so the runner can `eval` it. Nothing here re-expresses a server or client flag;
+the srt-slurm recipe owns those.
 
   resolve_arm.py --model-prefix qwen3.5 --mode fixed [--tp 2] [--framework sglang]
                  [--precision fp4] [--hw mi355x] [--spec mtp|none]
@@ -109,10 +107,16 @@ def main():
     p.add_argument("--spec", default="mtp", choices=["mtp", "none"])
     p.add_argument("--kv-offloading", default="none", choices=["none", "dram"],
                    help="agent mode: 'dram' selects the HiCache row of the same arm")
+    p.add_argument("--isl", type=int, default=8192, help="fixed mode: block to use when an arm has several")
+    p.add_argument("--osl", type=int, default=1024)
     args = p.parse_args()
 
-    infx = os.environ.get("INFERENCEX_DIR", "/home/yichiche/InferenceX")
-    cfg_path = args.config or os.path.join(infx, "configs", "amd-master.yaml")
+    e2e = os.environ.get("INFERENCEX_E2E_DIR")
+    if not e2e:
+        root = os.environ.get("INFERENCEX_DIR", "/home/yichiche/InferenceX")
+        nested = os.path.join(root, "inferencex-e2e")
+        e2e = nested if os.path.isfile(os.path.join(nested, "configs", "amd-master.yaml")) else root
+    cfg_path = args.config or os.path.join(e2e, "configs", "amd-master.yaml")
     if not os.path.isfile(cfg_path):
         die(f"config not found: {cfg_path}")
     with open(cfg_path) as f:
@@ -122,6 +126,8 @@ def main():
                              args.precision, args.hw, args.spec)
     scenario = SCENARIO_BY_MODE[args.mode]
     blocks = arm["scenarios"][scenario]
+    if args.mode == "fixed" and len(blocks) > 1:
+        blocks = [b for b in blocks if (b.get("isl"), b.get("osl")) == (args.isl, args.osl)]
     if len(blocks) != 1:
         die(f"expected exactly one {scenario} block in {arm_name}, got {len(blocks)}")
     block = blocks[0]
@@ -149,7 +155,7 @@ def main():
     spec = row.get("spec-decoding", "none")
     concs = expand_conc(row)
 
-    kv_off, kv_backend, kv_suffix = "none", "", "kvnone"
+    kv_off, kv_backend, kv_metadata, kv_suffix = "none", "", "", "kvnone"
     if args.mode == "fixed":
         isl, osl = block["isl"], block["osl"]
         exp_name = f"{args.model_prefix}_{seq_len_str(isl, osl)}"
@@ -160,24 +166,20 @@ def main():
             backend = row.get("kv-offload-backend")
             if not backend or not backend.get("name"):
                 die(f"{arm_name} tp{tp} has kv-offloading={kv_off} but no kv-offload-backend")
-            kv_backend = json.dumps(backend, separators=(",", ":"))
-            # generate_sweep_configs.py:184 agentic_kv_offload_suffix
+            # benchmark-tmpl.yml: the name alone, and the whole mapping as metadata.
+            kv_backend = backend["name"]
+            kv_metadata = json.dumps(backend, separators=(",", ":"))
             kv_suffix = f"kv{kv_off}-{backend['name']}"
-        # generate_sweep_configs.py:1188 -- EXP_NAME carries the conc, so the
-        # runner rebuilds it per concurrency; here we emit the stem only.
+        # EXP_NAME carries the conc, so the runner rebuilds it per concurrency;
+        # here we emit the stem only.
         exp_name = f"{args.model_prefix}"
 
-    # runners/launch_mi355x-amds.sh:307-314
     subdir = SUBDIR_BY_MODE[args.mode]
-    spec_suffix = "_mtp" if spec == "mtp" else ""
-    base = f"{args.model_prefix}_{args.precision}_{args.hw}"
-    with_fw = f"benchmarks/single_node/{subdir}{base}_{args.framework}{spec_suffix}.sh"
-    # FRAMEWORK_SUFFIX is empty for sglang, "_<fw>" otherwise
-    fw_suffix = "" if args.framework == "sglang" else f"_{args.framework}"
-    fallback = f"benchmarks/single_node/{subdir}{base}{fw_suffix}{spec_suffix}.sh"
-    recipe = with_fw if os.path.isfile(os.path.join(infx, with_fw)) else fallback
-    if not os.path.isfile(os.path.join(infx, recipe)):
-        die(f"neither recipe exists:\n  {with_fw}\n  {fallback}")
+    recipe = row.get("srt-recipe")
+    if not recipe:
+        die(f"{arm_name} tp{tp} has no srt-recipe; this runner only launches srt-slurm recipes")
+    if not os.path.isfile(os.path.join(e2e, recipe)):
+        die(f"srt-recipe does not exist: {os.path.join(e2e, recipe)}")
 
     out = {
         "ARM_NAME": arm_name,
@@ -200,6 +202,7 @@ def main():
         "DRAM_UTILIZATION": block.get("dram-utilization", ""),
         "KV_OFFLOADING": kv_off,
         "KV_OFFLOAD_BACKEND": kv_backend,
+        "KV_OFFLOAD_BACKEND_METADATA": kv_metadata,
         "KV_SUFFIX": kv_suffix,
     }
     for k, v in out.items():

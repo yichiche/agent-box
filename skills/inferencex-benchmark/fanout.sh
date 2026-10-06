@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Saturate an 8-GPU node with 4 concurrent TP2 InferenceMax slots.
 #
-# Each slot gets its own GPU pair, port, run dir and private /workspace mount
-# namespace, so the recipes cannot collide on the paths they hardcode.
+# Each slot gets its own GPU pair, port and run dir, so the servers, clients and
+# result files cannot collide.
 #
 # NOTE ON FIDELITY: InferenceX runs one job per node. Four concurrent TP2 jobs
 # share host CPU, PCIe and the node power cap, so absolute numbers here are not

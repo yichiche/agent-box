@@ -129,14 +129,18 @@ throughput numbers are profiling-distorted and not a benchmark result.
 | `RUN_ROOT` | `~/agent-runs/inferencemax/<prefix>_agentprof_tp<N>_<ts>` | |
 
 Everything not listed here — `DURATION`, `FULL`, `CONCURRENCIES`,
-`CUDA_VISIBLE_DEVICES`, `KV_OFFLOADING` — is `run_infmax.sh`'s and is passed
-through from the environment unchanged.
+`CUDA_VISIBLE_DEVICES`, `KV_OFFLOADING`, `SYNTHETIC_ACCEPTANCE` — is
+`run_infmax.sh`'s and is passed through from the environment unchanged.
 
 ## Load-bearing gotchas
 
 > - **All of [`/inferencex-benchmark`'s gotchas still apply](../inferencex-benchmark/SKILL.md#load-bearing-gotchas)** —
->   `/workspace` symlink, `MODEL` = HF repo id in agent mode, the `DURATION >= 900`
+>   synthetic MTP acceptance, `MODEL` = HF repo id in agent mode, the `DURATION >= 900`
 >   floor, aiperf's own uv venv on Python 3.11+, never `pkill`, never share GPUs.
+> - **The trace shows the engine CI benchmarks, not the one users run.** With the
+>   default `SYNTHETIC_ACCEPTANCE=1` the MTP verify path runs without rejection
+>   sampling and accepts the golden length. Set `SYNTHETIC_ACCEPTANCE=0` to profile
+>   real acceptance instead, and say which one a trace came from.
 > - **Do not start profiling during warmup.** Warmup requests are 1 token each.
 >   A trace captured there shows a decode-only, tiny-batch engine and will send
 >   you optimising a kernel mix the real replay never runs. This is the single
@@ -156,10 +160,9 @@ through from the environment unchanged.
 >   throughput must never be quoted.
 > - **`output_dir` in the request beats the env var.** There is no need to export
 >   `SGLANG_TORCH_PROFILER_DIR` before the recipe launches the server, which is
->   what makes a zero-touch sidecar possible. Note that `run_infmax.sh` runs the
->   recipe inside a private mount namespace with the conc dir bound at
->   `/workspace` — so the profile dir is passed as its *real* path, outside that
->   bind, and stays visible to both sides.
+>   what makes a zero-touch sidecar possible. The server, the client and the
+>   sidecar share the container's filesystem, so the profile dir is passed as its
+>   real path and stays visible to all of them.
 > - **One capture per server.** `num_steps` self-terminates the profiler; a
 >   second `/start_profile` on the same server would overwrite state mid-replay.
 >   Each concurrency point gets its own load, exactly as CI does.
