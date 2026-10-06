@@ -36,11 +36,11 @@ call this skill again.
 ## Run
 
 ```bash
-python3 ~/agent-box/skills/pr-code-path/path_cover.py 39575
-python3 ~/agent-box/skills/pr-code-path/path_cover.py https://github.com/sgl-project/sglang/pull/39575
+python3 path_cover.py 39575
+python3 path_cover.py https://github.com/sgl-project/sglang/pull/39575
 ```
 
-Run that command once. It writes `/tmp/pr-<number>-src/focus.md`: every changed
+Run these from the directory that contains this file. It writes `/tmp/pr-<number>-src/focus.md`: every changed
 function at base and at head, with line numbers. A long function is the edited
 branch plus the fallthrough after it. One level of functions that branch calls
 is included. The stdout is only an index.
@@ -286,12 +286,16 @@ Put the sections in this order:
    `document.getElementById(id)?.scrollIntoView({ behavior: "smooth" })`.
    Each section in step 5 starts with `<div id={id} />` before its `H2`. A
    right-hand node jumps to the section of the function it lives in.
-5. The behavior proof. One `Text` states the single
-   NVIDIA input. Then one `H2` per graph node, in edge order, titled with
-   that node's `function · line`. The first section is the top node. Its
-   before/after is that node's own statements, and the first sentence names
-   the callee, which is the next `H2`. Each `H2` starts with the code, then
-   the tables. The code stays:
+5. The behavior proof. Interface changes come first: a wider return, a new
+   argument, a new field. For each added name, the next table follows it to
+   the statement that reads it and names the `if`. If that `if` is false
+   unless a gfx or AITER check is true, say so in the row. A caller that
+   only forwards the value, or a helper that returns before the new work on
+   NVIDIA, goes below that follow-through under `Does not change the NVIDIA
+   store`. One `Text` states the single
+   NVIDIA input. Each `H2` is the graph node's `function · line`. Its
+   before/after is that node's own statements. Each `H2` starts with the
+   code, then the tables. The code stays:
    a `Grid columns={2}` of two cards. The left card is `Pill` `before` and the
    base statements in a `DiffView` (`type: "unchanged"`). The right card is
    `Pill` `after` and the head statements; kept lines are `unchanged`, new
@@ -318,6 +322,6 @@ Put the sections in this order:
 
 | Skill | Question it answers |
 |---|---|
-| [`/pr-merge-triage`](../pr-merge-triage/SKILL.md) | Automated pre-review gate. Consumes this skill's JSON. |
+| [`/pr-merge-triage`](../SKILL.md) | Automated pre-review gate. This skill lives in that folder. |
 | [`/pr-test-seam`](../pr-test-seam/SKILL.md) | Do the tests enter through the owning interface? |
-| [`/sglang-pr-review`](../sglang-pr-review/SKILL.md) | Is the AMD behavior correct, after pre-review passes? |
+| [`/sglang-pr-review`](../../sglang-pr-review/SKILL.md) | Is the AMD behavior correct, after pre-review passes? |

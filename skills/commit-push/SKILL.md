@@ -113,11 +113,11 @@ Apply the rows in `~/agent-box/skills/pr-merge-triage/SKILL.md` to that diff:
 1. Shape. Additions plus deletions over 800, or more than three areas, is
    `BLOCKED — SPLIT FIRST`. Stop. Do not split the branch. Do not push.
 2. Affected Scope and AMD Guard. Read
-   `~/agent-box/skills/pr-code-path/SKILL.md` once. Run
-   `python3 ~/agent-box/skills/pr-code-path/path_cover.py --diff /tmp/pre-push.diff`.
+   `~/agent-box/skills/pr-merge-triage/pr-code-path/SKILL.md` once. Run
+   `python3 ~/agent-box/skills/pr-merge-triage/pr-code-path/path_cover.py --diff /tmp/pre-push.diff`.
    This mode does not write `focus.md`. The working tree is the head.
-3. Unit Test Quality. Read `~/agent-box/skills/pr-test-seam/SKILL.md` once. Run
-   `python3 ~/agent-box/skills/pr-test-seam/test_seam.py --diff /tmp/pre-push.diff`
+3. Unit Test Quality. Read `~/agent-box/skills/pr-merge-triage/pr-test-seam/SKILL.md` once. Run
+   `python3 ~/agent-box/skills/pr-merge-triage/pr-test-seam/test_seam.py --diff /tmp/pre-push.diff`
    once, without `--json`. The row fails when `official_pass` is false,
    including a `return True` test. A coverage conclusion other than `complete`
    does not fail the row.

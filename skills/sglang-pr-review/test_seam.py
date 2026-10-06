@@ -3,5 +3,5 @@
 import runpy
 from pathlib import Path
 
-target = Path.home() / "agent-box/skills/pr-test-seam/test_seam.py"
+target = Path.home() / "agent-box/skills/pr-merge-triage/pr-test-seam/test_seam.py"
 runpy.run_path(str(target), run_name="__main__")

@@ -17,10 +17,10 @@ step moves is testing past that interface.
 ## Facts
 
 ```bash
-python3 ~/agent-box/skills/pr-test-seam/test_seam.py N
+python3 test_seam.py N
 ```
 
-Run that command once. The script lists new tests, production functions they
+Run that command once, from the directory that contains this file. The script lists new tests, production functions they
 call, production functions replaced by lambdas, and possible copied
 expressions. These are facts, not the verdict. The calibration case is PR
 39575. Do not open `examples.md`.

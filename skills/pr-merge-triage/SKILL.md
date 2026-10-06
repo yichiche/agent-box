@@ -5,11 +5,17 @@ description: >-
   user says '/pr-merge-triage', asks whether a PR is ready for human review,
   or wants a standard checklist that tells the PR owner exactly which
   requirements failed. A pass means a human may start reading the code. It
-  never approves a merge and never prints LGTM.
+  never approves a merge and never prints LGTM. This folder also contains
+  /pr-code-path and /pr-test-seam, so installing this one skill is the whole
+  pre-review.
 category: deliver
 ---
 
 # /pr-merge-triage — automated pre-review
+
+`pr-code-path/` and `pr-test-seam/` in this folder are part of this skill.
+Copy this folder and both analyses come with it. Run the scripts from the
+directory that contains this file.
 
 This is the first review pass. It replaces reading the diff by hand to decide
 whether a PR is worth a human review. The user should be able to act on the
@@ -37,7 +43,7 @@ links and the code-path canvas link; do not omit them.
 ```bash
 # 1. Shape. Stop if it says SPLIT FIRST, unless the user explicitly asked
 #    to continue.
-python3 ~/agent-box/skills/pr-merge-triage/triage.py N --shape
+python3 triage.py N --shape
 
 # 2. Judgment files. Follow each skill's Run section once. If this session
 #    already followed that skill, do not read it again.
@@ -50,8 +56,10 @@ python3 ~/agent-box/skills/pr-merge-triage/triage.py N --shape
 #    Read ~/.cursor/skills-cursor/canvas/SKILL.md once. Do not open
 #    sdk/*.d.ts, examples.md, or another PR's canvas.
 #    Do not print those reports.
-#    ~/agent-box/skills/pr-code-path/SKILL.md
-#    ~/agent-box/skills/pr-test-seam/SKILL.md
+#    pr-code-path/SKILL.md
+#    pr-test-seam/SKILL.md
+#    python3 pr-code-path/path_cover.py N
+#    python3 pr-test-seam/test_seam.py N
 #    Canvas: ~/.cursor/projects/<workspace>/canvases/pr-N-code-path.canvas.tsx
 #    Write that canvas with the editor in this session. A disk-only file, or
 #    a sidecar status of canvas-missing, opens as canvas not found. If the
@@ -59,7 +67,7 @@ python3 ~/agent-box/skills/pr-merge-triage/triage.py N --shape
 
 # 3. The only user-facing report. Pass the judgment files even when step 1
 #    said SPLIT FIRST and the user asked to continue.
-python3 ~/agent-box/skills/pr-merge-triage/triage.py N \
+python3 triage.py N \
   --code-path /tmp/pr-N-code-path.json \
   --test-seam /tmp/pr-N-test-seam.json
 ```
@@ -210,7 +218,7 @@ pass. The guard is `gfx950`, not all AMD. Coverage is `mixed`: the recompress
 tests step past `_forward_impl`. That does not fail Unit Test Quality, because
 `official_pass` is true. The row stays passing.
 
-`python3 ~/agent-box/skills/pr-merge-triage/triage.py --calibrate` locks the
+`python3 triage.py --calibrate` locks the
 two rows apart:
 
 | Example | Affected Scope | AMD Guard |
