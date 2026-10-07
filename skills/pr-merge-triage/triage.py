@@ -12,7 +12,9 @@ A coverage conclusion other than `complete` does not fail the row. Missing
 judgments stay BLOCKED.
 
     python3 triage.py 41870 --shape
+    python3 triage.py 41870 --manifest
     python3 triage.py 41870 --excerpt
+    python3 triage.py 41870 --shape --split /tmp/pr-41870-split.json
     python3 triage.py 41870 --code-path /tmp/pr-41870-code-path.json \
         --test-seam /tmp/pr-41870-test-seam.json \
         --prose /tmp/pr-41870-prose.json
@@ -237,6 +239,7 @@ def analyse(pr: str, repo: str) -> dict:
         "has_accuracy": has_accuracy, "has_perf": has_perf,
         "head_sha": meta.get("headRefOid") or "",
         "body": raw_body,
+        "file_stats": build_file_stats(files),
     }
 
 
@@ -302,21 +305,50 @@ PROCEED = "PROCEED"
 HARDWARE_SCOPES = {"all_backends", "all_amd", "aiter", "gfx950", "gfx94", "other"}
 CODE_CONCLUSIONS = {"can_merge", "cannot_merge"}
 SEAM_CONCLUSIONS = {"complete", "mixed", "past_the_seam", "reimplements", "no_test"}
+LINE_LIMIT = 800
+AREA_LIMIT = 3
+AREA_CLASSES = {"amd", "common", "hot-common"}
+SPLIT_RULE = (
+    "One PR adds one feature and tests it on one model. "
+    "A second feature, or a second tested model, lands next. "
+    "A second model can stay only when it calls the same helper, "
+    "the model change is a few dozen lines, and it adds no test."
+)
 
 
 def row(check: str, verdict: str, evidence: str, action: str = "") -> dict:
     return {"check": check, "verdict": verdict, "evidence": evidence, "action": action}
 
 
+def area_of(path: str) -> str:
+    """Directory bucket. Under python/sglang/srt/ this is the fourth segment."""
+    parts = path.split("/")
+    if path.startswith("python/sglang/srt/") and len(parts) > 4:
+        return parts[3]
+    return parts[0]
+
+
 def _areas(paths: list[str]) -> set[str]:
-    areas = set()
-    for path in paths:
-        parts = path.split("/")
-        if path.startswith("python/sglang/srt/") and len(parts) > 4:
-            areas.add(parts[3])
-        else:
-            areas.add(parts[0])
-    return areas
+    return {area_of(path) for path in paths}
+
+
+def build_file_stats(files: list[dict]) -> list[dict]:
+    stats = []
+    for f in files:
+        klass = classify_path(f["path"])
+        add = sum(len(h["added"]) for h in f["hunks"])
+        dele = sum(len(h["removed"]) for h in f["hunks"])
+        stats.append({
+            "path": f["path"],
+            "add": add,
+            "del": dele,
+            "lines": add + dele,
+            "class": klass,
+            "area": area_of(f["path"]),
+            "counts_area": klass in AREA_CLASSES,
+            "hunks": [h["header"] for h in f["hunks"]],
+        })
+    return stats
 
 
 def collect_envs(files: list[dict]) -> list[dict]:
@@ -414,20 +446,19 @@ def flag_rows(envs: list[dict]) -> list[dict]:
     return [row("Flags", FAIL, " ".join(parts), " ".join(actions))]
 
 
-def shape_rows(a: dict) -> list[dict]:
+def shape_rows(a: dict, split: dict | None = None, split_error: str = "") -> list[dict]:
     meta = a["meta"]
     total = meta["additions"] + meta["deletions"]
     paths = (a["amd_files"] + a["common_files"] + a["new_files"] + a["additive_files"])
-    a["oversized"] = total > 800 or len(_areas(paths)) > 3
+    areas = _areas(paths)
+    a["oversized"] = total > LINE_LIMIT or len(areas) > AREA_LIMIT
     rows = []
-    if a["oversized"]:
-        rows.append(row(
-            "One concern", FAIL,
-            f"+{meta['additions']}/-{meta['deletions']} across "
-            f"{len(_areas(paths))} areas",
-            "Split this PR before review. Land one concern at a time: "
-            "kernel and its test, then the wiring, then any default change.",
-        ))
+    concern = _concern_row(
+        a, split, split_error,
+        f"+{meta['additions']}/-{meta['deletions']} across {len(areas)} areas",
+    )
+    if concern is not None:
+        rows.append(concern)
 
     rows.extend(flag_rows(a["new_envs"]))
 
@@ -456,6 +487,184 @@ def shape_rows(a: dict) -> list[dict]:
     else:
         rows.append(row("Performance evidence", PASS, "No kernel source is touched."))
     return rows
+
+
+def _one_line(value, key: str, problems: list[str]) -> str:
+    text = str(value or "").strip()
+    if not text:
+        problems.append(key)
+    elif "\n" in text:
+        problems.append(f"{key} must be one line")
+    return text
+
+
+def _string_list(value, key: str, problems: list[str]) -> list[str]:
+    if not isinstance(value, list):
+        problems.append(f"{key} must be an array")
+        return []
+    found = []
+    for index, item in enumerate(value, 1):
+        text = _one_line(item, f"{key} {index}", problems)
+        if text:
+            found.append(text)
+    return found
+
+
+def _stats_oversized(stats: list[dict]) -> bool:
+    total = sum(item.get("lines") or 0 for item in stats)
+    areas = {item["area"] for item in stats if item.get("counts_area")}
+    return total > LINE_LIMIT or len(areas) > AREA_LIMIT
+
+
+def validate_split(data: dict, stats: list[dict] | None = None) -> list[str]:
+    """One feature, tested on one model. Suggestions stay high level."""
+    problems: list[str] = []
+    feature = _one_line(data.get("feature"), "feature", problems)
+    model = _one_line(data.get("model"), "model", problems)
+    also_features = _string_list(data.get("also_features"), "also_features", problems)
+    also_models = _string_list(data.get("also_models"), "also_models", problems)
+    raw_simple = data.get("simple_models")
+    raw_suggestions = data.get("suggestions")
+    if not isinstance(raw_simple, list):
+        problems.append("simple_models must be an array")
+        raw_simple = []
+    if not isinstance(raw_suggestions, list):
+        problems.append("suggestions must be an array")
+        raw_suggestions = []
+    simple = []
+    for index, item in enumerate(raw_simple, 1):
+        if not isinstance(item, dict):
+            problems.append(f"simple_models {index} must be an object")
+            continue
+        name = _one_line(item.get("name"), f"simple_models {index} name", problems)
+        why = _one_line(item.get("why"), f"simple_models {index} why", problems)
+        if name and why:
+            simple.append({"name": name, "why": why})
+    suggestions = []
+    for index, item in enumerate(raw_suggestions, 1):
+        text = _one_line(item, f"suggestions {index}", problems)
+        if text:
+            suggestions.append(text)
+    multi = bool(also_features or also_models)
+    oversized = _stats_oversized(stats or [])
+    if multi and len(suggestions) < 2:
+        problems.append("suggestions must name the first PR and each extra feature or model")
+    elif oversized and not suggestions:
+        problems.append("suggestions must say how to cut this PR so one feature on one model can be reviewed")
+    if problems:
+        return problems
+    data["feature"] = feature
+    data["model"] = model
+    data["also_features"] = also_features
+    data["also_models"] = also_models
+    data["simple_models"] = simple
+    data["suggestions"] = suggestions
+    return []
+
+
+def format_split(plan: dict, stats: list[dict] | None = None) -> str:
+    del stats
+    lines = [
+        f"Feature: {plan['feature']}",
+        f"Model: {plan['model']}",
+    ]
+    if plan.get("also_features"):
+        lines.append("Also features: " + "; ".join(plan["also_features"]))
+    if plan.get("also_models"):
+        lines.append("Also tested on: " + "; ".join(plan["also_models"]))
+    for item in plan.get("simple_models") or []:
+        lines.append(f"Simple enough to keep: {item['name']} — {item['why']}")
+    suggestions = plan.get("suggestions") or []
+    if suggestions:
+        lines.append("Suggestion:")
+        for index, text in enumerate(suggestions, 1):
+            lines.append(f"{index}. {text}")
+    return "\n".join(lines)
+
+
+def _concern_row(a: dict, split: dict | None, split_error: str, size: str) -> dict | None:
+    if split_error:
+        item = row("One concern", FAIL, size if a.get("oversized") else "The split judgment is incomplete.", SPLIT_RULE)
+        item["split_text"] = "Split plan is not acceptable:\n" + split_error
+        item["action"] = item["split_text"]
+        return item
+    if split is None:
+        if a.get("oversized"):
+            return row("One concern", FAIL, size, SPLIT_RULE)
+        return None
+    extra_features = split.get("also_features") or []
+    extra_models = split.get("also_models") or []
+    if a.get("oversized") and not (split.get("suggestions") or []):
+        item = row("One concern", FAIL, size, SPLIT_RULE)
+        item["split_text"] = (
+            "Split plan is not acceptable:\n"
+            "- suggestions must say how to cut this PR so one feature on one model can be reviewed"
+        )
+        item["action"] = item["split_text"]
+        return item
+    multi = bool(extra_features or extra_models)
+    if not multi and not a.get("oversized"):
+        return row(
+            "One concern", PASS,
+            f"One feature ({split['feature']}) on {split['model']}.",
+        )
+    parts = []
+    if extra_features:
+        parts.append(f"{len(extra_features) + 1} features")
+    if extra_models:
+        parts.append(f"tested on {len(extra_models) + 1} models")
+    if a.get("oversized"):
+        parts.append(size)
+    item = row("One concern", FAIL, "; ".join(parts), SPLIT_RULE)
+    item["split_text"] = format_split(split)
+    item["action"] = item["split_text"]
+    return item
+
+
+def load_split(path: str, stats: list[dict]) -> tuple[dict | None, str]:
+    try:
+        data = json.loads(open(path, encoding="utf-8").read())
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"split judgment JSON could not be read: {exc}"
+    if not isinstance(data, dict):
+        return None, "split judgment JSON must be an object"
+    problems = validate_split(data, stats)
+    if problems:
+        return data, "\n".join(f"- {item}" for item in problems)
+    return data, ""
+
+
+def manifest_text(a: dict) -> str:
+    """File buckets and hunk headers. This is the input to a split plan."""
+    stats = a.get("file_stats") or []
+    meta = a["meta"]
+    total = meta["additions"] + meta["deletions"]
+    area_paths = [item["path"] for item in stats if item["counts_area"]]
+    areas = sorted(_areas(area_paths))
+    oversized = total > LINE_LIMIT or len(areas) > AREA_LIMIT
+    lines = [
+        f"total +{meta['additions']}/-{meta['deletions']} "
+        f"gate_lines {total} areas {len(areas)} ({', '.join(areas) or 'none'}) "
+        f"oversized {'yes' if oversized else 'no'}",
+        "",
+        "class        area           lines  path",
+    ]
+    for item in sorted(stats, key=lambda s: (s["area"], s["path"])):
+        lines.append(
+            f"{item['class']:<12} {item['area']:<14} {item['lines']:>5}  {item['path']}"
+        )
+    lines.extend(["", "## hunks"])
+    for item in sorted(stats, key=lambda s: s["path"]):
+        if item["class"] == "test":
+            continue
+        headers = item["hunks"]
+        for header in headers[:12]:
+            lines.append(f"{item['path']} {header}")
+        extra = len(headers) - 12
+        if extra > 0:
+            lines.append(f"{item['path']} … {extra} more hunks")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _bool_field(data: dict, key: str, problems: list[str]) -> None:
@@ -722,7 +931,6 @@ def prose_rows(prose: dict | None, error: str) -> list[dict]:
     return [row("PR body", FAIL, evidence, prose.get("action", "").strip())]
 
 
-
 def notes(a: dict) -> list[str]:
     title = a["meta"].get("title") or ""
     if re.search(r"bugfix|bug[- ]fix|\[fix\]", title, re.I):
@@ -786,6 +994,11 @@ def owner_comment(pr: str, title: str, verdict: str, rows: list[dict]) -> str:
     ]
     for index, item in enumerate(failed, 1):
         lines.append(f"{index}. {item['check']}")
+        if item["check"] == "One concern" and item.get("split_text"):
+            lines.append(f"   {item['evidence']}")
+            for raw in item["split_text"].splitlines():
+                lines.append(f"   {raw}" if raw else "")
+            continue
         if item["check"] == "Affected Scope" and item.get("nvidia_diff_line"):
             lines.append(f"   Line: {item['nvidia_diff_line']}")
             lines.append(f"   Why: {item['nvidia_diff_why']}")
@@ -931,7 +1144,12 @@ def render(pr: str, a: dict, rows: list[dict], verdict: str, shape_only: bool) -
     if failed:
         lines.extend(["", "### What has to change"])
         for index, item in enumerate(failed, 1):
-            lines.append(f"{index}. **{item['check']}** — {item['action']}")
+            if item.get("split_text"):
+                lines.append(f"{index}. **{item['check']}**")
+                for raw in item["split_text"].splitlines():
+                    lines.append(f"   {raw}" if raw else "")
+            else:
+                lines.append(f"{index}. **{item['check']}** — {item['action']}")
     if shown in (SPLIT, FAILED):
         lines.extend(["", "### Owner comment", "", "```",
                       owner_comment(pr, meta["title"], shown, rows), "```"])
@@ -980,6 +1198,7 @@ def calibrate() -> int:
                 problems.append(f"{name}: AITER import failure is missing from the owner comment")
             if "Line:" in comment.split("1. AMD Guard", 1)[-1]:
                 problems.append(f"{name}: an AITER-import failure was formatted as a line escape")
+    problems.extend(calibrate_split())
     if problems:
         print("calibration failed")
         for item in problems:
@@ -988,7 +1207,58 @@ def calibrate() -> int:
     print("calibration ok")
     for name, uses_aiter, scope_verdict, guard_verdict, kind in cases:
         print(f"- {name}: Affected Scope {scope_verdict}, AMD Guard {guard_verdict}")
+    print("- split plan: one feature, one tested model")
     return 0
+
+
+def calibrate_split() -> list[str]:
+    """One feature on one model passes. A second feature or model needs a suggestion."""
+    one = {
+        "feature": "Fuse the quant into the entry norm.",
+        "model": "the benchmark model",
+        "also_features": [],
+        "also_models": [],
+        "simple_models": [],
+        "suggestions": [],
+    }
+    problems = []
+    if validate_split(one, []):
+        problems.append("one feature on one model was rejected")
+    elif "Feature:" not in format_split(one):
+        problems.append("split text dropped the feature")
+    blank = json.loads(json.dumps(one))
+    blank["feature"] = ""
+    if not any(item == "feature" for item in validate_split(blank, [])):
+        problems.append("empty feature did not fail")
+    multi = json.loads(json.dumps(one))
+    multi["also_features"] = ["Decode projection", "Prefill projection"]
+    multi["also_models"] = ["A second model with its own accuracy test"]
+    multi["suggestions"] = [
+        "First PR: the entry fold on the benchmark model.",
+        "Then: the other projections on that model.",
+        "Then: the second model on its own.",
+    ]
+    multi["simple_models"] = [{
+        "name": "A guarded model",
+        "why": "It calls the same helper, the change is a few dozen lines, and it adds no test.",
+    }]
+    if validate_split(multi, []):
+        problems.append("multi-feature plan was rejected: " + "; ".join(validate_split(json.loads(json.dumps(multi)), [])))
+    else:
+        text = format_split(multi)
+        if "Also features:" not in text or "Also tested on:" not in text or "Suggestion:" not in text:
+            problems.append("split text dropped a feature or model")
+        if "python/" in text:
+            problems.append("split text listed files")
+    missing = json.loads(json.dumps(multi))
+    missing["suggestions"] = []
+    if not any("suggestions" in item for item in validate_split(missing, [])):
+        problems.append("a second feature without a suggestion did not fail")
+    vague = json.loads(json.dumps(one))
+    vague["simple_models"] = [{"name": "Other", "why": ""}]
+    if not any("why" in item for item in validate_split(vague, [])):
+        problems.append("a simple-model exception without a reason did not fail")
+    return problems
 
 
 def main() -> None:
@@ -1000,6 +1270,10 @@ def main() -> None:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--shape", action="store_true",
                         help="shape checks only; stop before code-path and test-seam")
+    parser.add_argument("--manifest", action="store_true",
+                        help="print file areas, line counts, and hunk headers, then exit")
+    parser.add_argument("--split", metavar="PATH",
+                        help="feature and model judgment JSON")
     parser.add_argument("--code-path", metavar="PATH",
                         help="/pr-code-path judgment JSON")
     parser.add_argument("--test-seam", metavar="PATH",
@@ -1021,13 +1295,23 @@ def main() -> None:
         print(excerpt(meta.get("body") or ""), end="")
         return
     data = analyse(pr, args.repo)
-    rows = shape_rows(data)
+    if args.manifest:
+        print(manifest_text(data), end="")
+        return
+    split = None
+    split_error = ""
+    if args.split:
+        split, split_error = load_split(args.split, data.get("file_stats") or [])
+    rows = shape_rows(data, split, split_error)
     # Judgment files mean the user continued past a split. Score every row.
-    # Shape-only, and an oversized PR with no judgment files, still stop here.
+    # Shape-only, and a PR that is more than one concern, still stop here.
     continued = bool(args.code_path or args.test_seam or args.prose)
-    if args.shape or (data.get("oversized") and not continued):
+    concern_failed = any(
+        item["check"] == "One concern" and item["verdict"] == FAIL for item in rows
+    )
+    if args.shape or (concern_failed and not continued):
         shown = rows
-        verdict = SPLIT if data.get("oversized") else PROCEED
+        verdict = SPLIT if concern_failed else PROCEED
         payload = {"pr": pr, "verdict": verdict, "rows": shown}
         if args.json:
             print(json.dumps(payload, indent=2))

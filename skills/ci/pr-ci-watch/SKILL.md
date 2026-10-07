@@ -43,6 +43,8 @@ Entries render as a markdown bullet with the perf line nested under it —
 `- <P0><CI clear><PR41134>Title` / `  - TPOT 6.3% improvement`. The rich flavour
 is a real nested `<ul>`, so a paste into Teams lands as a proper list; the plain
 flavour uses `- ` and two-space indent, which Teams also turns into bullets.
+In the rich flavour, `CI clear` is wrapped in `<b>`, so that token is bold on
+the page and stays bold in Teams. Other tokens are not.
 
 Line 2 of each entry is the PR's **own performance claim**, extracted from its
 body by `perf.py` — not the CI triage reason. It reads the markdown result
@@ -756,7 +758,7 @@ or `41870`.
 | `Re-run CI` (Act now) | `apply-verdict --action re-run --force-auto` — re-runs the failing workflows now, skipping triage. Overwrites the stored verdict | no |
 | `Update branch` (Act now) | `PUT /pulls/{n}/update-branch` — GitHub merges main into the PR branch server-side, attributed to you. Cannot rewrite the author's commits, cannot resolve a conflict. Confirms first | no |
 | `Copy` (triage panel) | Copies `/pr-ci-watch triage <prs>` to paste into Claude | yes, to run it |
-| `Copy` (status block) | Copies the `<P0><CI clear><PR…>` report as **rich text + plain text**, so `<PR41133>` stays a hyperlink when pasted into Teams | no |
+| `Copy` (status block) | Copies the `<P0><CI clear><PR…>` report as **rich text + plain text**. `CI clear` is `<b>` in the rich flavour, and `<PR41133>` stays a hyperlink when pasted into Teams | no |
 
 Both `Copy` buttons degrade: rich clipboard → `navigator.clipboard.writeText`
 → `document.execCommand` → revealing the plain-text box with the content

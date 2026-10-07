@@ -5,9 +5,10 @@ description: >-
   user says '/pr-merge-triage', asks whether a PR is ready for human review,
   or wants a standard checklist that tells the PR owner exactly which
   requirements failed. A pass means a human may start reading the code. It
-  never approves a merge and never prints LGTM. This folder also contains
-  /pr-code-path and /pr-test-seam, so installing this one skill is the whole
-  pre-review.
+  never approves a merge and never prints LGTM. One PR adds one feature and
+  tests it on one model. A second feature or a second tested model is split
+  out. This folder also contains /pr-code-path and /pr-test-seam, so
+  installing this one skill is the whole pre-review.
 category: deliver
 ---
 
@@ -41,9 +42,20 @@ code-path report or the test-seam report. The script output includes the CI
 links and the code-path canvas link; do not omit them.
 
 ```bash
-# 1. Shape. Stop if it says SPLIT FIRST, unless the user explicitly asked
-#    to continue.
+# 1. Shape, then the feature and model judgment.
+#    The chat reply is the --split output, not the --shape output.
+#    Do not paste the manifest or the excerpt.
 python3 triage.py N --shape
+python3 triage.py N --manifest
+python3 triage.py N --excerpt
+# Write /tmp/pr-N-split.json from the Split section below.
+# Use the manifest and the excerpt. Do not run gh, git diff, or a code-path review.
+python3 triage.py N --shape --split /tmp/pr-N-split.json
+# If the report says the split plan is not acceptable, fix the JSON and
+# re-run this command.
+# On BLOCKED — SPLIT FIRST, stop. Do not start step 2 unless the user
+# asked to continue past the split.
+# On PROCEED, continue to step 2.
 
 # 2. Judgment files. Follow each skill's Run section once. If this session
 #    already followed that skill, do not read it again.
@@ -86,10 +98,10 @@ python3 triage.py N \
 
 `N` may be a PR number or a GitHub pull URL.
 
-On `BLOCKED — SPLIT FIRST`, stop after step 1 unless the user explicitly asked
-to continue. Continuing runs steps 2 and 3. The verdict stays
+On `BLOCKED — SPLIT FIRST`, stop after the `--split` report unless the user
+explicitly asked to continue. Continuing runs steps 2 and 3. The verdict stays
 `BLOCKED — SPLIT FIRST` while One concern fails, and the other rows are part
-of that report.
+of that report. The owner comment is the high-level suggestion from that report.
 
 On `BLOCKED — AUTOMATION INCOMPLETE`, the judgment files are missing or do not
 match the schema. Finish them and re-run step 3. Do not fill a blocked row by
@@ -99,6 +111,7 @@ hand and do not ack it.
 
 | Check | Source | Fail means |
 |---|---|---|
+| One concern | split JSON, with size as a backstop | more than one feature, or tests on more than one model, or the diff is over 800 lines or 3 areas. The action is a high-level suggestion |
 | Affected Scope | `/pr-code-path` JSON | NVIDIA numerical results or original behavior are not identical |
 | AMD Guard | `/pr-code-path` JSON, plus an AITER import in the diff | the new behavior is outside the claimed guard, or AITER is imported under a scope other than `aiter` |
 | Unit Test Quality | `/pr-test-seam` JSON | the contribution-guide test bar fails (`official_pass` is false). Coverage other than `complete` does not fail the row |
@@ -134,7 +147,7 @@ SGLANG_ALLOW_ACCURACY_LOSS = EnvBool(False)
 SGLANG_USE_MXFP4_GEMM = EnvBool(False)  # fails: this is a platform check
 ```
 
-A PR that is too large, or that spans more than three areas, still stops as `BLOCKED — SPLIT FIRST`. That row is shown only when it fails.
+One concern fails when the PR adds more than one feature, or tests the change on more than one model. A diff over 800 lines or 3 areas still fails too, as a backstop, including when the feature and the model are already one each. The suggestion names the feature and the model. It does not list files.
 
 Hunk-level `is_hip` token matches are not a verdict. An import of `is_hip`
 does not mean the behavior applies to all AMD GPUs. The hardware scope string
@@ -151,6 +164,59 @@ not read `conclusion` or `nvidia_behavior_identical`. A NVIDIA behavior change
 does not fail AMD Guard. A guard that lets the wrong AMD GPU in does not fail
 Affected Scope. When both fail, the owner comment gives each row its own line,
 reason, and fix.
+
+## Split
+
+Write `/tmp/pr-N-split.json` after `--manifest` and `--excerpt`, for every PR. The judgment is the feature and the model. Do not list files.
+
+One PR adds one feature and tests it on one model.
+
+A feature is a behavior a reviewer can accept or reject on its own. A second projection, a second hardware path, or a second kernel is another feature. Two files that implement the same behavior are one feature.
+
+A tested model is one the PR reports accuracy, performance, or a model-level test for. The model named in that report is `model`. Every other tested model is `also_models`.
+
+A model that is only guarded so the new behavior does not reach it is not a tested model. Put it in `simple_models` only when all three hold: it calls a helper the first model already uses, the model-file change is a few dozen lines, and the PR adds no test for it. Otherwise it is `also_models`.
+
+`feature` is the one behavior the first PR should land. `also_features` is every other behavior in this diff.
+
+`suggestions` are sentences, not paths. The first sentence is that one feature on that one model. Each extra feature or extra model gets its own later sentence. A second model that passes the three simple-model checks stays with the PR that owns the helper. Say so in one sentence. Do not give it a PR of its own.
+
+The 800-line and 3-area gate is a backstop. One feature on one model that is still over that gate needs a suggestion that says what to cut so a person can review it. Do not satisfy the backstop with a file tree.
+
+```json
+{
+  "feature": "Fuse the quant into the entry norm.",
+  "model": "the model named in the benchmark",
+  "also_features": ["The decode projection", "The prefill projection"],
+  "also_models": ["A second model that has its own accuracy test"],
+  "simple_models": [
+    {
+      "name": "A guarded model",
+      "why": "It calls the same helper, the change is a few dozen lines, and it adds no test."
+    }
+  ],
+  "suggestions": [
+    "First PR: the entry fold on the benchmark model, with that path's check.",
+    "Then: the other projections on that same model.",
+    "Then: the second model on its own, with its own tests."
+  ]
+}
+```
+
+One feature on one model, inside the size gate:
+
+```json
+{
+  "feature": "Fuse the quant into the entry norm.",
+  "model": "the model named in the benchmark",
+  "also_features": [],
+  "also_models": [],
+  "simple_models": [],
+  "suggestions": []
+}
+```
+
+The script rejects a second feature or a second tested model that has no suggestion, and a simple-model entry whose `why` is empty. Fix the JSON and re-run. Do not paste a plan the script rejected.
 
 ## Code-path JSON
 
@@ -223,6 +289,7 @@ is required when `official_pass` is false, and it is the concrete test change.
 `no_test`. Record it. It does not fail Unit Test Quality. Only `official_pass`
 does. Every conclusion other than `complete` still requires `missing_test`,
 naming the production interface, the trigger, and the observable result.
+
 
 ## PR body
 
