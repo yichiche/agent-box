@@ -176,6 +176,45 @@ When borderline (overlapping area but environmental), default to **no** and expl
 
 **Goal:** Decide **Action** (`re-run`, `merge main`, `code fix`, `wait upstream`) by checking whether the same error already has an issue/PR fix — without searching one job at a time.
 
+### Step 0: Ask the tracking issue first — it is one call and usually decides it
+
+`sgl-project/sglang#17050` (`[Tracking] CI Test Failures and Fixes`) is
+auto-updated about hourly from **scheduled CI on `main`**. Ask it before
+searching issues or comparing to main:
+
+```bash
+python3 ~/agent-box/skills/ci/ci-analysis/known_failure.py test_glm53_flash_b200.py
+```
+
+One row per test file, and the two sections are disjoint, so you get exactly
+one of three answers:
+
+| Answer | What it means | Action |
+|---|---|---|
+| **ONGOING**, `N% fail` | main fails it too, at a measured rate | `re-run` — a known flake is not your PR |
+| **ONGOING**, `100% fail` | main is broken on it, not flaky | `wait upstream` — a re-run cannot clear it |
+| **FIXED**, with a date | main stopped failing it that day | `merge main`, **after the two checks below** |
+| **NOT LISTED** | main's schedule has not seen it | fall through to Step 1 — this said nothing |
+
+The flake rate is the big win: `2% fail (85/4770)` settles `re-run` vs
+`code fix` with no log read at all, and it is a number nothing else here gives
+you.
+
+**Two things it never tells you.** The tool prints main's recorded signature
+for exactly this reason:
+
+1. **Does your error match that signature?** The issue keys on test *file*. A
+   different failure of the same file is a different problem.
+2. **Does your PR touch that test or the code under it?** If so the verdict is
+   `code fix` however well the signature matches. #39575 hit the exact recorded
+   `test_qsa.py` signature while main had already fixed it, and was still
+   `code fix`: the PR had added the same read and fixed only one of the two
+   fixtures. A match is necessary, never sufficient.
+
+`FIXED` prints as `merge-main?` with the question mark for that reason. Also
+note the issue's `Fix` column is empty on all 1155 rows — it gives a **date** to
+compare a branch against, never a fixing PR, so Phase 5's `compare` still runs.
+
 ### Step 1: Dedupe error signatures across root-cause jobs
 
 From Phase 2 logs, extract one **signature** per distinct failure (not per job):
@@ -190,7 +229,7 @@ From Phase 2 logs, extract one **signature** per distinct failure (not per job):
 
 If 3 jobs share the same signature → **one lookup**, not three.
 
-**Budget:** max **3 issue searches** and **1 compare-to-main** per analysis. Skip lookup when Related is clearly **yes** (PR regression — Action is `code fix`).
+**Budget:** max **3 issue searches** and **1 compare-to-main** per analysis — and Step 0 often removes the need for any of them. Skip lookup when Related is clearly **yes** (PR regression — Action is `code fix`).
 
 ### Step 2: One batched search per signature
 
@@ -259,6 +298,10 @@ gh search issues --repo sgl-project/sglang "gsm8k 0.92 quark mxfp4" --limit 3 --
 → Related: **no** (Qwen3 MoE MXFP4 eval; PR touches Qwen3.5 GDN only; exact threshold boundary). Action: **re-run**.
 
 ## Phase 5: Check If main Already Fixed It
+
+Phase 4.5 Step 0 usually answers this first, and when it returns **FIXED** it
+hands you a date rather than a commit — the tracking issue's `Fix` column is
+empty on every row. The compare below is what turns that date into evidence.
 
 When failures look like known infra or test-harness bugs:
 
