@@ -6,13 +6,16 @@ the code. It is never a merge approval.
 
 Shape (size, flags, evidence) comes from the diff. Affected scope and the AMD
 guard come only from a /pr-code-path judgment JSON. Unit-test quality comes
-only from a /pr-test-seam judgment JSON. The contribution-guide bar
-(`official_pass`) has to hold. A coverage conclusion other than `complete`
-does not fail the row. Missing judgments stay BLOCKED.
+only from a /pr-test-seam judgment JSON. PR-body wording comes only from a
+prose judgment JSON. The contribution-guide bar (`official_pass`) has to hold.
+A coverage conclusion other than `complete` does not fail the row. Missing
+judgments stay BLOCKED.
 
     python3 triage.py 41870 --shape
+    python3 triage.py 41870 --excerpt
     python3 triage.py 41870 --code-path /tmp/pr-41870-code-path.json \
-        --test-seam /tmp/pr-41870-test-seam.json
+        --test-seam /tmp/pr-41870-test-seam.json \
+        --prose /tmp/pr-41870-prose.json
 """
 
 from __future__ import annotations
@@ -212,7 +215,8 @@ def analyse(pr: str, repo: str) -> dict:
     uses_aiter = any(AITER_IMPORT.search(l) for l in added)
     uses_is_hip = any(re.search(r"\bis_hip\b", l) for l in added)
 
-    body = (meta.get("body") or "").lower()
+    raw_body = meta.get("body") or ""
+    body = raw_body.lower()
     has_accuracy = bool(re.search(r"gsm8k|mmlu|mmmu|accuracy|lm.?eval", body))
     has_perf = bool(re.search(r"throughput|ttft|tpot|latency|tok/s|speedup|us/|µs", body))
 
@@ -232,6 +236,7 @@ def analyse(pr: str, repo: str) -> dict:
         "guard_examples": guard_examples(files),
         "has_accuracy": has_accuracy, "has_perf": has_perf,
         "head_sha": meta.get("headRefOid") or "",
+        "body": raw_body,
     }
 
 
@@ -604,6 +609,120 @@ def test_rows(seam: dict | None, error: str) -> list[dict]:
     return [row("Unit Test Quality", FAIL, evidence, action)]
 
 
+_PROSE_SKIP = {
+    "checklist",
+    "review and merge process",
+    "ci states",
+}
+_PROSE_REQUIRED = ("motivation", "modifications")
+_HEADING = re.compile(r"^#{2,3}\s+(.+?)\s*$")
+
+
+def _strip_html_comments(text: str) -> str:
+    return re.sub(r"<!--.*?-->", "", text, flags=re.S)
+
+
+def _prose_lines(text: str) -> str:
+    kept = []
+    blank = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("|") or stripped.startswith("<img") or stripped.startswith("!["):
+            continue
+        if re.match(r"^[-*]\s+\[[ xX]\]", stripped):
+            continue
+        if not stripped:
+            blank += 1
+            if blank > 1:
+                continue
+            kept.append("")
+            continue
+        blank = 0
+        kept.append(line.rstrip())
+    return "\n".join(kept).strip()
+
+
+def _heading_key(title: str) -> str:
+    return re.sub(r"\s+", " ", title).strip().lower()
+
+
+def excerpt(body: str) -> str:
+    """Motivation and the other explanatory sections, without tables or boilerplate."""
+    sections: list[tuple[str, str]] = []
+    title = ""
+    buf: list[str] = []
+
+    def flush() -> None:
+        nonlocal title, buf
+        sections.append((title, "\n".join(buf)))
+        title = ""
+        buf = []
+
+    for line in _strip_html_comments(body or "").splitlines():
+        match = _HEADING.match(line.strip())
+        if match:
+            flush()
+            title = match.group(1).strip()
+        else:
+            buf.append(line)
+    flush()
+
+    parts = []
+    saw = set()
+    for title, raw in sections:
+        key = _heading_key(title)
+        if key in _PROSE_SKIP:
+            continue
+        prose = _prose_lines(raw)
+        if key:
+            saw.add(key)
+        if not prose:
+            continue
+        parts.append(f"## {title or 'Body'}\n{prose}")
+    missing = [name for name in _PROSE_REQUIRED if name not in saw]
+    if missing:
+        parts.insert(0, "Missing section: " + ", ".join(missing) + ".")
+    return ("\n\n".join(parts).strip() + "\n") if parts else "Missing section: motivation, modifications.\n"
+
+
+PROSE_PASS_AT = 7
+
+
+def _prose_score(data: dict):
+    score = data.get("score")
+    if isinstance(score, bool) or not isinstance(score, int):
+        return None
+    if not 1 <= score <= 10:
+        return None
+    return score
+
+
+def validate_prose(data: dict) -> list[str]:
+    problems = []
+    score = _prose_score(data)
+    if score is None:
+        problems.append("score must be an integer from 1 to 10")
+    if not str(data.get("evidence") or "").strip():
+        problems.append("evidence")
+    if score is not None and score < PROSE_PASS_AT and not str(data.get("action") or "").strip():
+        problems.append("action")
+    return problems
+
+
+def prose_rows(prose: dict | None, error: str) -> list[dict]:
+    if prose is None:
+        return [row(
+            "PR body", BLOCKED, f"Blocked: {error}.",
+            "Read the PR excerpt and write the prose judgment JSON.",
+        )]
+    score = prose["score"]
+    evidence = f"Score {score}/10. {prose['evidence'].strip()}"
+    if score >= PROSE_PASS_AT:
+        return [row("PR body", PASS, evidence)]
+    return [row("PR body", FAIL, evidence, prose.get("action", "").strip())]
+
+
+
 def notes(a: dict) -> list[str]:
     title = a["meta"].get("title") or ""
     if re.search(r"bugfix|bug[- ]fix|\[fix\]", title, re.I):
@@ -630,6 +749,7 @@ DISPLAY_ORDER = (
     "Affected Scope",
     "AMD Guard",
     "Unit Test Quality",
+    "PR body",
     "Accuracy evidence",
     "Performance evidence",
     "Flags",
@@ -785,8 +905,8 @@ def render(pr: str, a: dict, rows: list[dict], verdict: str, shape_only: bool) -
         )
     elif shown == PROCEED:
         lines.append(
-            "Shape checks passed. Write the code-path and test-seam judgment "
-            "files, then re-run without --shape."
+            "Shape checks passed. Write the code-path, test-seam, and PR-body "
+            "judgment files, then re-run without --shape."
         )
     elif shown == INCOMPLETE:
         lines.append(
@@ -884,17 +1004,27 @@ def main() -> None:
                         help="/pr-code-path judgment JSON")
     parser.add_argument("--test-seam", metavar="PATH",
                         help="/pr-test-seam judgment JSON")
+    parser.add_argument("--prose", metavar="PATH",
+                        help="PR-body wording judgment JSON")
+    parser.add_argument("--excerpt", action="store_true",
+                        help="print the PR body sections to judge, then exit")
     args = parser.parse_args()
     if args.calibrate:
         raise SystemExit(calibrate())
     if not args.pr:
         parser.error("pr is required unless --calibrate is set")
     pr = re.sub(r"\D", "", args.pr.split("/")[-1]) or args.pr
+    if args.excerpt:
+        meta = json.loads(sh([
+            "gh", "pr", "view", pr, "--repo", args.repo, "--json", "body",
+        ]))
+        print(excerpt(meta.get("body") or ""), end="")
+        return
     data = analyse(pr, args.repo)
     rows = shape_rows(data)
     # Judgment files mean the user continued past a split. Score every row.
     # Shape-only, and an oversized PR with no judgment files, still stop here.
-    continued = bool(args.code_path or args.test_seam)
+    continued = bool(args.code_path or args.test_seam or args.prose)
     if args.shape or (data.get("oversized") and not continued):
         shown = rows
         verdict = SPLIT if data.get("oversized") else PROCEED
@@ -908,6 +1038,8 @@ def main() -> None:
     test_seam, test_error = load_judgment(args.test_seam, "test-seam", validate_test_seam)
     rows.extend(code_path_rows(code_path, code_error, data["uses_aiter"]))
     rows.extend(test_rows(test_seam, test_error))
+    prose, prose_error = load_judgment(args.prose, "prose", validate_prose)
+    rows.extend(prose_rows(prose, prose_error))
     rows = order_rows(rows)
     verdict = verdict_of(rows)
     if args.json:

@@ -60,6 +60,12 @@ python3 triage.py N --shape
 #    pr-test-seam/SKILL.md
 #    python3 pr-code-path/path_cover.py N
 #    python3 pr-test-seam/test_seam.py N
+#    python3 triage.py N --excerpt
+#    That excerpt is the only PR text you score. Do not run gh for the body.
+#    Write /tmp/pr-N-prose.json from the PR body section below.
+#    Score Motivation from 1 to 10. Pass is 7 or higher.
+#    The reader knows this is a GPU fix and does not know the kernel names.
+#    On a fail, evidence is the reason and action is a Motivation the owner can paste.
 #    Canvas: ~/.cursor/projects/<workspace>/canvases/pr-N-code-path.canvas.tsx
 #    Write that canvas with the editor in this session. Layout is the Canvas
 #    section of pr-code-path/SKILL.md: two cards, a clickable caller graph,
@@ -74,7 +80,8 @@ python3 triage.py N --shape
 #    said SPLIT FIRST and the user asked to continue.
 python3 triage.py N \
   --code-path /tmp/pr-N-code-path.json \
-  --test-seam /tmp/pr-N-test-seam.json
+  --test-seam /tmp/pr-N-test-seam.json \
+  --prose /tmp/pr-N-prose.json
 ```
 
 `N` may be a PR number or a GitHub pull URL.
@@ -95,6 +102,7 @@ hand and do not ack it.
 | Affected Scope | `/pr-code-path` JSON | NVIDIA numerical results or original behavior are not identical |
 | AMD Guard | `/pr-code-path` JSON, plus an AITER import in the diff | the new behavior is outside the claimed guard, or AITER is imported under a scope other than `aiter` |
 | Unit Test Quality | `/pr-test-seam` JSON | the contribution-guide test bar fails (`official_pass` is false). Coverage other than `complete` does not fail the row |
+| PR body | prose judgment JSON | Motivation scores 6 or below. A reader cannot connect the machine and the user-visible result on one read, or the opening is a goal |
 | Accuracy evidence | PR body, when attention, MoE, quantization, or a kernel changes | no accuracy number is present |
 | Performance evidence | PR body, when a kernel file changes | no throughput, latency, or TTFT number is present |
 | Flags | new `SGLANG_*` env bindings | a default-off binding whose comment is missing, incomplete, or only names the platform |
@@ -215,6 +223,92 @@ is required when `official_pass` is false, and it is the concrete test change.
 `no_test`. Record it. It does not fail Unit Test Quality. Only `official_pass`
 does. Every conclusion other than `complete` still requires `missing_test`,
 naming the production interface, the trigger, and the observable result.
+
+## PR body
+
+Write `/tmp/pr-N-prose.json` after you read `python3 triage.py N --excerpt`.
+
+Score Motivation only. Do not score tables, images, checklist items, or the merge-process boilerplate. Modifications do not change the score.
+
+The reader knows this is a GPU fix. The reader does not know AOTriton, SDPA, `head_dim`, or the function names. Technical names may follow the first sentence. They must not be required to understand the first sentence.
+
+The first sentence states both:
+
+- what the user sees: wrong output, a crash, or a named error
+- where: the GPU or the software version
+
+One claim per sentence. The subject is the failure, not the author. Do not open with "This PR", "We", "in order to", or a benefit. Do not use "aims to", "leverage", "robust", "seamless", "comprehensive", "utilize", or "delve" as the point of a sentence.
+
+| Score | Motivation |
+|---|---|
+| 10 | First sentence has the user-visible result and the place. Each later sentence is one technical cause. |
+| 9 | Same as 10, with one extra name in the first sentence that the result does not depend on. |
+| 8 | First sentence has the user-visible result and the GPU or version. One later sentence is long and still one claim. |
+| 7 | The facts are present. The first sentence is only jargon. The wrong output or crash is in a later sentence. |
+| 6 | The reader must re-read to connect the machine and the symptom. |
+| 5 | One sentence stacks the cause, the design, and the benefit. |
+| 4 | The opening is a goal. The fault comes later. |
+| 3 | The opening is a goal. The fault is only a benefit word such as robustness or accuracy. |
+| 2 | The point is an AI filler. No concrete fault. |
+| 1 | Motivation is missing, or it does not say what failed. |
+
+Pass is 7, 8, 9, or 10. Fail is 6 or below.
+
+`score` is an integer from 1 to 10. `evidence` is the reason for that score, without the number. The report prints `Score N/10` in front of it. `action` is required below 7. It is a full Motivation the owner can paste. Keep the technical facts. Put the user-visible result in the first sentence.
+
+```json
+{
+  "score": 9,
+  "evidence": "The first sentence states the wrong decode and the crash, and it names the GPU and the ROCm version.",
+  "action": ""
+}
+```
+
+```json
+{
+  "score": 7,
+  "evidence": "The first sentence names the backends and head_dim. The next sentence states the wrong values and the crash.",
+  "action": ""
+}
+```
+
+```json
+{
+  "score": 6,
+  "evidence": "The GPU, the wrong output, and the crash are in the paragraph. A reader must re-read to connect them.",
+  "action": "On gfx1250, image decode is wrong on ROCm 10.0 and crashes after denoise on ROCm 10.1.\nAOTriton's flash and mem_efficient SDPA backends fail when head_dim > 256."
+}
+```
+
+```json
+{
+  "score": 3,
+  "evidence": "The first sentence states a goal. It does not say what the user sees.",
+  "action": "On gfx1250, image decode is wrong on ROCm 10.0 and crashes after denoise on ROCm 10.1.\nAOTriton's flash and mem_efficient SDPA backends fail when head_dim > 256."
+}
+```
+
+Score 7, pass. The first sentence is jargon. The next sentence states the wrong values and the crash:
+
+```text
+On gfx1250-rocm10.1, AOTriton's flash and mem_efficient SDPA backends failed when head_dim > 256.
+On ROCm 10.0 the VAE returns wrong values with no error. On ROCm 10.1 it raises hipErrorProfilerNotInitialized after the full denoise.
+```
+
+Score 3, fail. The first sentence is a goal:
+
+```text
+This PR aims to improve VAE robustness on next-generation AMD GPUs by leveraging the math SDPA backend.
+```
+
+Score 9, pass:
+
+```text
+On gfx1250, image decode is wrong on ROCm 10.0 and crashes after denoise on ROCm 10.1.
+AOTriton's flash and mem_efficient SDPA backends fail when head_dim > 256.
+ROCm 10.0 (AOTriton 0.13.50) returns wrong values and no error.
+ROCm 10.1 (0.14.50) raises hipErrorProfilerNotInitialized.
+```
 
 ## Calibration
 
