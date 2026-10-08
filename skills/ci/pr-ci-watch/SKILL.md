@@ -848,6 +848,23 @@ PATH and aborts with a readable message instead of a traceback if `gh` is still
 missing. If you ever wonder whether it is working, read `cron.log`, not the
 dashboard.
 
+**Install it for `high` too, not just `regular`.** On 2026-10-08 the `high`
+track went 7.5h with no sweep: the Claude cron armed on 09-30 hit its 7-day
+expiry, and the only host crontab entry was `regular` (gated to 07:00 Taipei,
+and its PR list does not include `high` PRs). #41982 had a verdict of `re-run`
+sitting in `rerun_deferred` — "workflow still running, next sweep retries" —
+and there was no next sweep, so the re-run had to be done by hand. A single
+scheduler for a track means its expiry is a silent outage. Install both:
+
+```bash
+# on the HOST (containers have no crontab binary)
+53 */2 * * * /home/yichiche/agent-box/skills/ci/pr-ci-watch/cron-sweep.sh high
+```
+
+Thirty minutes behind the Claude job at `:23`, so it is a fallback rather than a
+duplicate — the tracks take separate `cron-<track>.lock` files, so the two never
+collide. A missing `cron-high.lock` in the log dir means it has never run.
+
 **So does triage happen on its own? Yes.** The schedule is a Claude cron job,
 not a shell script, so the scheduled sweep runs Phase B in the same turn and
 clears the "Waiting on triage" panel without being asked. The panel says so
