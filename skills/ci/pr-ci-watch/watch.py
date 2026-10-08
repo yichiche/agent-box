@@ -33,6 +33,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import perf  # noqa: E402
 
 REPO_DEFAULT = "sgl-project/sglang"
+# The tracking issue that decides whether `wait-upstream` is even available.
+# Policy: a failure is only "upstream" if main's own schedule says so there.
+ISSUE_17050 = "sgl-project/sglang#17050"
 
 # --- scope -----------------------------------------------------------------
 # NVIDIA/generic CI only. Decided per *workflow*, not per job name: the user's
@@ -357,6 +360,64 @@ def verdict_still_covers(judged_fp: str, current_fp: str) -> bool:
     """
     judged, current = fingerprint_jobs(judged_fp), fingerprint_jobs(current_fp)
     return bool(current) and current <= judged
+
+
+def repeat_after_rerun(s: dict, wf: str, g: dict, sha: str) -> bool:
+    """Did a workflow we already re-ran on this head come back red again?
+
+    The recorded `sig` is normally the set of jobs that were failing when we
+    fired, and a repeat is the intersection with what is failing now. But the
+    re-run can be recorded with an empty `sig` — a gate-only or cancelled
+    group has none — and an empty set intersects with nothing, so the repeat
+    check silently answered "no" forever. #35151 sat in exactly that state:
+    re-run x1, red again, never flagged, never escalated. With no recorded
+    signature the honest answer is "the same workflow is red again on the same
+    head after we re-ran it", which is the thing the caller actually needs.
+    """
+    rec = (s.get("reruns") or {}).get(wf)
+    if not rec or rec.get("sha") != sha:
+        return False
+    before = set((rec.get("sig") or "").split("|")) - {""}
+    if not before:
+        return True
+    return bool(before & (set((g.get("sig") or "").split("|")) - {""}))
+
+
+def upstream_backed(groups: dict) -> tuple[bool, str]:
+    """May these failures be called `wait-upstream` on #17050's authority alone?
+
+    True only when a failing job matches an ONGOING row that `known_failure`
+    itself reads as `wait-upstream` — broken on main, not merely flaky. A row
+    with a measured flake rate below 100% is the opposite of a reason to stop:
+    it is positive evidence that a re-run can clear it.
+
+    Fails **open to re-running**, never open to stopping. If #17050 cannot be
+    read, the answer is "not backed", so the PR gets another re-run rather than
+    being silently parked on an upstream excuse nobody verified.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "ci-analysis"))
+        import known_failure as kf  # noqa: PLC0415
+        table = kf.parse(kf.fetch())
+    except SystemExit as e:  # fetch() exits on a gh failure
+        return False, f"could not read {ISSUE_17050} ({e}) — treating as not backed"
+    except Exception as e:
+        return False, f"could not read {ISSUE_17050} ({e!r}) — treating as not backed"
+    for wf, g in groups.items():
+        if g.get("gate_only"):
+            continue
+        for job in g.get("jobs") or []:
+            rec = kf.match_job(table, job)
+            if rec is None:
+                continue
+            act, why = kf.verdict(rec, rec["test"])
+            if act == "wait-upstream":
+                return True, f"{wf}: {job} -> {why}"
+    jobs = [j for g in groups.values() for j in (g.get("jobs") or [])]
+    return False, (
+        f"no failing job matches a broken-on-main row in {ISSUE_17050} "
+        f"({', '.join(jobs[:3]) or 'no in-scope failing job'}) — a known flake "
+        f"or an unlisted failure is a re-run, not an upstream block")
 
 
 # How long a merged/closed PR keeps its row before a sweep drops it. The row
@@ -1208,16 +1269,30 @@ def cmd_sweep(a) -> None:
             before = set((rec.get("sig") or "").split("|")) - {""}
             nowset = set((g.get("sig") or "").split("|")) - {""}
             again = before & nowset
-            if again:
-                g["repeat_after_rerun"] = rec.get("count", 1)
-                g["repeat_jobs"] = sorted(again)
-                repeats.append(f"{w} (x{rec.get('count', 1)}: "
-                               f"{', '.join(sorted(again))})")
+            if not again and not repeat_after_rerun(s, w, g, sha):
+                continue
+            # With no recorded signature there is no job list to name, so fall
+            # back to what is red now — saying "this workflow again" is still
+            # the escalation signal, and silence was the bug.
+            jobs = sorted(again) or sorted(nowset) or [w]
+            g["repeat_after_rerun"] = rec.get("count", 1)
+            g["repeat_jobs"] = jobs
+            repeats.append(f"{w} (x{rec.get('count', 1)}: {', '.join(jobs)})")
         if repeats:
             print(f"        !! SAME FAILURE AFTER RE-RUN: {', '.join(repeats)} — "
-                  f"stop re-running; evaluate `merge main`")
+                  f"re-run budget spent; triage decides whether it stops here")
 
         s["failed_groups"] = groups
+        # Drop refusal notes that no longer describe anything. A deferred
+        # re-run is only live while the workflow it names is still red on this
+        # head; once it goes green, or the author pushes, the note is a claim
+        # that the PR is stuck when it is not. #27702 and #35151 both ended up
+        # green with a stale note still attached.
+        for wf in list(s.get("rerun_deferred") or {}):
+            d = s["rerun_deferred"][wf]
+            if d.get("sha") != sha or (wf not in groups
+                                       and wf not in (cancelled or {})):
+                s["rerun_deferred"].pop(wf)
         # Keep the gate picture at PR level so the dashboard can say "blocked at
         # the gate, here is which one" instead of printing a bare fail count.
         # Store *every* resolved gate reason, not just the blocking ones. The
@@ -1343,8 +1418,29 @@ def cmd_sweep(a) -> None:
         fp = failure_fingerprint(groups)
         judged_fp = s.get("verdict_fingerprint", "")
         judged_action = s.get("verdict_action") or s.get("last_action")
-        if (s.get("verdict_sha") == sha and judged_action in ACTIONS
-                and (judged_fp == fp or verdict_still_covers(judged_fp, fp))):
+        held = (s.get("verdict_sha") == sha and judged_action in ACTIONS
+                and (judged_fp == fp or verdict_still_covers(judged_fp, fp)))
+        # A held `re-run` is not a judgement, it is an action that was supposed
+        # to happen. Holding it was how #35151 wedged: verdict `re-run`, the
+        # POST had errored, and every later sweep printed "keeping verdict
+        # re-run" and did nothing, so the only way out was a manual click.
+        if held and judged_action == "re-run":
+            held = False
+        # `wait-upstream` is the one verdict that stops a PR on someone else's
+        # authority, so it has to keep earning it. Revalidate against #17050
+        # every sweep rather than trusting the sha+fingerprint hold: a row that
+        # was 100%-fail when we judged may now carry a flake rate, which means
+        # a re-run can clear it after all.
+        if held and judged_action == "wait-upstream":
+            ok, why = upstream_backed(groups)
+            if not ok and not s.get("upstream_forced"):
+                held = False
+                s.pop("verdict_action", None)
+                s.pop("verdict_fingerprint", None)
+                print(f"        !! VERDICT NO LONGER BACKED: `wait-upstream` "
+                      f"dropped — {why}")
+                log_line(f"#{pr} wait-upstream revoked :: {why}")
+        if held:
             s["last_action"] = judged_action  # restore if a sweep clobbered it
             # Already judged, same head SHA, and nothing red that the verdict
             # did not already cover. Re-triaging would throw away the verdict —
@@ -1357,6 +1453,50 @@ def cmd_sweep(a) -> None:
             print(f"        -> keeping verdict `{judged_action}` "
                   f"({how}, already judged {tw(s.get('verdict_at'))})")
             row["outcome"] = f"verdict-held:{judged_action}"
+            report.append(row)
+            continue
+
+        # A re-run we fired for this head is still going. The red sitting in
+        # `groups` is the attempt that re-run replaces, not a result: triaging
+        # it would spend a Claude turn on a failure that may already be fixed,
+        # and re-firing would cancel the live run through pr-test.yml's own
+        # concurrency group. The held-verdict branch used to cover this
+        # incidentally; now that a held `re-run` correctly falls through, the
+        # guard has to be explicit — and conditioned on CI actually being in
+        # flight, so it can never wedge the way #35151 did.
+        if (any(rerun_count(s, w, sha) for w in groups)
+                and (tally.get("pending") or tally.get("queued"))):
+            s["last_action"] = "re-run"
+            print("        -> re-run in flight: waiting on the attempt already "
+                  "running before judging anything")
+            row["outcome"] = "rerun-in-flight"
+            report.append(row)
+            continue
+
+        # Policy: every real failure is re-run once before anyone is asked to
+        # think about it. A triage pass costs a Claude turn and a wait, and the
+        # large majority of these clear on the second run — so the re-run is
+        # the cheap experiment that makes triage worth doing. Only a failure
+        # that survives its own re-run is worth a human-grade opinion.
+        unspent = [w for w, g in groups.items()
+                   if not g.get("gate_only") and not rerun_count(s, w, sha)
+                   and not g.get("repeat_after_rerun")]
+        if unspent:
+            s["last_action"] = "re-run"
+            s["last_verdict"] = (
+                f"first failure on this head ({', '.join(unspent)}) — re-running "
+                f"once before triage, per policy"
+            )
+            s["verdict_at"] = now()
+            if not auto_on(meta, "rerun"):
+                print("        -> re-run WITHHELD: auto re-run is off for this PR")
+                row["outcome"] = "auto-off:rerun"
+                report.append(row)
+                continue
+            print(f"        -> re-run: first failure on this head for "
+                  f"{', '.join(unspent)}; no triage until it repeats")
+            row["outcome"] = "auto-re-run-first"
+            rerun.append(pr)
             report.append(row)
             continue
 
@@ -1391,9 +1531,26 @@ def cmd_sweep(a) -> None:
 
     if rerun:
         print("\n=== AUTO RE-RUN (no triage needed) ===")
+        # Fire them, rather than printing a command for someone to paste. This
+        # section used to be a to-do list, which is why a re-run the sweep had
+        # already decided on still waited for a human: #41982 sat 8h on a
+        # `re-run` verdict nobody ran. `cmd_apply_verdict` holds every guard
+        # that matters — stale head, gate-only, the per-PR auto switch — so it
+        # is called rather than reimplemented.
         for pr in rerun:
-            print(f"  python3 {Path(__file__).name} apply-verdict --pr {pr} "
-                  f"--action re-run --summary \"{st[pr]['last_verdict']}\" --apply")
+            summary = st[pr].get("last_verdict", "")
+            if not a.apply:
+                print(f"  WOULD re-run #{pr}: {summary}")
+                continue
+            try:
+                cmd_apply_verdict(argparse.Namespace(
+                    pr=pr, action="re-run", summary=summary, repo=a.repo,
+                    apply=True, force_auto=False, force_gates=False,
+                    force_upstream=False))
+            except SystemExit as e:
+                # One PR's stale state must not abort the rest of the sweep.
+                print(f"  #{pr} re-run aborted: {e}")
+                log_line(f"#{pr} auto re-run aborted :: {e}")
 
     if triage:
         print("\n=== TRIAGE REQUIRED ===")
@@ -1404,9 +1561,13 @@ def cmd_sweep(a) -> None:
                     if g.get("repeat_after_rerun")]
             if reps:
                 print(f"  !! {', '.join(reps)} failed the SAME way after a re-run.")
-                print("     Do NOT record re-run again. Check whether main already")
-                print("     has the fix (gh api compare/<head>...main) and prefer")
-                print("     `merge-main`; use `code-fix` if it is the PR's own bug.")
+                print("     The re-run budget for this head is spent, so this is")
+                print("     the point where stopping is allowed. Check whether main")
+                print("     already has the fix (gh api compare/<head>...main) ->")
+                print("     `merge-main`; the PR's own bug -> `code-fix`; high")
+                print("     probability upstream -> `wait-upstream` (a confirmed")
+                print("     repeat unlocks it without a #17050 row). Only record")
+                print("     `re-run` again if something concrete changed.")
             print(f"  /ci-analysis {st[pr].get('url') or pr}")
             print(f"  python3 {Path(__file__).name} apply-verdict --pr {pr} "
                   f"--action <re-run|code-fix|merge-main|wait-upstream|out-of-scope> "
@@ -1435,6 +1596,49 @@ def cmd_apply_verdict(a) -> None:
         die(f"--action must be one of {', '.join(ACTIONS)}")
 
     sha = s.get("head_sha", "")
+    groups = s.get("failed_groups") or {}
+    # The `wait-upstream` gate. Enforced here, not in the sweep, because this is
+    # the one place every caller passes through — scheduled sweep, dashboard
+    # button, hand-run command — and a policy enforced in only some of them is
+    # not a policy. Two doors, and no others:
+    #
+    #   A) #17050 says main itself is broken on this job. Authority to stop
+    #      without ever re-running.
+    #   B) We re-ran it and the same job failed again. Triage has earned the
+    #      right to call it upstream on its own judgement.
+    #
+    # Before either, "upstream" is a guess, and the cost of guessing wrong is a
+    # PR parked for days on a flake a single re-run would have cleared.
+    if a.action == "wait-upstream":
+        ok, why = upstream_backed(groups)
+        repeat = any(repeat_after_rerun(s, w, g, sha) for w, g in groups.items())
+        if getattr(a, "force_upstream", False):
+            s["upstream_forced"] = True
+            print(f"#{pr}  wait-upstream FORCED past the {ISSUE_17050} gate")
+            log_line(f"#{pr} wait-upstream FORCED (gate said: {why}) :: {a.summary}")
+        elif ok:
+            s.pop("upstream_forced", None)
+            print(f"#{pr}  wait-upstream backed by {ISSUE_17050}: {why}")
+        elif repeat:
+            s.pop("upstream_forced", None)
+            print(f"#{pr}  wait-upstream on a confirmed repeat: the same job "
+                  f"failed again after a re-run, so triage may call it upstream")
+        else:
+            # Refused, and deliberately not silent about what to do instead.
+            # The two refusals are different situations and must not read the
+            # same: #27702 *had* been re-run on this head, but the re-run
+            # cleared the jobs it was fired for and a different job went red —
+            # so "you never re-ran it" would have been simply false.
+            ran = any(rerun_count(s, w, sha) for w in groups)
+            posture = (
+                "these jobs are not the ones the earlier re-run was fired for, "
+                "so they have not had their own attempt yet"
+                if ran else
+                "nothing has been re-run on this head yet")
+            die(f"#{pr} wait-upstream REFUSED — {why}. Policy is `re-run` "
+                f"first: {posture}. Record `re-run` instead, or pass "
+                f"--force-upstream if you are certain.")
+
     s["last_verdict"] = a.summary
     s["last_action"] = a.action
     s["verdict_at"] = now()
@@ -1575,9 +1779,16 @@ def cmd_apply_verdict(a) -> None:
                     "sha": sha, "at": now(), "why": why}
                 continue
             # Store what failed, so the next sweep can tell "same failure again"
-            # from "a different failure this time".
-            reruns[wf] = {"sha": sha, "count": used + 1, "at": now(),
-                          "sig": g.get("sig", "")}
+            # from "a different failure this time". Fall back to the job list
+            # when the group carries no `sig`: an empty one recorded here reads
+            # downstream as "nothing to compare", which silently disabled
+            # repeat detection on #35151 and left it unable to ever escalate.
+            sig = g.get("sig") or "|".join(
+                sorted(set((g.get("jobs") or []) + (g.get("cancelled_jobs") or []))))
+            reruns[wf] = {"sha": sha, "count": used + 1, "at": now(), "sig": sig}
+            # The POST landed, so any note about a previous refusal is now a
+            # lie the dashboard would keep showing.
+            (s.get("rerun_deferred") or {}).pop(wf, None)
             did.append(f"{wf} (run {run_id}, attempt {used + 1}{how})")
         else:
             did.append(f"WOULD rerun {wf} (run {run_id}, attempt {used + 1}{how})")
@@ -1825,6 +2036,9 @@ def main() -> None:
                    help="also re-run workflows whose only failures are rollup gates")
     s.add_argument("--force-auto", action="store_true",
                    help="re-run even if this PR's auto re-run switch is off")
+    s.add_argument("--force-upstream", action="store_true",
+                   help=f"record wait-upstream even though {ISSUE_17050} does "
+                        f"not back it and no re-run has repeated the failure")
     s.set_defaults(func=cmd_apply_verdict)
 
     s = sub.add_parser("update-branch",

@@ -196,6 +196,19 @@ one of three answers:
 | **FIXED**, with a date | main stopped failing it that day | `merge main`, **after the two checks below** |
 | **NOT LISTED** | main's schedule has not seen it | fall through to Step 1 — this said nothing |
 
+> **This table is the only unforced route to `wait upstream`.** `pr-ci-watch`
+> enforces it: `apply-verdict --action wait-upstream` is **refused** unless a
+> failing job matches an ONGOING row this table reads as `wait upstream`, or
+> the failure already repeated after a re-run. Everything else defaults to
+> `re-run` — a known flake at `N% fail` is a re-run, not an upstream block.
+> Look a **job** up (not just a test file) with:
+>
+> ```bash
+> python3 known_failure.py --job 'base-b-test-1-gpu-large / base-b-test-1-gpu-large (3)'
+> ```
+>
+> Shard-insensitive, so main's shard `(0)` row matches a PR failing on `(3)`.
+
 The flake rate is the big win: `2% fail (85/4770)` settles `re-run` vs
 `code fix` with no log read at all, and it is a number nothing else here gives
 you.

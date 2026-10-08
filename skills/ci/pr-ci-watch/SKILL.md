@@ -805,7 +805,7 @@ The internal verdicts map onto those columns as:
 | `re-run` | cleared as unrelated and re-run; waiting on CI |
 | `merge-main` | **stuck** — no conflict, but main already has the fix for a CI failure and the PR is behind. Action: **Merge main** |
 | `conflict` | **stuck** — the branch has git conflicts with main; CI cannot complete. Action: **Solve conflict** (a different problem from `merge-main` — never label them the same) |
-| `wait-upstream` | **stuck** — an in-scope NVIDIA job is blocked on an upstream fix |
+| `wait-upstream` | **stuck** — an in-scope NVIDIA job is blocked on an upstream fix. **Gated**: only recordable when #17050 says main is broken on that job, or the failure already repeated after a re-run. See *The re-run policy* below |
 | `out-of-scope` | nothing to do — the red is entirely from vendor workflows (NPU/AMD/…) |
 | `code-fix` | real bug in this PR; author must fix. Never re-run |
 
@@ -813,6 +813,71 @@ The internal verdicts map onto those columns as:
 > `gh` calls and **cannot** re-run a workflow or post a comment — every
 > outward-facing action stays in the sweep, which runs under a Claude turn. The
 > web layer never needs credentials.
+
+## The re-run policy
+
+**Default is re-run. Stopping is the thing that has to be justified.**
+
+A red in-scope job is re-run once before anyone is asked to think about it. A
+triage pass costs a Claude turn and a wait, and most of these clear on the
+second run — so the re-run is the cheap experiment that makes triage worth
+doing. Only a failure that survives its own re-run earns a human-grade opinion.
+
+The ladder, as implemented in `cmd_sweep`:
+
+```
+verdict held for this head sha?
+    code-fix / merge-main / out-of-scope -> hold
+    wait-upstream -> revalidate against #17050; unbacked -> drop it
+    re-run        -> NOT a judgement, it is an action that was meant to
+                     happen; fall through and fire it
+no re-run spent on this workflow yet -> re-run, no triage pass
+same job red again after a re-run    -> triage decides, stopping now allowed
+```
+
+### `wait-upstream` is gated
+
+It is the only verdict that parks a PR on someone else's authority, so it has
+to keep earning it. Enforced in `cmd_apply_verdict`, which every caller —
+scheduled sweep, dashboard button, hand-run command — passes through. Two
+doors, and no others:
+
+- **#17050 backs it.** A failing job matches an ONGOING row in
+  [#17050](https://github.com/sgl-project/sglang/issues/17050) that
+  `known_failure.verdict()` reads as `wait-upstream` — 100% fail on main, or an
+  open item with no rate. This may stop a PR *without ever re-running it*.
+  A row with a flake rate **below** 100% is the opposite of a reason to stop:
+  it is positive evidence a re-run clears it.
+- **A confirmed repeat.** We re-ran it and the same job failed again. Triage
+  may then call it upstream on its own judgement, with no #17050 row.
+
+Anything else is refused with the reason, and the verdict is forced to
+`re-run`. `--force-upstream` overrides and logs loudly to `cron.log`.
+
+Matching is **shard-insensitive** (`known_failure.job_key`): main may record
+the failure on shard `(0)` while the PR hits it on shard `(3)`. The shard says
+which slice ran, not which test broke. A job match is a *necessary* condition,
+never sufficient — the same job can go red for a test main has never seen, so
+triage still checks the error signature.
+
+The gate **fails open to re-running, never open to stopping.** If #17050 cannot
+be read, the answer is "not backed", so the PR gets another re-run instead of
+being silently parked on an upstream excuse nobody verified.
+
+### Worked examples (2026-10-08)
+
+| PR | What happened | Why the old code got it wrong |
+|---|---|---|
+| #27702 | Held `wait-upstream` with **no #17050 row at all** | Nothing gated the verdict; a triage turn recorded it on first sight |
+| #34502 | Held `wait-upstream` on a row that is **0% fail (65/34914)** — a flake, not a broken main | Same, plus nothing revalidated the verdict as the row's rate changed |
+| #35151 | `re-run` verdict, POST errored with `unexpected end of JSON input`, every later sweep printed `keeping verdict re-run` and did nothing | A held `re-run` was treated as a final judgement, and `rerun_deferred` was written but **only ever read by the dashboard for display** — nothing retried it |
+| #41982 | `re-run` verdict sat 8h unfired | The `AUTO RE-RUN` section printed a command for a human to paste instead of calling `cmd_apply_verdict` |
+
+The last two are the same class of bug: a decision the sweep had already made,
+recorded and then not acted on. `AUTO RE-RUN` now fires, and an empty recorded
+`sig` no longer silently disables repeat detection — with no signature to
+compare, "this workflow is red again on the same head after we re-ran it" is
+the honest answer, and silence was the bug.
 
 ## Scheduling the two tracks
 

@@ -909,19 +909,24 @@ def action_cell(s: dict) -> str:
             continue  # budget resets on a new push; stale rows are noise
         out.append(f'<div class="dim">{esc(wf)} re-run &times;{rec.get("count", 0)}'
                    f' &middot; {esc(tw(rec.get("at")))}</div>')
-    if a == "CI re-run" and not (s.get("reruns") or {}):
+    # A refused POST is shown whenever one is on record for this head, not only
+    # when nothing has ever been re-run. Gating it on an empty `reruns` hid the
+    # exact state that wedged #35151: re-run x1 *and* a later attempt that died
+    # on `unexpected end of JSON input`. The row read "re-run x1" and looked
+    # healthy while nothing was in flight.
+    deferred = [r for r in (s.get("rerun_deferred") or {}).values()
+                if r.get("sha") == sha]
+    if deferred:
+        out.append('<div class="dim">last re-run attempt did not land &mdash; '
+                   f'{esc(deferred[0].get("why", "refused"))}; the next sweep '
+                   "retries</div>")
+    elif a == "CI re-run" and not (s.get("reruns") or {}):
         # Two very different states used to render identically. Only say GitHub
         # refused when a POST was actually made and rejected — otherwise this
         # is a decision the sweep recorded without `--apply`, and claiming an
         # attempt that never happened is worse than saying nothing.
-        deferred = [r for r in (s.get("rerun_deferred") or {}).values()
-                    if r.get("sha") == sha]
-        if deferred:
-            out.append('<div class="dim">queued &mdash; '
-                       f'{esc(deferred[0].get("why", "re-run refused"))}</div>')
-        else:
-            out.append('<div class="dim">decided, not yet applied &mdash; the '
-                       "next <code>--apply</code> sweep performs it</div>")
+        out.append('<div class="dim">decided, not yet applied &mdash; the '
+                   "next <code>--apply</code> sweep performs it</div>")
     return "".join(out)
 
 

@@ -126,6 +126,40 @@ def parse(body: str) -> dict:
     return out
 
 
+# `base-b-test-1-gpu-large / base-b-test-1-gpu-large (3)` -> the trailing shard
+SHARD = re.compile(r"\s*\(\d+\)\s*$")
+
+
+def job_key(name: str) -> str:
+    """Normalise a CI job name so main's row and a PR's failure compare equal.
+
+    Two things are dropped. The trailing shard index, because it says which
+    slice of the suite ran and not which test broke. And the `call-xxx / `
+    prefix GitHub prepends when a job comes from a reusable workflow, because
+    the issue and `gh pr checks` do not agree on whether to include it.
+    """
+    stripped = SHARD.sub("", (name or "").strip())
+    return stripped.split("/")[-1].strip().lower()
+
+
+def match_job(recs: dict, job: str) -> dict | None:
+    """The ONGOING row whose `backend` names this job, or None.
+
+    Shard-insensitive on purpose: main's schedule may record the failure on
+    shard (0) while a PR hits it on shard (3) — #34502 is exactly that. The
+    match is a *necessary* condition for calling a failure upstream, never a
+    sufficient one; the same job can go red for a test main has never seen, so
+    the caller still has to check the error signature.
+    """
+    key = job_key(job)
+    if not key:
+        return None
+    for rec in recs.values():
+        if rec.get("state") == "ongoing" and job_key(rec.get("backend", "")) == key:
+            return rec
+    return None
+
+
 def verdict(rec: dict | None, test: str) -> tuple[str, str]:
     """(action, one-line reason) in /ci-analysis's own vocabulary.
 
@@ -165,12 +199,33 @@ def verdict(rec: dict | None, test: str) -> tuple[str, str]:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("tests", nargs="+", help="test file name(s), e.g. test_x.py")
+    ap.add_argument("tests", nargs="*", help="test file name(s), e.g. test_x.py")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--refresh", action="store_true", help="bypass the cache")
+    ap.add_argument("--job", action="append", default=[], metavar="NAME",
+                    help="look a CI job name up against the ONGOING backends "
+                         "instead of a test file, e.g. "
+                         "'base-b-test-1-gpu-large / base-b-test-1-gpu-large (3)'")
     a = ap.parse_args()
+    if not a.tests and not a.job:
+        ap.error("give at least one test file or --job")
 
     table = parse(fetch(a.refresh))
+    for job in a.job:
+        rec = match_job(table, job)
+        act, why = verdict(rec, rec["test"] if rec else job)
+        if rec is None:
+            why = (f"no ONGOING row in {ISSUE} names job `{job}` — main's "
+                   f"schedule has not recorded a failure here.")
+        if a.json:
+            print(json.dumps({"job": job, "action": act, "reason": why,
+                              "entry": rec}, indent=2))
+        else:
+            print(f"{job}\n  {(rec or {}).get('state', 'not listed').upper()} "
+                  f"-> {act}\n  {why}\n")
+    if not a.tests:
+        return
+
     results = []
     for t in a.tests:
         name = Path(t).name
