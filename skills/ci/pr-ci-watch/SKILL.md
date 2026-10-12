@@ -831,9 +831,24 @@ verdict held for this head sha?
     wait-upstream -> revalidate against #17050; unbacked -> drop it
     re-run        -> NOT a judgement, it is an action that was meant to
                      happen; fall through and fire it
-no re-run spent on this workflow yet -> re-run, no triage pass
-same job red again after a re-run    -> triage decides, stopping now allowed
+our own re-run still in flight       -> wait, judge nothing
+a failing job with no attempt yet    -> re-run, no triage pass
+same job red again after its attempt -> triage decides, stopping now allowed
 ```
+
+**The budget is per job, not per workflow**, capped at `MAX_RERUNS_PER_HEAD`
+(3) per workflow per head. Every failing job is owed one attempt of its own; a
+job that has never been re-run does not lose that because an unrelated job in
+the same workflow already spent the workflow's turn. `reruns[wf].seen`
+accumulates the jobs that have had an attempt — `sig` only ever describes the
+latest one, so without the union a job re-run two attempts ago looks untouched
+and earns a second attempt it already had.
+
+**Watcher jobs are excluded from a failure's identity** (`real_jobs`). A job
+like `wait-for-base-b` fails whenever *anything* it watches fails, so it comes
+back red across completely unrelated failures. Counting it turns "something
+failed again" into "the same thing failed again" — a different claim, and
+usually a false one.
 
 ### `wait-upstream` is gated
 
@@ -873,8 +888,28 @@ being silently parked on an upstream excuse nobody verified.
 | #35151 | `re-run` verdict, POST errored with `unexpected end of JSON input`, every later sweep printed `keeping verdict re-run` and did nothing | A held `re-run` was treated as a final judgement, and `rerun_deferred` was written but **only ever read by the dashboard for display** — nothing retried it |
 | #41982 | `re-run` verdict sat 8h unfired | The `AUTO RE-RUN` section printed a command for a human to paste instead of calling `cmd_apply_verdict` |
 
-The last two are the same class of bug: a decision the sweep had already made,
-recorded and then not acted on. `AUTO RE-RUN` now fires, and an empty recorded
+### The over-triage regression (2026-10-12)
+
+The first cut of the above sent far too much to triage, because it compared
+failures at **workflow** level using the raw `sig`, watchers included. #43103 is
+the worked example:
+
+| | re-ran for | failing now | intersection |
+|---|---|---|---|
+| #43103 | `base-b-test-2-gpu-large (0)` + `wait-for-base-b` | `base-b-test-1-gpu-large (0)` + `wait-for-base-b` | **`wait-for-base-b` only** |
+
+The test job that was re-run had *cleared*. A different job failed. The only
+thing both runs shared was the watcher — so it was reported as "SAME failure
+after 1 re-run" and a brand-new failure went to triage without ever getting the
+one re-run the policy promises it. Watcher inflation also silently disabled the
+`watcher_only` auto-re-run branch, which is guarded on `repeat_after_rerun`.
+
+Fixing it (per-job budget + watcher exclusion) took the queue from 5 PRs
+awaiting triage to 2 — and the 2 that remain are genuine repeats, where the
+same real job failed again after its own attempt.
+
+The deferred/unfired pair below are the same class of bug as each other: a
+decision the sweep had already made, recorded and then not acted on. `AUTO RE-RUN` now fires, and an empty recorded
 `sig` no longer silently disables repeat detection — with no signature to
 compare, "this workflow is red again on the same head after we re-ran it" is
 the honest answer, and silence was the bug.

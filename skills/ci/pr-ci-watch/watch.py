@@ -36,6 +36,10 @@ REPO_DEFAULT = "sgl-project/sglang"
 # The tracking issue that decides whether `wait-upstream` is even available.
 # Policy: a failure is only "upstream" if main's own schedule says so there.
 ISSUE_17050 = "sgl-project/sglang#17050"
+# Ceiling on attempts per workflow per head SHA. The budget is per *job*, so a
+# run that keeps turning up new red jobs legitimately keeps earning re-runs —
+# this is the backstop that stops "new job every time" from meaning "forever".
+MAX_RERUNS_PER_HEAD = 3
 
 # --- scope -----------------------------------------------------------------
 # NVIDIA/generic CI only. Decided per *workflow*, not per job name: the user's
@@ -362,25 +366,40 @@ def verdict_still_covers(judged_fp: str, current_fp: str) -> bool:
     return bool(current) and current <= judged
 
 
-def repeat_after_rerun(s: dict, wf: str, g: dict, sha: str) -> bool:
-    """Did a workflow we already re-ran on this head come back red again?
+def real_jobs(g: dict) -> set[str]:
+    """The failing jobs that are actual tests.
 
-    The recorded `sig` is normally the set of jobs that were failing when we
-    fired, and a repeat is the intersection with what is failing now. But the
-    re-run can be recorded with an empty `sig` — a gate-only or cancelled
-    group has none — and an empty set intersects with nothing, so the repeat
-    check silently answered "no" forever. #35151 sat in exactly that state:
-    re-run x1, red again, never flagged, never escalated. With no recorded
-    signature the honest answer is "the same workflow is red again on the same
-    head after we re-ran it", which is the thing the caller actually needs.
+    Watchers are excluded, and that exclusion is the whole point. A job like
+    `wait-for-base-b` fails whenever *anything* it watches fails, so it comes
+    back red across completely unrelated failures. Counting it as part of a
+    failure's identity turns "something failed again" into "the same thing
+    failed again", which is a different claim and usually a false one.
     """
+    return (set(g.get("jobs") or []) - set(g.get("watcher_jobs") or [])) - {""}
+
+
+def attempted_jobs(s: dict, wf: str, sha: str) -> set[str]:
+    """Real jobs that have already had a re-run fired for them on this head."""
     rec = (s.get("reruns") or {}).get(wf)
     if not rec or rec.get("sha") != sha:
-        return False
-    before = set((rec.get("sig") or "").split("|")) - {""}
-    if not before:
-        return True
-    return bool(before & (set((g.get("sig") or "").split("|")) - {""}))
+        return set()
+    seen = set(rec.get("seen") or [])
+    # Older records predate `seen` and only carry the one `sig` they fired for.
+    return (seen | (set((rec.get("sig") or "").split("|")) - {""}))
+
+
+def repeat_jobs_after_rerun(s: dict, wf: str, g: dict, sha: str) -> list[str]:
+    """Real jobs that we re-ran on this head and that failed again anyway.
+
+    Membership is per *job*, not per workflow. #43103 is why: it was re-run for
+    `base-b-test-2-gpu-large (0)`, that job cleared, and a different job —
+    `base-b-test-1-gpu-large (0)` — went red. The only thing both runs shared
+    was the watcher, so a workflow-level test called it "the SAME failure after
+    1 re-run" and sent a brand-new failure straight to triage without ever
+    giving it the one re-run the policy promises every failure.
+    """
+    attempted = attempted_jobs(s, wf, sha) - set(g.get("watcher_jobs") or [])
+    return sorted(attempted & real_jobs(g))
 
 
 def upstream_backed(groups: dict) -> tuple[bool, str]:
@@ -1266,18 +1285,12 @@ def cmd_sweep(a) -> None:
             # exact-match test lets a genuine repeat slip through whenever it
             # does. What matters is whether a job we already re-ran has failed
             # again.
-            before = set((rec.get("sig") or "").split("|")) - {""}
-            nowset = set((g.get("sig") or "").split("|")) - {""}
-            again = before & nowset
-            if not again and not repeat_after_rerun(s, w, g, sha):
+            again = repeat_jobs_after_rerun(s, w, g, sha)
+            if not again:
                 continue
-            # With no recorded signature there is no job list to name, so fall
-            # back to what is red now — saying "this workflow again" is still
-            # the escalation signal, and silence was the bug.
-            jobs = sorted(again) or sorted(nowset) or [w]
             g["repeat_after_rerun"] = rec.get("count", 1)
-            g["repeat_jobs"] = jobs
-            repeats.append(f"{w} (x{rec.get('count', 1)}: {', '.join(jobs)})")
+            g["repeat_jobs"] = again
+            repeats.append(f"{w} (x{rec.get('count', 1)}: {', '.join(again)})")
         if repeats:
             print(f"        !! SAME FAILURE AFTER RE-RUN: {', '.join(repeats)} — "
                   f"re-run budget spent; triage decides whether it stops here")
@@ -1478,14 +1491,26 @@ def cmd_sweep(a) -> None:
         # large majority of these clear on the second run — so the re-run is
         # the cheap experiment that makes triage worth doing. Only a failure
         # that survives its own re-run is worth a human-grade opinion.
-        unspent = [w for w, g in groups.items()
-                   if not g.get("gate_only") and not rerun_count(s, w, sha)
-                   and not g.get("repeat_after_rerun")]
+        # Budget is per *job*, not per workflow. Every failing job is owed one
+        # attempt of its own; a job that has never been re-run does not lose
+        # that because some unrelated job in the same workflow already spent
+        # the workflow's turn. Capped per workflow so a run that keeps finding
+        # new red jobs cannot re-run forever.
+        unspent, fresh_jobs = [], []
+        for w, g in groups.items():
+            if g.get("gate_only") or rerun_count(s, w, sha) >= MAX_RERUNS_PER_HEAD:
+                continue
+            fresh = real_jobs(g) - attempted_jobs(s, w, sha)
+            if not rerun_count(s, w, sha) or fresh:
+                unspent.append(w)
+                fresh_jobs.extend(sorted(fresh))
         if unspent:
             s["last_action"] = "re-run"
+            detail = (f"{', '.join(fresh_jobs[:3])}"
+                      + (" …" if len(fresh_jobs) > 3 else "")) or ", ".join(unspent)
             s["last_verdict"] = (
-                f"first failure on this head ({', '.join(unspent)}) — re-running "
-                f"once before triage, per policy"
+                f"not yet re-run on this head ({detail}) — re-running once "
+                f"before triage, per policy"
             )
             s["verdict_at"] = now()
             if not auto_on(meta, "rerun"):
@@ -1493,8 +1518,8 @@ def cmd_sweep(a) -> None:
                 row["outcome"] = "auto-off:rerun"
                 report.append(row)
                 continue
-            print(f"        -> re-run: first failure on this head for "
-                  f"{', '.join(unspent)}; no triage until it repeats")
+            print(f"        -> re-run: {detail} has not had its own attempt on "
+                  f"this head; no triage until a job repeats")
             row["outcome"] = "auto-re-run-first"
             rerun.append(pr)
             report.append(row)
@@ -1611,7 +1636,8 @@ def cmd_apply_verdict(a) -> None:
     # PR parked for days on a flake a single re-run would have cleared.
     if a.action == "wait-upstream":
         ok, why = upstream_backed(groups)
-        repeat = any(repeat_after_rerun(s, w, g, sha) for w, g in groups.items())
+        repeat = any(repeat_jobs_after_rerun(s, w, g, sha)
+                     for w, g in groups.items())
         if getattr(a, "force_upstream", False):
             s["upstream_forced"] = True
             print(f"#{pr}  wait-upstream FORCED past the {ISSUE_17050} gate")
@@ -1785,7 +1811,14 @@ def cmd_apply_verdict(a) -> None:
             # repeat detection on #35151 and left it unable to ever escalate.
             sig = g.get("sig") or "|".join(
                 sorted(set((g.get("jobs") or []) + (g.get("cancelled_jobs") or []))))
-            reruns[wf] = {"sha": sha, "count": used + 1, "at": now(), "sig": sig}
+            # `seen` accumulates across attempts; `sig` only ever describes the
+            # latest one. Without the union, a job re-run two attempts ago
+            # looks untouched today and earns a second attempt it already had.
+            seen = sorted(attempted_jobs(s, wf, sha)
+                          | real_jobs(g)
+                          | set(g.get("cancelled_jobs") or []))
+            reruns[wf] = {"sha": sha, "count": used + 1, "at": now(),
+                          "sig": sig, "seen": seen}
             # The POST landed, so any note about a previous refusal is now a
             # lie the dashboard would keep showing.
             (s.get("rerun_deferred") or {}).pop(wf, None)
