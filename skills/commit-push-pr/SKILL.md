@@ -282,6 +282,25 @@ The draft file is **pure HackMD markdown** — no YAML frontmatter. It contains 
 
 **Line formatting — do NOT hard-wrap paragraphs.** GitHub renders a single newline inside a PR body as a hard `<br>` line break, so manually wrapping prose at ~80 chars shows up as broken mid-sentence lines (and indented list continuations render as nested breaks). Write each paragraph and each list item as **one unwrapped line**, however long; separate blocks with a blank line. Only use a newline where you actually want a break (between list items, table rows, headings). Do not indent continuation text under a list item. (Editors may soft-wrap the long lines visually — that's fine; the file must contain no mid-sentence `\n`.)
 
+### Motivation
+
+`## Motivation` is these three blocks, in this order. Bold each label. Put its paragraph on the next line. Do not insert a blank line between the label and its paragraph. Put one blank line between blocks. Each paragraph is one unwrapped line.
+
+- **What goes wrong** — the concrete failure. Name the call, the state it leaves, and the error or the missing overlap.
+- **Where it shows up** — say whether every device on this path can hit it. Name the run that shows it, and the run that does not, when those differ. A model or device that only reproduced a general bug goes here, not in the title.
+- **How to fix** — one sentence. The call to make or skip, and what that leaves enabled.
+
+```markdown
+**What goes wrong**
+After torch.compile warmup, the first real request always calls `disable_offload()`. That sets `manager.enabled` to false. When the user passed `--dit-layerwise-offload`, the residency plan for `transformer_2` is still `layerwise-offload`, so preparing that component raises `ComponentResidencyError`.
+
+**Where it shows up**
+The `disable_offload()` call is shared, so any device that compiles with explicit layerwise offload can hit it. MI350, and any machine where both DiTs still fit, keeps the weights resident. Putting them back after the compile window matches that plan, so there is no residency error. It shows up on the low-memory Wan 2.2 A14B path, including the MI355 multi-GPU run: visible memory is not enough for both DiTs, so layerwise offload has to stay on after compile.
+
+**How to fix**
+Call `disable_offload()` only when the user did not ask for layerwise offload, so a compile-only window still restores GPU residency and an explicit request stays enabled.
+```
+
 Fill in all template sections with concrete content. Insert the user-confirmed accuracy and benchmark tables from Step 6b and 6c into the appropriate sections.
 
 ## Step 8: User reviews PR draft
