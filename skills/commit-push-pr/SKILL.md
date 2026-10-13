@@ -240,10 +240,32 @@ Based on the analysis and collected data, draft the full PR content.
 
 **Always create the draft file without asking for permission.**
 
+### Draft the PR title
+
+Draft the title before the file name. If the user provided `$ARGUMENTS`, use that string unchanged.
+
+Otherwise classify the diff, then name the problem the PR solves. A reviewer should know the change kind and the outcome without opening the body.
+
+1. Classify from the diff, not from flags that merely appear in the reproduction command:
+   - **Bug fix** — crash, wrong result, or a correctness failure such as a residency error. Tag `[Fix]`.
+   - **Perf** — same behavior, faster: overlap, prefetch, kernel time, throughput, or latency. Tag `[Perf]`.
+   - **Feature** — new behavior. Tag `[Feat]`.
+2. Shape: `[AMD] [<Tag>] <what was broken or missing, and the outcome>`.
+   - Fix: `[AMD] [Fix] Prevent ComponentResidencyError after compile warmup with explicit DiT layerwise offload`
+   - Perf: `[AMD] [Perf] Apply model-default prefetch to explicit DiT layerwise offload`
+   - Feature that exists only for one model on one device: `[AMD] [Feat] <feature> for <model> on <device>`
+3. Put a model or device in the title only when the code change is limited to that model or device. When they are only the case that reproduced a general bug or perf gap, leave them out of the title and name them in Motivation and Reproduction.
+4. Name the subsystem the diff actually changes. A nearby flag in the repro is not the problem: a prefetch-default fix is not a torch.compile warmup fix just because the failing run also compiled.
+5. One line. State the problem completely. Do not cut the failure or the outcome to fit a character budget.
+
+InferenceX keeps its prefix `[AMD][<model_name>]` from the fast path above. Still add `[Fix]`, `[Perf]`, or `[Feat]` and state the problem in the rest of the title, for example `[AMD][Qwen3.5] [Perf] <what got faster>`.
+
+Show this title in the Step 8 summary so the user approves it with the draft.
+
 ### Determine the file name
 
 Follow the naming convention in `_shared/repo-config.md`:
-1. Remove `[AMD]` tag and series prefix (e.g., `amd/deepseek_v4 integration NN/N`) from the PR title
+1. Remove `[AMD]` tag, the change-kind tag (`[Fix]`, `[Perf]`, `[Feat]`), and any series prefix (e.g., `amd/deepseek_v4 integration NN/N`) from the PR title
 2. Take the remaining descriptive part
 3. Lowercase, replace spaces with hyphens, remove special characters
 4. File path: `$HOME/pr-drafts/pr-draft-<slug>.md`
@@ -262,11 +284,9 @@ The draft file is **pure HackMD markdown** — no YAML frontmatter. It contains 
 
 Fill in all template sections with concrete content. Insert the user-confirmed accuracy and benchmark tables from Step 6b and 6c into the appropriate sections.
 
-If the user provided `$ARGUMENTS`, use that as the PR title. Otherwise, craft a concise title (under 70 chars) starting with `[AMD]`.
-
 ## Step 8: User reviews PR draft
 
-After writing the draft file, tell the user the file path and show them a summary of its content. Ask the user to review and confirm using `AskUserQuestion`:
+After writing the draft file, tell the user the file path, the proposed PR title, and a summary of the draft. Ask the user to review and confirm using `AskUserQuestion`:
 
 - **Approve**: proceed to submit the PR as-is
 - **Edit**: the user will modify the draft file themselves, then re-confirm. After the user says they're done editing, re-read the draft file to pick up their changes.
