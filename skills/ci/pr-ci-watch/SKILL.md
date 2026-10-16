@@ -831,10 +831,49 @@ verdict held for this head sha?
     wait-upstream -> revalidate against #17050; unbacked -> drop it
     re-run        -> NOT a judgement, it is an action that was meant to
                      happen; fall through and fire it
-our own re-run still in flight       -> wait, judge nothing
-a failing job with no attempt yet    -> re-run, no triage pass
-same job red again after its attempt -> triage decides, stopping now allowed
+cancelled jobs present, nothing pending -> re-run; a cancel is not a result
+our own re-run still in flight          -> wait, judge nothing
+a failing job under its re-run allowance -> re-run, no triage pass
+allowance spent -> ask #17050:
+    broken on main (100% fail)  -> wait-upstream, recorded
+    known flake   (N% fail)     -> keep re-running to the ceiling
+    fixed on main, with a date  -> merge-main, recorded, NOT applied
+    not listed                  -> needs a log read: triage NOW, same turn
 ```
+
+**There is no "waiting for triage" state.** If a decision needs triage, the
+sweep's caller runs `/ci-analysis` and applies the verdict in the same turn.
+`awaiting-triage` means "a log read is happening now", not "parked until
+someone clicks". The only verdict that waits for a human is **`merge-main`** —
+it is recorded, and the dashboard's **Update branch** button is the only thing
+that applies it.
+
+### Attempt counting
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `MIN_RERUNS_BEFORE_TRIAGE` | 2 | Re-runs a failing job gets before triage is even considered. Counted in re-runs, not total runs |
+| `MAX_RERUNS_PER_HEAD` | 6 | Ceiling per workflow per head SHA; the backstop that stops "new red job every time" meaning "forever" |
+
+`reruns[wf].attempts` is a `{job: count}` map. A *count*, not a membership set
+— membership could express "one re-run then triage" but not "two", because the
+first re-run put the job in the set and the second could never be owed. Old
+records carrying `seen`/`sig` migrate as 1 attempt per job: 0 would hand out a
+free extra re-run, 2 would deny the one still owed.
+
+**Cancelled jobs are never counted as attempts.** A cancel produces no result,
+so re-running one is not an attempt at anything.
+
+### Worked examples (2026-10-16)
+
+| PR | Symptom | Cause |
+|---|---|---|
+| #43861 | `33 pass, 3 fail, 13 cancelled`, Action `-`, history said **"CI green"** | `cancelled_now` was filtered by `not rerun_count(...)`; with `count == 1` it emptied, control fell to `if not real:` → `out-of-scope`. 13 jobs never ran and it was reported as green |
+| #44672 | Stopped for triage after **one** re-run | `attempted_jobs()` was a membership test, so one re-run marked the job spent forever |
+
+Both also hit the `not real` condition on the cancelled branch: a run holding
+*both* cancelled jobs and genuine failures dropped the cancelled half silently.
+One re-run covers both, so that condition is gone.
 
 **The budget is per job, not per workflow**, capped at `MAX_RERUNS_PER_HEAD`
 (3) per workflow per head. Every failing job is owed one attempt of its own; a

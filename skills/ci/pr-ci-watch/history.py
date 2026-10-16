@@ -64,6 +64,13 @@ def _state(outcome: str, tally: dict | None) -> tuple[str, str] | None:
     # that timestamp is the whole question this panel answers.
     if hit[0] == "ok" and (tally or {}).get("pending"):
         return "warn", "CI running — nothing failing so far"
+    # Cancelled jobs produced no result, so "nothing failed" is true while "CI
+    # passed" is not. #43861 read "CI green — no NVIDIA job failing" with 13
+    # jobs that had never run, which is the one reading this panel must never
+    # give: it is the sentence someone merges on.
+    stuck = (tally or {}).get("cancel")
+    if hit[0] == "ok" and stuck:
+        return "warn", f"CI incomplete — {stuck} job(s) cancelled, never ran"
     return hit
 
 
@@ -100,6 +107,17 @@ def _kind(msg: str) -> tuple[str, str]:
     if m:
         return VERDICT_CLASS.get(m.group(1), "warn"), (
             f"verdict <b>{esc(m.group(1))}</b> &mdash; {esc(m.group(2))}")
+    # Why the sweep stopped, and why a re-run was not the answer. This is the
+    # one place it declines to act on its own, so the reasoning is surfaced
+    # rather than buried — it is what the panel is opened to review.
+    m = re.search(r"triage required :: (.*)", msg)
+    if m:
+        return "bad", f"stopped for triage &mdash; {esc(m.group(1))}"
+    m = re.search(r"auto-triage (\S+) :: (.*)", msg)
+    if m:
+        return VERDICT_CLASS.get(m.group(1), "warn"), (
+            f"auto-triage from #17050 &rarr; <b>{esc(m.group(1))}</b> "
+            f"&mdash; {esc(m.group(2))}")
     m = re.search(r"rerun (\d+) group\(s\) :: (.*)", msg)
     if m:
         return "warn", (f"re-ran {esc(m.group(1))} workflow(s) "

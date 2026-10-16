@@ -39,7 +39,12 @@ ISSUE_17050 = "sgl-project/sglang#17050"
 # Ceiling on attempts per workflow per head SHA. The budget is per *job*, so a
 # run that keeps turning up new red jobs legitimately keeps earning re-runs —
 # this is the backstop that stops "new job every time" from meaning "forever".
-MAX_RERUNS_PER_HEAD = 3
+MAX_RERUNS_PER_HEAD = 6
+# Re-runs a failing job gets before triage may even be considered. Counted in
+# re-runs, not total runs: a job is owed two fresh attempts after the run that
+# first failed it. The only exception is a #17050 row saying main itself is
+# broken, which can stop immediately — re-running that cannot clear it.
+MIN_RERUNS_BEFORE_TRIAGE = 2
 
 # --- scope -----------------------------------------------------------------
 # NVIDIA/generic CI only. Decided per *workflow*, not per job name: the user's
@@ -378,28 +383,113 @@ def real_jobs(g: dict) -> set[str]:
     return (set(g.get("jobs") or []) - set(g.get("watcher_jobs") or [])) - {""}
 
 
-def attempted_jobs(s: dict, wf: str, sha: str) -> set[str]:
-    """Real jobs that have already had a re-run fired for them on this head."""
+def job_attempts(s: dict, wf: str, sha: str) -> dict[str, int]:
+    """How many re-runs each job has had of its own on this head.
+
+    A count, not a membership test. Membership was enough while the policy was
+    "one re-run then triage"; it cannot express "two re-runs then triage",
+    because the first re-run put the job in the set and the second could never
+    be owed. #44672 stopped after a single attempt for exactly that reason.
+    """
     rec = (s.get("reruns") or {}).get(wf)
     if not rec or rec.get("sha") != sha:
-        return set()
-    seen = set(rec.get("seen") or [])
-    # Older records predate `seen` and only carry the one `sig` they fired for.
-    return (seen | (set((rec.get("sig") or "").split("|")) - {""}))
+        return {}
+    out = dict(rec.get("attempts") or {})
+    # Records written before `attempts` existed carry a `seen` list and/or the
+    # `sig` of the one run they fired for. Each such job had exactly one
+    # attempt — counting it as 0 would hand out a free extra re-run, counting
+    # it as 2 would deny the one it is still owed.
+    for job in (set(rec.get("seen") or [])
+                | (set((rec.get("sig") or "").split("|")) - {""})):
+        out.setdefault(job, 1)
+    return out
+
+
+def jobs_owed_rerun(s: dict, wf: str, g: dict, sha: str) -> list[str]:
+    """Failing real jobs that have not yet had their full re-run allowance."""
+    att = job_attempts(s, wf, sha)
+    return sorted(j for j in real_jobs(g)
+                  if att.get(j, 0) < MIN_RERUNS_BEFORE_TRIAGE)
 
 
 def repeat_jobs_after_rerun(s: dict, wf: str, g: dict, sha: str) -> list[str]:
-    """Real jobs that we re-ran on this head and that failed again anyway.
+    """Real jobs that have spent their allowance and are still failing.
 
     Membership is per *job*, not per workflow. #43103 is why: it was re-run for
     `base-b-test-2-gpu-large (0)`, that job cleared, and a different job —
     `base-b-test-1-gpu-large (0)` — went red. The only thing both runs shared
     was the watcher, so a workflow-level test called it "the SAME failure after
     1 re-run" and sent a brand-new failure straight to triage without ever
-    giving it the one re-run the policy promises every failure.
+    giving it the re-runs the policy promises every failure.
     """
-    attempted = attempted_jobs(s, wf, sha) - set(g.get("watcher_jobs") or [])
-    return sorted(attempted & real_jobs(g))
+    att = job_attempts(s, wf, sha)
+    watchers = set(g.get("watcher_jobs") or [])
+    return sorted(j for j in real_jobs(g) - watchers
+                  if att.get(j, 0) >= MIN_RERUNS_BEFORE_TRIAGE)
+
+
+def kf_table() -> dict | None:
+    """#17050 parsed, or None if it cannot be read. Never raises."""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "ci-analysis"))
+        import known_failure as kf  # noqa: PLC0415
+        return kf.parse(kf.fetch())
+    except Exception:
+        return None
+
+
+def triage_from_17050(groups: dict) -> tuple[str | None, str]:
+    """Decide a verdict from #17050 alone, with no log read and no Claude turn.
+
+    Most of what reaches triage is already answered by main's own schedule, and
+    asking it costs one cached HTTP call. Only a failure #17050 has never seen
+    genuinely needs someone to read a log.
+
+    Returns `(action, reason)`; action is None when the issue says nothing
+    useful and a real triage pass is required.
+    """
+    table = kf_table()
+    if table is None:
+        return None, f"{ISSUE_17050} could not be read"
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "ci-analysis"))
+        import known_failure as kf  # noqa: PLC0415
+    except Exception as e:
+        return None, f"{ISSUE_17050} lookup unavailable ({e!r})"
+
+    jobs = [j for w, g in groups.items() if not g.get("gate_only")
+            for j in sorted(real_jobs(g))]
+    if not jobs:
+        return None, "no in-scope failing job to look up"
+
+    verdicts, unknown = {}, []
+    for job in jobs:
+        rec = kf.match_job(table, job)
+        if rec is None:
+            unknown.append(job)
+            continue
+        verdicts[job] = kf.verdict(rec, rec["test"])
+    # One broken-on-main job is enough to block the PR, and no number of
+    # re-runs clears it — so it wins over any flake sitting beside it.
+    for job, (act, why) in verdicts.items():
+        if act == "wait-upstream":
+            return "wait-upstream", f"{job}: {why}"
+    if unknown:
+        return None, (f"{len(unknown)} failing job(s) not in {ISSUE_17050} "
+                      f"({', '.join(j.split('/')[-1].strip() for j in unknown[:3])})"
+                      f" — needs a log read")
+    # Everything red is a measured flake on main. #17050 is positive evidence
+    # the PR did not cause it, so keep re-running rather than asking a human to
+    # repeat that conclusion.
+    if verdicts and all(act == "re-run" for act, _ in verdicts.values()):
+        return "re-run", "; ".join(why for _, why in verdicts.values())
+    # `merge-main?` — main fixed it on a date. Real, but it is the one verdict
+    # that needs a human: the fix has to be confirmed against this branch.
+    fixed = [f"{job}: {why}" for job, (act, why) in verdicts.items()
+             if act == "merge-main?"]
+    if fixed:
+        return "merge-main", "; ".join(fixed)
+    return None, "no decisive answer"
 
 
 def upstream_backed(groups: dict) -> tuple[bool, str]:
@@ -1360,14 +1450,22 @@ def cmd_sweep(a) -> None:
         # of the out-of-scope branch because that branch's premise — "nothing
         # here to re-run" — is exactly what a cancelled run disproves.
         #
-        # Bounded to one attempt per head SHA. A cancel is often the
-        # concurrency group doing its job, and a sweep that re-runs every time
-        # it sees one can cancel-and-retry in a loop.
+        # Bounded by MAX_RERUNS_PER_HEAD and nothing tighter. It used to be one
+        # attempt per head, which is wrong twice over: a cancelled job produced
+        # no result, so it never *spent* an attempt, and a workflow that had
+        # already re-run something else was then barred from ever running the
+        # cancelled work. #43861 is the worked example — `reruns.count == 1`
+        # emptied this dict, control fell through to the `not real` branch, and
+        # a PR with 13 jobs that never ran was reported as CI green.
         cancelled_now = {
             w: g for w, g in (cancelled or {}).items()
-            if g.get("run_id") and not rerun_count(s, w, sha)
+            if g.get("run_id") and rerun_count(s, w, sha) < MAX_RERUNS_PER_HEAD
         }
-        if cancelled_now and not tally.get("pending") and not real:
+        # No `not real` condition either: a run can hold both cancelled jobs
+        # and genuine failures, and one re-run covers both. Requiring the
+        # absence of failures meant the cancelled half was silently dropped
+        # whenever anything else was red.
+        if cancelled_now and not tally.get("pending"):
             s["cancelled_groups"] = cancelled_now
             s["last_action"] = "re-run"
             s["last_verdict"] = (
@@ -1391,12 +1489,20 @@ def cmd_sweep(a) -> None:
             # ran). There is nothing here to re-run and nothing for /ci-analysis
             # to decide — spending a triage pass on it just burns time.
             s["last_action"] = "out-of-scope"
+            # Never call this green while jobs are sitting cancelled. They
+            # produced no result, so "nothing failed" is true and "CI passed"
+            # is not; #43861 printed the second while 13 jobs had never run.
+            stuck = tally.get("cancel") or 0
             s["last_verdict"] = (
                 "no in-scope NVIDIA job failed; only aggregation gates are red"
+                + (f" — but {stuck} job(s) are cancelled and never ran, and the "
+                   f"re-run ceiling ({MAX_RERUNS_PER_HEAD}) is reached"
+                   if stuck else "")
             )
             s["verdict_at"] = now()
             print("        -> out-of-scope: nothing in NVIDIA scope to act on; "
-                  "no triage needed")
+                  "no triage needed"
+                  + (f" (NOTE: {stuck} cancelled job(s) never ran)" if stuck else ""))
             row["outcome"] = "out-of-scope"
             report.append(row)
             continue
@@ -1500,17 +1606,20 @@ def cmd_sweep(a) -> None:
         for w, g in groups.items():
             if g.get("gate_only") or rerun_count(s, w, sha) >= MAX_RERUNS_PER_HEAD:
                 continue
-            fresh = real_jobs(g) - attempted_jobs(s, w, sha)
-            if not rerun_count(s, w, sha) or fresh:
+            owed = jobs_owed_rerun(s, w, g, sha)
+            if owed:
                 unspent.append(w)
-                fresh_jobs.extend(sorted(fresh))
+                fresh_jobs.extend(owed)
         if unspent:
             s["last_action"] = "re-run"
             detail = (f"{', '.join(fresh_jobs[:3])}"
                       + (" …" if len(fresh_jobs) > 3 else "")) or ", ".join(unspent)
+            att = {w: job_attempts(s, w, sha) for w in unspent}
+            used = max((att[w].get(j, 0) for w in unspent for j in fresh_jobs),
+                       default=0)
             s["last_verdict"] = (
-                f"not yet re-run on this head ({detail}) — re-running once "
-                f"before triage, per policy"
+                f"{detail} — re-run {used + 1} of {MIN_RERUNS_BEFORE_TRIAGE} "
+                f"allowed before triage, per policy"
             )
             s["verdict_at"] = now()
             if not auto_on(meta, "rerun"):
@@ -1518,8 +1627,9 @@ def cmd_sweep(a) -> None:
                 row["outcome"] = "auto-off:rerun"
                 report.append(row)
                 continue
-            print(f"        -> re-run: {detail} has not had its own attempt on "
-                  f"this head; no triage until a job repeats")
+            print(f"        -> re-run: {detail} (attempt {used + 1} of "
+                  f"{MIN_RERUNS_BEFORE_TRIAGE}); no triage until the allowance "
+                  f"is spent")
             row["outcome"] = "auto-re-run-first"
             rerun.append(pr)
             report.append(row)
@@ -1541,7 +1651,71 @@ def cmd_sweep(a) -> None:
             report.append(row)
             continue
 
+        # Every re-run this failure was entitled to has been spent and it is
+        # still red. Record *why* in the audit log, not just that it happened:
+        # this is the one place the sweep declines to act on its own, so the
+        # reasoning has to survive into `▸ history` for review after the fact.
+        att = {w: job_attempts(s, w, sha) for w in groups}
+        why = []
+        for w, g in groups.items():
+            if g.get("gate_only"):
+                continue
+            for j in sorted(real_jobs(g)):
+                n = att[w].get(j, 0)
+                why.append(f"{j} failed again after {n} re-run(s)"
+                           if n else f"{j} (no attempt recorded)")
+            if rerun_count(s, w, sha) >= MAX_RERUNS_PER_HEAD:
+                why.append(f"{w} hit the {MAX_RERUNS_PER_HEAD}-re-run ceiling "
+                           f"for this head")
+        spent = "; ".join(why) or "real in-scope failure"
+        # Triage itself, rather than queueing a request for someone to do it.
+        # #17050 answers most of these outright, and a verdict we can reach
+        # mechanically should never sit waiting for a button.
+        auto_action, auto_why = triage_from_17050(groups)
+        if auto_action == "re-run":
+            # A measured flake on main. The allowance is spent, but #17050 is
+            # positive evidence this is not the PR's doing, so keep going to
+            # the ceiling instead of stopping.
+            if any(rerun_count(s, w, sha) < MAX_RERUNS_PER_HEAD for w in groups):
+                s["last_action"] = "re-run"
+                s["last_verdict"] = f"known flake on main — {auto_why}"
+                s["verdict_at"] = now()
+                log_line(f"#{pr} auto-triage re-run :: {auto_why}")
+                print(f"        -> re-run (auto-triage): {auto_why}")
+                row["outcome"] = "auto-triage-re-run"
+                rerun.append(pr)
+                report.append(row)
+                continue
+            auto_action, auto_why = None, (
+                f"known flake on main but the {MAX_RERUNS_PER_HEAD}-re-run "
+                f"ceiling is reached — {auto_why}")
+        if auto_action in ("wait-upstream", "merge-main"):
+            # `merge-main` is recorded, never acted on: updating the branch is
+            # the one step the user asked to keep manual, so the dashboard's
+            # Update branch button stays the only way it happens.
+            s["last_action"] = auto_action
+            s["verdict_action"] = auto_action
+            s["verdict_sha"] = sha
+            s["verdict_fingerprint"] = failure_fingerprint(groups)
+            s["last_verdict"] = auto_why
+            s["verdict_at"] = now()
+            log_line(f"#{pr} auto-triage {auto_action} :: {auto_why}")
+            note = (" — press Update branch to apply"
+                    if auto_action == "merge-main" else "")
+            print(f"        -> {auto_action} (auto-triage): {auto_why}{note}")
+            row["outcome"] = f"auto-triage:{auto_action}"
+            report.append(row)
+            continue
+
+        # Nothing mechanical decided it: a log has to be read, which needs a
+        # Claude turn. This is not a state to sit in — the sweep's caller runs
+        # /ci-analysis for these before the turn ends.
+        reason = f"{spent} :: {auto_why}"
         s["last_action"] = "awaiting-triage"
+        s["last_verdict"] = reason
+        s["verdict_at"] = now()
+        log_line(f"#{pr} triage required :: {reason}")
+        print(f"        -> triage NOW (needs a log read): {reason}")
         row["outcome"] = "needs-triage"
         row["groups"] = groups
         triage.append(pr)
@@ -1811,14 +1985,20 @@ def cmd_apply_verdict(a) -> None:
             # repeat detection on #35151 and left it unable to ever escalate.
             sig = g.get("sig") or "|".join(
                 sorted(set((g.get("jobs") or []) + (g.get("cancelled_jobs") or []))))
-            # `seen` accumulates across attempts; `sig` only ever describes the
-            # latest one. Without the union, a job re-run two attempts ago
-            # looks untouched today and earns a second attempt it already had.
-            seen = sorted(attempted_jobs(s, wf, sha)
-                          | real_jobs(g)
-                          | set(g.get("cancelled_jobs") or []))
+            # `attempts` accumulates per job across re-runs; `sig` only ever
+            # describes the latest one. Without the carry-over, a job re-run
+            # two attempts ago looks untouched today and earns an allowance it
+            # already spent.
+            #
+            # Cancelled jobs are deliberately NOT counted. A cancel produces no
+            # result, so re-running one is not an attempt at anything — charging
+            # it as one is how #43861 ran out of budget without a single job
+            # having actually reported.
+            attempts = job_attempts(s, wf, sha)
+            for j in real_jobs(g):
+                attempts[j] = attempts.get(j, 0) + 1
             reruns[wf] = {"sha": sha, "count": used + 1, "at": now(),
-                          "sig": sig, "seen": seen}
+                          "sig": sig, "attempts": attempts}
             # The POST landed, so any note about a previous refusal is now a
             # lie the dashboard would keep showing.
             (s.get("rerun_deferred") or {}).pop(wf, None)
