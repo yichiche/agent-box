@@ -975,8 +975,10 @@ python3 watch.py arm-status --record "high=23 */2 * * *, regular=17 9 * * *"
 > - They **only fire while the REPL is idle**. If the session is mid-task at
 >   `:23`, that sweep is late, not lost.
 >
-> A headless crontab variant would dodge both, but it cannot run `/ci-analysis`,
-> which is the entire gate on re-running. That trade is why it is not the default.
+> A headless crontab variant dodges both. `cron-sweep.sh` (pure Python) cannot
+> run `/ci-analysis`; **`cron-claude-sweep.sh` can**, because it runs the sweep
+> inside a headless `claude -p` turn. That is the durable path — see
+> *Scheduling that does not expire* below.
 
 `cron-sweep.sh` is that headless variant, available as a belt-and-braces Phase A
 from the host crontab. **It must set its own `PATH`**: cron hands a job
@@ -1003,6 +1005,35 @@ scheduler for a track means its expiry is a silent outage. Install both:
 Thirty minutes behind the Claude job at `:23`, so it is a fallback rather than a
 duplicate — the tracks take separate `cron-<track>.lock` files, so the two never
 collide. A missing `cron-high.lock` in the log dir means it has never run.
+
+## Scheduling that does not expire
+
+`CronCreate`'s **7-day cap is enforced by the runtime and cannot be raised** —
+not to a month, not at all. A schedule that must outlive a week has to live in
+the host crontab, which has no expiry and no idle-REPL requirement.
+
+| Layer | Schedule | Phase | Expires? |
+|---|---|---|---|
+| `cron-claude-sweep.sh high` | `23 */2` | **A+B** — re-runs *and* `/ci-analysis` triage | **never** |
+| `cron-claude-sweep.sh regular` | `17 9` | A+B | **never** |
+| `cron-sweep.sh high` | `53 */2` | A only — safety net | never |
+| `cron-sweep.sh regular` | `0 * * * *` gated to 07:00 Taipei | A only | never |
+| Claude `CronCreate` | `23 */2`, `17 9` | A+B | **7 days** — bridge only |
+
+Install with `~/agent-scratch/pr-ci-watch/install-claude-cron.sh`, **on the
+host** (containers have no `crontab`). It resolves `claude` itself and carries
+the directory into the crontab line when it is somewhere cron's bare
+`/usr/bin:/bin` would miss.
+
+Keep the pure-Python `cron-sweep.sh` lines installed alongside. If Claude auth
+breaks, CI is still re-run and conflict notices still go out; losing triage is
+much better than losing re-runs too.
+
+`claude -p` inherits `permissions.allow` from `agent-box/setting.json`, which
+already grants `Bash` — so the unattended turn needs no
+`--dangerously-skip-permissions` and no settings change. The prompt carries the
+two standing rules explicitly: never run `update-branch`, and never record
+`wait-upstream` without a #17050 row or a confirmed repeat.
 
 **So does triage happen on its own? Yes.** The schedule is a Claude cron job,
 not a shell script, so the scheduled sweep runs Phase B in the same turn and
