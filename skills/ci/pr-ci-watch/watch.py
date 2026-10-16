@@ -532,6 +532,26 @@ def triage_from_17050(groups: dict) -> tuple[str | None, str]:
     return None, "no decisive answer"
 
 
+def wait_upstream_allowed(s: dict, groups: dict, sha: str) -> tuple[bool, str]:
+    """May `wait-upstream` be recorded or kept? The two doors, in one place.
+
+    Recording and revalidating used to ask different questions: the gate in
+    `cmd_apply_verdict` honoured both doors, while the sweep's revalidation
+    only checked #17050. So a verdict legitimately recorded on a confirmed
+    repeat was revoked by the very next sweep and the PR bounced back into
+    triage forever — #44672 did exactly that. One function, both callers.
+    """
+    ok, why = upstream_backed(groups)
+    if ok:
+        return True, why
+    repeats = [j for w, g in groups.items()
+               for j in repeat_jobs_after_rerun(s, w, g, sha)]
+    if repeats:
+        return True, (f"confirmed repeat: {', '.join(repeats[:3])} failed again "
+                      f"after its re-runs, so triage may call it upstream")
+    return False, why
+
+
 def upstream_backed(groups: dict) -> tuple[bool, str]:
     """May these failures be called `wait-upstream` on #17050's authority alone?
 
@@ -1591,7 +1611,7 @@ def cmd_sweep(a) -> None:
         # was 100%-fail when we judged may now carry a flake rate, which means
         # a re-run can clear it after all.
         if held and judged_action == "wait-upstream":
-            ok, why = upstream_backed(groups)
+            ok, why = wait_upstream_allowed(s, groups, sha)
             if not ok and not s.get("upstream_forced"):
                 held = False
                 s.pop("verdict_action", None)
@@ -1879,20 +1899,14 @@ def cmd_apply_verdict(a) -> None:
     # Before either, "upstream" is a guess, and the cost of guessing wrong is a
     # PR parked for days on a flake a single re-run would have cleared.
     if a.action == "wait-upstream":
-        ok, why = upstream_backed(groups)
-        repeat = any(repeat_jobs_after_rerun(s, w, g, sha)
-                     for w, g in groups.items())
+        ok, why = wait_upstream_allowed(s, groups, sha)
         if getattr(a, "force_upstream", False):
             s["upstream_forced"] = True
             print(f"#{pr}  wait-upstream FORCED past the {ISSUE_17050} gate")
             log_line(f"#{pr} wait-upstream FORCED (gate said: {why}) :: {a.summary}")
         elif ok:
             s.pop("upstream_forced", None)
-            print(f"#{pr}  wait-upstream backed by {ISSUE_17050}: {why}")
-        elif repeat:
-            s.pop("upstream_forced", None)
-            print(f"#{pr}  wait-upstream on a confirmed repeat: the same job "
-                  f"failed again after a re-run, so triage may call it upstream")
+            print(f"#{pr}  wait-upstream allowed — {why}")
         else:
             # Refused, and deliberately not silent about what to do instead.
             # The two refusals are different situations and must not read the
