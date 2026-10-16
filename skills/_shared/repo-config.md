@@ -172,6 +172,7 @@ The draft file is pure HackMD markdown — **no YAML frontmatter**. It contains 
 
 - If a `commit-msg` hook exists and enforces tags: use the hook's format.
 - If no hook: use `[AMD]` as the default prefix.
+- SGLang (no hook): use the repo's own order, `[<Tag>] [AMD] <area>: <Description>`, e.g. `[Fix] [AMD] diffusion: Keep gfx1250 FlyDSL BF16 attention out of torch.compile`. `<Tag>` is `Fix`, `Perf`, or `Feat`; the change-kind tag comes first.
 
 ## Commit Message Format
 

@@ -20,7 +20,7 @@ interactive flow; only the "ask the user" gates are replaced by CONFIG values.
 - `worktree` — run all git/gh commands from here (`cd "$worktree"` or `git -C "$worktree"`).
 - `repo` — base repo for the PR (e.g. `sgl-project/sglang`).
 - `base` — PR base branch (e.g. `main`).
-- `commit_subject` — exact commit subject (already `[AMD] …` formatted).
+- `commit_subject` — exact commit subject (already `[<Tag>] [AMD] <area>: …` formatted).
 - `pr_title` — exact PR title.
 - `pr_body_file` — path to a file with the full PR body (already composed; use VERBATIM).
 - `update_pr` — optional PR number; if set, UPDATE that PR's body instead of creating a new one.
@@ -250,10 +250,10 @@ Otherwise classify the diff, then name the problem the PR solves. A reviewer sho
    - **Bug fix** — crash, wrong result, or a correctness failure such as a residency error. Tag `[Fix]`.
    - **Perf** — same behavior, faster: overlap, prefetch, kernel time, throughput, or latency. Tag `[Perf]`.
    - **Feature** — new behavior. Tag `[Feat]`.
-2. Shape: `[AMD] [<Tag>] <what was broken or missing, and the outcome>`.
-   - Fix: `[AMD] [Fix] Prevent ComponentResidencyError after compile warmup with explicit DiT layerwise offload`
-   - Perf: `[AMD] [Perf] Apply model-default prefetch to explicit DiT layerwise offload`
-   - Feature that exists only for one model on one device: `[AMD] [Feat] <feature> for <model> on <device>`
+2. Shape: `[<Tag>] [AMD] <area>: <what was broken or missing, and the outcome>`. This is SGLang's own subject convention (check `git log origin/main --format=%s -20`): change-kind tag first, then `[AMD]`, then a lowercase area such as `diffusion`, `attention`, `moe`, `docker`. Use the same string as the commit subject.
+   - Fix: `[Fix] [AMD] diffusion: Prevent ComponentResidencyError after compile warmup with explicit DiT layerwise offload`
+   - Perf: `[Perf] [AMD] diffusion: Apply model-default prefetch to explicit DiT layerwise offload`
+   - Feature that exists only for one model on one device: `[Feat] [AMD] <area>: <feature> for <model> on <device>`
 3. Put a model or device in the title only when the code change is limited to that model or device. When they are only the case that reproduced a general bug or perf gap, leave them out of the title and name them in Motivation and Reproduction.
 4. Name the subsystem the diff actually changes. A nearby flag in the repro is not the problem: a prefetch-default fix is not a torch.compile warmup fix just because the failing run also compiled.
 5. One line. State the problem completely. Do not cut the failure or the outcome to fit a character budget.
@@ -265,7 +265,7 @@ Show this title in the Step 8 summary so the user approves it with the draft.
 ### Determine the file name
 
 Follow the naming convention in `_shared/repo-config.md`:
-1. Remove `[AMD]` tag, the change-kind tag (`[Fix]`, `[Perf]`, `[Feat]`), and any series prefix (e.g., `amd/deepseek_v4 integration NN/N`) from the PR title
+1. Remove `[AMD]` tag, the change-kind tag (`[Fix]`, `[Perf]`, `[Feat]`), the `<area>:` prefix, and any series prefix (e.g., `amd/deepseek_v4 integration NN/N`) from the PR title
 2. Take the remaining descriptive part
 3. Lowercase, replace spaces with hyphens, remove special characters
 4. File path: `$HOME/pr-drafts/pr-draft-<slug>.md`
