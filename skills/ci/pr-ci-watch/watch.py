@@ -383,6 +383,41 @@ def real_jobs(g: dict) -> set[str]:
     return (set(g.get("jobs") or []) - set(g.get("watcher_jobs") or [])) - {""}
 
 
+# Jobs whose result is a property of the PR's metadata, not of a test run.
+# Re-running them is always wasted CI — the same title, or the same base
+# commit, gives the same answer every time. They also block the whole suite,
+# so surfacing them on the first sweep is what actually gets the PR moving.
+# #34502 and #43969 both burned their full allowance on these before anyone
+# was told the real problem was a malformed title.
+NON_RERUNNABLE = (
+    (re.compile(r"check\s*pr\s*title|validate\s*pr\s*title", re.I), "code-fix",
+     "the PR title does not match the required `[Type] scope: title` format "
+     "(Type must be one of Feat, Fix, Refactor, Perf, Doc, Test, CI, Chore) — "
+     "only renaming the PR clears this; a re-run never will"),
+    (re.compile(r"check-maintenance", re.I), "merge-main",
+     "CI refuses to start any test job until the branch is rebased onto the "
+     "latest main"),
+)
+
+
+def deterministic_blockers(groups: dict) -> list[tuple[str, str, str]]:
+    """(job, action, reason) for failing jobs that a re-run cannot ever fix."""
+    out = []
+    for w, g in groups.items():
+        if g.get("gate_only"):
+            continue
+        for job in sorted(real_jobs(g)):
+            for pat, action, why in NON_RERUNNABLE:
+                if pat.search(job):
+                    out.append((job, action, why))
+                    break
+    return out
+
+
+def _is_deterministic(job: str) -> bool:
+    return any(pat.search(job) for pat, _, _ in NON_RERUNNABLE)
+
+
 def job_attempts(s: dict, wf: str, sha: str) -> dict[str, int]:
     """How many re-runs each job has had of its own on this head.
 
@@ -406,10 +441,15 @@ def job_attempts(s: dict, wf: str, sha: str) -> dict[str, int]:
 
 
 def jobs_owed_rerun(s: dict, wf: str, g: dict, sha: str) -> list[str]:
-    """Failing real jobs that have not yet had their full re-run allowance."""
+    """Failing real jobs that have not yet had their full re-run allowance.
+
+    Deterministic jobs are excluded: they are not owed anything, because the
+    answer cannot change until a human edits the PR.
+    """
     att = job_attempts(s, wf, sha)
     return sorted(j for j in real_jobs(g)
-                  if att.get(j, 0) < MIN_RERUNS_BEFORE_TRIAGE)
+                  if not _is_deterministic(j)
+                  and att.get(j, 0) < MIN_RERUNS_BEFORE_TRIAGE)
 
 
 def repeat_jobs_after_rerun(s: dict, wf: str, g: dict, sha: str) -> list[str]:
@@ -1575,6 +1615,30 @@ def cmd_sweep(a) -> None:
             report.append(row)
             continue
 
+        # Blockers a re-run can never clear — a malformed PR title, a base that
+        # CI refuses to run against. Checked first, ahead of even the in-flight
+        # guard: whatever is running cannot fix a title, so waiting to say so
+        # only delays the one action that helps. `code-fix` wins over
+        # `merge-main` when both are present, because a rebase does not fix a
+        # title but the title has to be fixed either way.
+        blockers = deterministic_blockers(groups)
+        if blockers:
+            action = ("code-fix" if any(b[1] == "code-fix" for b in blockers)
+                      else "merge-main")
+            detail = "; ".join(f"{j.split('/')[-1].strip()}: {why}"
+                               for j, _, why in blockers)
+            s["last_action"] = action
+            s["verdict_action"] = action
+            s["verdict_sha"] = sha
+            s["verdict_fingerprint"] = failure_fingerprint(groups)
+            s["last_verdict"] = detail
+            s["verdict_at"] = now()
+            log_line(f"#{pr} auto-triage {action} (not re-runnable) :: {detail}")
+            print(f"        -> {action}: not re-runnable — {detail}")
+            row["outcome"] = f"auto-triage:{action}"
+            report.append(row)
+            continue
+
         # A re-run we fired for this head is still going. The red sitting in
         # `groups` is the attempt that re-run replaces, not a result: triaging
         # it would spend a Claude turn on a failure that may already be fixed,
@@ -1592,6 +1656,12 @@ def cmd_sweep(a) -> None:
             report.append(row)
             continue
 
+        # Blockers a re-run can never clear — a malformed PR title, a base that
+        # CI refuses to run against. Reported on the first sweep rather than
+        # after the allowance is burned: only a human can clear either, so the
+        # sooner it is said the sooner the PR moves. `code-fix` wins over
+        # `merge-main` when both are present, because a rebase does not fix a
+        # title but the title has to be fixed either way.
         # Policy: every real failure is re-run once before anyone is asked to
         # think about it. A triage pass costs a Claude turn and a wait, and the
         # large majority of these clear on the second run — so the re-run is

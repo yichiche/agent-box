@@ -848,6 +848,18 @@ someone clicks". The only verdict that waits for a human is **`merge-main`** —
 it is recorded, and the dashboard's **Update branch** button is the only thing
 that applies it.
 
+### Jobs a re-run can never fix
+
+`NON_RERUNNABLE` marks jobs whose result is a property of the PR's *metadata*,
+not of a test run — `Check PR title`, `check-maintenance`. The same title, or
+the same base commit, gives the same answer every time, so these are checked
+**before even the in-flight guard**, never consume the re-run allowance, and
+are recorded immediately as `code-fix` (title) or `merge-main` (rebase).
+`code-fix` wins when both are present: a rebase does not fix a title.
+
+#34502, #43969 and #40771 each burned their full allowance on a malformed PR
+title before anyone was told the actual problem.
+
 ### Attempt counting
 
 | Constant | Value | Meaning |
