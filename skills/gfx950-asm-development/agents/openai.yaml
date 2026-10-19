@@ -1,0 +1,4 @@
+interface:
+  display_name: "gfx950 ASM Development"
+  short_description: "Develop gfx950 assembly and profile kernel performance"
+  default_prompt: "Use $gfx950-asm-development to implement or improve an assembly kernel, validate correctness, and measure the result."

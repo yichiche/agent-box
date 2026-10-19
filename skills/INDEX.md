@@ -40,6 +40,7 @@
 |-------|------|
 | [`/implement-kernel`](implement-kernel/SKILL.md) | Design → implement → validate → commit a kernel change (MI355/ROCm) |
 | [`/optimize-moe-kernel`](optimize-moe-kernel/SKILL.md) | Diagnose and optimize routed MoE pipelines across shapes, EP imbalance, stages, and dtypes |
+| [`/gfx950-asm-development`](gfx950-asm-development/SKILL.md) | Write, build, validate, and tune hand-written gfx950 `.s` kernels (HIP code-object load, rocprofv3 counters) |
 | `kernel-fusion-pipeline` | Orchestration scripts only — **no SKILL.md yet**, not a registered slash command |
 
 ## measure — benchmark & profile
