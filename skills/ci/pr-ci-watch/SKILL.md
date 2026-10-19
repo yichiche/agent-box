@@ -917,6 +917,27 @@ back red across completely unrelated failures. Counting it turns "something
 failed again" into "the same thing failed again" — a different claim, and
 usually a false one.
 
+### Every verdict states its #17050 status
+
+`issue_17050_status()` runs on **every** `apply-verdict`, decisive or not, and
+is stored as `issue_17050` plus appended to the summary the dashboard shows:
+
+```
+#17050: YES — base-b-test-1-gpu-large (1) -> test_multi_lora_backend.py
+               (0% flake on main, since 2026-10-07)
+#17050: NO  — no ONGOING row names multimodal-gen-test-1-5090
+#17050: n/a — no in-scope failing job to look up
+```
+
+Always present, because a summary that simply does not mention #17050 is
+ambiguous between "nobody checked" and "checked, and it said nothing" — and a
+`wait-upstream` read weeks later is exactly where that ambiguity costs you.
+
+Matched by **job name** against the ONGOING table, the same lookup the gate
+uses. A test-file match can say more (#44671's `test_server_1_gpu_5090.py` has
+a FIXED row the job-name lookup never sees), but the sweep only knows job
+names, so the recorded line never claims more than it checked.
+
 ### `wait-upstream` is gated
 
 It is the only verdict that parks a PR on someone else's authority, so it has

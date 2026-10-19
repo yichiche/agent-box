@@ -532,6 +532,49 @@ def triage_from_17050(groups: dict) -> tuple[str | None, str]:
     return None, "no decisive answer"
 
 
+def issue_17050_status(groups: dict) -> str:
+    """One line saying whether #17050 knows about these failures — always.
+
+    Recorded on *every* verdict, not only the ones it decided. Someone reading
+    a `wait-upstream` weeks later needs to know whether the tracking issue
+    backed it, and a summary that simply does not mention #17050 is ambiguous
+    between "nobody checked" and "checked, and it said nothing". A yes/no that
+    is always present removes that ambiguity.
+
+    Matched by **job name** against the ONGOING table — the same lookup the
+    gate uses. A test-file match can say more, but the sweep only ever knows
+    job names, so claiming more here would be inventing it.
+    """
+    table = kf_table()
+    if table is None:
+        return f"#17050: UNAVAILABLE — could not read {ISSUE_17050} at verdict time"
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "ci-analysis"))
+        import known_failure as kf  # noqa: PLC0415
+    except Exception:
+        return f"#17050: UNAVAILABLE — lookup module not importable"
+    jobs = [j for w, g in groups.items() if not g.get("gate_only")
+            for j in sorted(real_jobs(g))]
+    if not jobs:
+        return "#17050: n/a — no in-scope failing job to look up"
+    hits = []
+    for job in jobs:
+        rec = kf.match_job(table, job)
+        if rec is None:
+            continue
+        pct = rec.get("fail_pct")
+        how = ("100% fail on main — broken, not flaky" if pct is not None and pct >= 100
+               else f"{pct}% flake on main" if pct is not None
+               else "open item, no flake rate recorded")
+        hits.append(f"{job.split('/')[-1].strip()} -> {rec['test']} ({how}, "
+                    f"since {rec['date']})")
+    short = ", ".join(j.split("/")[-1].strip() for j in jobs[:3])
+    if not hits:
+        return (f"#17050: NO — no ONGOING row names {short}"
+                f"{' …' if len(jobs) > 3 else ''}")
+    return "#17050: YES — " + "; ".join(hits)
+
+
 def wait_upstream_allowed(s: dict, groups: dict, sha: str) -> tuple[bool, str]:
     """May `wait-upstream` be recorded or kept? The two doors, in one place.
 
@@ -1958,7 +2001,14 @@ def cmd_apply_verdict(a) -> None:
                 f"first: {posture}. Record `re-run` instead, or pass "
                 f"--force-upstream if you are certain.")
 
-    s["last_verdict"] = a.summary
+    # Every verdict carries the tracking-issue answer, decisive or not, so the
+    # dashboard never shows a stop reason whose #17050 status has to be guessed.
+    status = issue_17050_status(groups)
+    s["issue_17050"] = status
+    summary = a.summary
+    if "17050" not in summary:
+        summary = f"{summary}  [{status}]"
+    s["last_verdict"] = summary
     s["last_action"] = a.action
     s["verdict_at"] = now()
     s["verdict_sha"] = sha
