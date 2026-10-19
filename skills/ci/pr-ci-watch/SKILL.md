@@ -814,6 +814,22 @@ The internal verdicts map onto those columns as:
 > outward-facing action stays in the sweep, which runs under a Claude turn. The
 > web layer never needs credentials.
 
+## Conflict notices
+
+Two rules on the one thing this tool says to a third party:
+
+- **Marked machine-written.** Every notice opens with **(auto-generated)** and
+  closes with a `<sub>` footer saying an agent posted it. A notification
+  preview shows only the first line and a later reader sees the footer, so
+  neither has to guess whether a person wrote it.
+- **Never on your own PR.** `self_login()` resolves the account this tool posts
+  as (`gh api user`, override with `PR_CI_WATCH_SELF_LOGIN`). When the PR
+  author matches, the comment is skipped and the outcome is `conflict-self`.
+  The conflict is still recorded and still shows as **Solve conflict** on the
+  dashboard — only the public @-mention is suppressed, because being
+  @-mentioned on your own PR by your own tooling tells you nothing the
+  dashboard has not.
+
 ## The re-run policy
 
 **Default is re-run. Stopping is the thing that has to be justified.**

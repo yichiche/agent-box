@@ -1000,13 +1000,41 @@ def cmd_list(a) -> None:
 
 
 def conflict_comment(author: str, sha: str, branch: str) -> str:
+    # Marked as machine-written, at the top and again at the bottom. Someone
+    # scanning a notification sees only the first line, and someone reading the
+    # thread later sees the footer; a reader in either position should never
+    # have to guess whether a person wrote this.
     return (
-        f"@{author} heads-up — this PR now conflicts with `main` "
-        f"(`mergeStateStatus: DIRTY`) as of `{sha[:8]}`, so CI cannot run to "
-        f"completion.\n\n"
+        f"**(auto-generated)** @{author} heads-up — this PR now conflicts with "
+        f"`main` (`mergeStateStatus: DIRTY`) as of `{sha[:8]}`, so CI cannot "
+        f"run to completion.\n\n"
         f"Could you merge or rebase `main` into `{branch}`? Happy to help if the "
-        f"conflict lands in AMD/ROCm code."
+        f"conflict lands in AMD/ROCm code.\n\n"
+        f"<sub>(auto-generated) Posted by a CI-watch agent when a watched PR "
+        f"starts conflicting with `main` — one notice per head commit, and none "
+        f"once the conflict clears.</sub>"
     )
+
+
+_SELF_LOGIN: str | None = None
+
+
+def self_login() -> str:
+    """The GitHub account this tool posts as.
+
+    A conflict notice addressed to that account is the tool talking to itself
+    on its owner's own PR page — public noise that tells the owner nothing the
+    dashboard has not already told them.
+    """
+    global _SELF_LOGIN
+    if _SELF_LOGIN is None:
+        env = os.environ.get("PR_CI_WATCH_SELF_LOGIN")
+        if env:
+            _SELF_LOGIN = env.strip()
+        else:
+            rc, out, _ = gh_try(["api", "user", "-q", ".login"])
+            _SELF_LOGIN = out.strip() if rc == 0 else ""
+    return _SELF_LOGIN
 
 
 def pr_snapshot(pr: str, repo: str) -> dict:
@@ -1332,6 +1360,13 @@ def cmd_sweep(a) -> None:
             elif not author:
                 print(f"#{pr}  CONFLICTING — no author login resolved, skipping comment")
                 row["outcome"] = "conflict-no-author"
+            elif author.lower() == (self_login() or "\0").lower():
+                # Own PR: the conflict is still real and still shows as `Solve
+                # conflict` on the dashboard — only the public comment is
+                # skipped. Nobody needs to be @-mentioned on their own PR by
+                # their own tooling.
+                print(f"#{pr}  CONFLICTING — own PR (@{author}), not commenting")
+                row["outcome"] = "conflict-self"
             else:
                 body = conflict_comment(author, sha, snap.get("headRefName", "?"))
                 if a.apply:
