@@ -917,6 +917,42 @@ back red across completely unrelated failures. Counting it turns "something
 failed again" into "the same thing failed again" — a different claim, and
 usually a false one.
 
+### Staleness and peer-job health
+
+Two signals added 2026-10-19, after both were missing from a wrong verdict.
+
+**`peer_job_health(job, repo)`** — samples recent `PR Test Base` runs and asks
+whether this job is passing on *other people's* PRs. Cached 30 min; ~100s cold,
+so it only runs when a PR would otherwise need a log read.
+
+**`staleness_verdict()`** — records `merge-main` when two things hold together:
+the PR is at least `STALE_BEHIND` (100) commits behind, **and** the job it
+fails is currently green for fresher branches. "Behind" alone is normal and
+proves nothing; the pair is what implicates the base.
+
+**`wait_upstream_allowed()` now refuses when peers pass.** A job green on other
+PRs is not blocked upstream — it is failing *here*. Checked before the
+confirmed-repeat door, because a repeat only proves a failure is persistent,
+never that it is someone else's: three straight failures on a stale base repeat
+just as reliably as a broken runner does.
+
+#### Why (#44671 / #44672, 2026-10-19)
+
+Both were called `wait-upstream` on file scope alone — neither PR touched
+NVIDIA code, so the NVIDIA 5090 failure "could not" be theirs. The reasoning
+was incomplete: **CI tests the diff on top of the branch's base**, so a stale
+base is itself a variable. Sampling showed `multimodal-gen-test-1-5090` passing
+at 2, 64 and 64 commits behind while failing at 165 and 233. Main had landed
+diffusion perf work after both merge-bases — `Defer full GC collections while
+importing the runtime` (#44606), three `[Perf] diffusion` fusions, and
+`Z-Image: Synchronize device after warmup request` (#44306), the last matching
+a failing case exactly. `perf_baselines/5090.json` was unchanged since 09-21,
+so the thresholds never moved; the branches simply lacked the speedups those
+thresholds now assume.
+
+Both were corrected to `merge-main`, updated, and went green. A 2-5% latency
+miss is the signature of a missing startup speedup, not of a broken runner.
+
 ### Every verdict states its #17050 status
 
 `issue_17050_status()` runs on **every** `apply-verdict`, decisive or not, and

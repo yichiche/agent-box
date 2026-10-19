@@ -532,6 +532,114 @@ def triage_from_17050(groups: dict) -> tuple[str | None, str]:
     return None, "no decisive answer"
 
 
+# How far behind `main` counts as "stale enough that the base is a suspect".
+# Calibrated on 2026-10-19: the 5090 job passed at 5, 28 and 55 commits behind
+# and failed at 158 and 226.
+STALE_BEHIND = 100
+# Recent PR Test Base runs to sample when asking "does this job pass for anyone
+# else right now". Enough to find a handful that actually ran the job.
+PEER_SAMPLE_RUNS = 90
+PEER_TTL = 1800  # seconds; a job's health does not change minute to minute
+
+
+def repo_of(s: dict) -> str:
+    """The repo a state entry belongs to, from its stored URL."""
+    m = re.search(r"github\.com/([^/]+/[^/]+)/pull/", s.get("url") or "")
+    return m.group(1) if m else REPO_DEFAULT
+
+
+def peer_job_health(job: str, repo: str) -> dict:
+    """How is this job doing on *other people's* PRs right now?
+
+    The signal that was missing on 2026-10-19. #44671 and #44672 were called
+    `wait-upstream` — "blocked on an upstream fix" — purely because neither PR
+    touched NVIDIA code. But file scope only argues the *diff* is innocent; CI
+    tests the diff **on top of the branch's base**, so a stale base is itself a
+    variable. One sample of recent runs showed the same job passing on PRs 5,
+    28 and 55 commits behind while failing on those two at 158 and 226. The
+    job was never broadly broken, and `wait-upstream` was the wrong call.
+
+    Returns {'pass': n, 'fail': n, 'cancelled': n, 'behind_ok': [ints],
+             'checked': bool}. Never raises — a lookup failure reports
+    `checked: False`, which keeps every caller on its pre-existing behaviour.
+    """
+    cache = DATA_DIR / "peer-health.json"
+    key = job.split("/")[-1].strip().lower()
+    try:
+        blob = json.loads(cache.read_text()) if cache.is_file() else {}
+    except Exception:
+        blob = {}
+    hit = blob.get(key)
+    if hit and time.time() - hit.get("at", 0) < PEER_TTL:
+        return hit["val"]
+
+    out = {"pass": 0, "fail": 0, "cancelled": 0, "behind_ok": [], "checked": False}
+    rc, wf, _ = gh_try(["api", f"repos/{repo}/actions/workflows?per_page=100",
+                        "-q", '.workflows[]|select(.name=="PR Test Base")|.id'])
+    if rc != 0 or not wf.strip():
+        return out
+    rc, runs, _ = gh_try([
+        "api", f"repos/{repo}/actions/workflows/{wf.strip()}/runs"
+               f"?per_page={PEER_SAMPLE_RUNS}",
+        "-q", '.workflow_runs[]|"\\(.id)|\\(.head_sha)"'])
+    if rc != 0:
+        return out
+    for line in runs.splitlines():
+        rid, _, head = line.partition("|")
+        if not rid.strip():
+            continue
+        rc, got, _ = gh_try([
+            "api", f"repos/{repo}/actions/runs/{rid.strip()}/jobs?per_page=100",
+            "-q", f'[.jobs[]|select(.name|test("{key}";"i"))|'
+                  f'(.conclusion // "running")][0] // empty'])
+        concl = got.strip() if rc == 0 else ""
+        if concl in ("success", "failure", "cancelled"):
+            out["checked"] = True
+            out["pass" if concl == "success" else
+                "fail" if concl == "failure" else "cancelled"] += 1
+            if concl == "success" and head.strip():
+                rc, b, _ = gh_try(["api", f"repos/{repo}/compare/main...{head.strip()}",
+                                   "-q", ".behind_by"])
+                if rc == 0 and b.strip().isdigit():
+                    out["behind_ok"].append(int(b.strip()))
+        if out["pass"] + out["fail"] >= 6:
+            break
+    blob[key] = {"at": time.time(), "val": out}
+    try:
+        cache.write_text(json.dumps(blob))
+    except Exception:
+        pass
+    return out
+
+
+def staleness_verdict(s: dict, groups: dict, repo: str) -> tuple[str | None, str]:
+    """`merge-main` when the base is the likeliest suspect, with the evidence.
+
+    Two things have to be true together. The PR is materially behind `main`,
+    *and* the job it fails is currently passing for other people — because
+    "behind" on its own is normal and proves nothing.
+    """
+    behind = s.get("behind_by")
+    if not isinstance(behind, int) or behind < STALE_BEHIND:
+        return None, ""
+    jobs = [j for w, g in groups.items() if not g.get("gate_only")
+            for j in sorted(real_jobs(g)) if not _is_deterministic(j)]
+    for job in jobs[:2]:  # two lookups at most; each costs several API calls
+        h = peer_job_health(job, repo)
+        if not h.get("checked") or h["pass"] < 2:
+            continue
+        fresher = [b for b in h["behind_ok"] if b < behind]
+        if len(fresher) < 2:
+            continue
+        return "merge-main", (
+            f"{job.split('/')[-1].strip()} is passing on fresher branches "
+            f"({', '.join(str(b) for b in sorted(fresher)[:3])} commits behind) "
+            f"while this PR is {behind} behind — {h['pass']} pass / {h['fail']} "
+            f"fail across sampled PRs, so the job is not broadly broken and the "
+            f"stale base is the likeliest cause")
+    return None, ""
+
+
 def issue_17050_status(groups: dict) -> str:
     """One line saying whether #17050 knows about these failures — always.
 
@@ -587,6 +695,22 @@ def wait_upstream_allowed(s: dict, groups: dict, sha: str) -> tuple[bool, str]:
     ok, why = upstream_backed(groups)
     if ok:
         return True, why
+    # A job that is green on other people's PRs is not "blocked upstream" — it
+    # is failing *here*. Checked before the repeat door, because a repeat only
+    # proves the failure is persistent, never that it is someone else's: three
+    # straight failures on a stale base repeat just as reliably as a broken
+    # runner does. This is the check whose absence let #44671/#44672 sit on a
+    # wrong `wait-upstream` while the same job passed elsewhere.
+    for w, g in groups.items():
+        if g.get("gate_only"):
+            continue
+        for job in sorted(real_jobs(g))[:1]:
+            h = peer_job_health(job, repo_of(s))
+            if h.get("checked") and h["pass"] >= 2 and h["pass"] > h["fail"]:
+                return False, (
+                    f"{job.split('/')[-1].strip()} is passing on other PRs "
+                    f"({h['pass']} pass / {h['fail']} fail sampled) — it is not "
+                    f"blocked upstream, it is failing on this branch")
     repeats = [j for w, g in groups.items()
                for j in repeat_jobs_after_rerun(s, w, g, sha)]
     if repeats:
@@ -1840,6 +1964,13 @@ def cmd_sweep(a) -> None:
         # #17050 answers most of these outright, and a verdict we can reach
         # mechanically should never sit waiting for a button.
         auto_action, auto_why = triage_from_17050(groups)
+        if auto_action is None:
+            # #17050 said nothing. Before conceding that a log has to be read,
+            # ask the two questions that settled #44671/#44672: how far behind
+            # is this branch, and is the job it fails green for anyone else?
+            stale_action, stale_why = staleness_verdict(s, groups, repo)
+            if stale_action:
+                auto_action, auto_why = stale_action, stale_why
         if auto_action == "re-run":
             # A measured flake on main. The allowance is spent, but #17050 is
             # positive evidence this is not the PR's doing, so keep going to
