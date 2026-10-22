@@ -284,9 +284,13 @@ The draft file is **pure HackMD markdown** — no YAML frontmatter. It contains 
 
 ### Motivation
 
-`## Motivation` is these three blocks, in this order. Bold each label. Put its paragraph on the next line. Do not insert a blank line between the label and its paragraph. Put one blank line between blocks. Each paragraph is one unwrapped line.
+Pick the Motivation shape from the change kind already chosen for the title. Bold each label. Put its paragraph on the next line. Do not insert a blank line between the label and its paragraph. Put one blank line between blocks. Each paragraph is one unwrapped line. A later paragraph inside the same block (a run link, a scope note, merge history) is its own unwrapped line, separated from the first paragraph by one blank line.
 
-- **What goes wrong** — the concrete failure. Name the call, the state it leaves, and the error or the missing overlap.
+#### Bug fix (`[Fix]`) only
+
+Use **What goes wrong**, **Where it shows up**, and **How to fix** only when the PR is a bug fix. A feature or a perf change does not use these three labels.
+
+- **What goes wrong** — the concrete failure. Name the call, the state it leaves, and the error.
 - **Where it shows up** — say whether every device on this path can hit it. Name the run that shows it, and the run that does not, when those differ. A model or device that only reproduced a general bug goes here, not in the title.
 - **How to fix** — one sentence. The call to make or skip, and what that leaves enabled.
 
@@ -299,6 +303,23 @@ The `disable_offload()` call is shared, so any device that compiles with explici
 
 **How to fix**
 Call `disable_offload()` only when the user did not ask for layerwise offload, so a compile-only window still restores GPU residency and an explicit request stays enabled.
+```
+
+#### Feature (`[Feat]`) and perf (`[Perf]`)
+
+`## Motivation` is two blocks, in this order. Same label and paragraph rules as above.
+
+- **What** — one sentence. Say what this PR does and, in that same sentence, the problem it solves. Name the concrete symbol, test, or path. A following paragraph may add scope ("test-only, no runtime changes") or a run link when that evidence exists.
+- **Why** — the root cause. Why the problem exists, and why this change addresses it. A later paragraph may record history a reviewer needs (an upstream fix already on main, a merge that dropped a hunk).
+
+```markdown
+**What**
+Skip `test_attention_backend_dispatch_and_repeated_forward[*-FA]` on ROCm so the scheduled AMD run (multimodal-gen-test-1-gpu-amd) no longer fails when FA is not in the image.
+
+Failing run: https://github.com/sgl-project/sglang/actions/runs/38563492873/job/115850314797
+
+**Why**
+On ROCm the FA backend resolves to Torch SDPA (FA3 is CUDA-only, and flash_attn is not in the image), so the "must not silently fall back" assert fails. The test already skips FA on SM12.x for the same reason; this adds the same skip for ROCm.
 ```
 
 Fill in all template sections with concrete content. Insert the user-confirmed accuracy and benchmark tables from Step 6b and 6c into the appropriate sections.
