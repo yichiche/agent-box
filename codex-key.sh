@@ -1,25 +1,10 @@
 #!/usr/bin/env bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/env.sh"
+source "${SCRIPT_DIR}/gateway-key.sh"
 
-KEY_FILE="${HOST_HOME}/.codex_api_key"
-
-if [ -f "$KEY_FILE" ]; then
-  CODEX_KEY=$(cat "$KEY_FILE")
-else
-  echo ""
-  echo "============================================"
-  echo "  Codex setup: AMD LLM Gateway key required"
-  echo "============================================"
-  read -rp "Enter your AMD LLM Gateway API key: " CODEX_KEY
-  if [ -z "$CODEX_KEY" ]; then
-    echo "[codex] Error: API key cannot be empty."
-    exit 1
-  fi
-  echo "$CODEX_KEY" > "$KEY_FILE"
-  chmod 600 "$KEY_FILE"
-  echo "[codex] API key saved to $KEY_FILE"
-fi
+gateway_key_ensure "${HOST_HOME}/.codex_api_key" || exit 1
+CODEX_KEY="$GATEWAY_KEY"
 
 apt-get update
 curl -fsSL https://deb.nodesource.com/setup_22.x | bash -

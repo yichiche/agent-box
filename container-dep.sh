@@ -30,6 +30,9 @@ run_step() {
 }
 
 # Steps (echo '' feeds the one prompt in claude-code.sh)
+# Gateway key first: Claude and Codex share one AMD LLM Gateway subscription.
+# Either ~/.claude_api_key or ~/.codex_api_key satisfies both later steps.
+step_gateway_key() { bash "$DIR/gateway-key.sh" --ensure; }
 step_claude_code() { echo '' | bash "$DIR/claude-code.sh"; }
 step_claude_key()  { bash "$DIR/skills/abox-live/claude-container-auth.sh"; }
 step_gh()          { bash "$DIR/gh-setup.sh"; }
@@ -39,6 +42,7 @@ step_pip_extras()  { pip install openpyxl; }
 step_skills()      { bash "$DIR/skills/sync-to-agents.sh"; }
 
 # Order
+run_step "AMD gateway key"            step_gateway_key
 run_step "claude-code CLI + plugins"  step_claude_code
 run_step "claude-code API key/config" step_claude_key
 run_step "codex + AMD gateway proxy"  step_codex

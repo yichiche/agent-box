@@ -37,5 +37,9 @@ echo "=== 2/2 wire container-local API-key auth ==="
 bash "${SCRIPT_DIR}/skills/abox-live/claude-container-auth.sh"
 
 echo
-echo "Done. Restart any running 'claude' session so it picks up CLAUDE_CONFIG_DIR."
+if [[ "$(id -u)" -eq 0 ]]; then
+  echo "Done. Restart any running 'claude' session so it picks up CLAUDE_CONFIG_DIR."
+else
+  echo "Done. Gateway key files are ready. Container env is applied by container-dep.sh as root."
+fi
 echo "Host subscription login: run '/login' on the HOST (not in container) when you need Remote Control."
